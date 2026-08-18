@@ -1,0 +1,58 @@
+"""Validated data contracts shared by every stage of the workflow."""
+
+from typing import Literal
+
+from pydantic import BaseModel, Field, HttpUrl
+
+
+class ResearchIdea(BaseModel):
+    """The research problem provided by a user."""
+
+    title: str = Field(min_length=3, description="A short name for the idea.")
+    description: str = Field(
+        min_length=20,
+        description="The problem, proposed approach, and intended setting.",
+    )
+    keywords: list[str] = Field(min_length=1)
+    research_questions: list[str] = Field(default_factory=list)
+
+
+class Paper(BaseModel):
+    """Metadata and available evidence for one candidate paper."""
+
+    paper_id: str = Field(description="A stable identifier, such as an arXiv ID or DOI.")
+    title: str = Field(min_length=1)
+    authors: list[str] = Field(min_length=1)
+    year: int = Field(ge=1900, le=2100)
+    abstract: str = Field(min_length=20)
+    url: HttpUrl
+    venue: str | None = None
+
+
+class PaperAssessment(BaseModel):
+    """Why a paper is or is not useful for the current idea."""
+
+    paper_id: str
+    relevance_score: int = Field(ge=1, le=5)
+    evidence_quality_score: int = Field(ge=1, le=5)
+    recommendation: Literal["include", "consider", "exclude"]
+    rationale: str = Field(min_length=20)
+
+
+class FutureDirection(BaseModel):
+    """A proposed next step with links back to supporting papers."""
+
+    title: str = Field(min_length=3)
+    rationale: str = Field(min_length=20)
+    supporting_paper_ids: list[str] = Field(min_length=1)
+
+
+class LiteratureReviewReport(BaseModel):
+    """The final, human-readable and agent-readable output of Task 1A."""
+
+    idea: ResearchIdea
+    papers: list[Paper] = Field(min_length=1)
+    assessments: list[PaperAssessment] = Field(min_length=1)
+    synthesis: str = Field(min_length=20)
+    future_directions: list[FutureDirection] = Field(min_length=1)
+    limitations: list[str] = Field(default_factory=list)

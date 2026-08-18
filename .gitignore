@@ -1,0 +1,12 @@
+# Python runtime files
+__pycache__/
+*.py[cod]
+.venv/
+
+# Secrets: never commit API keys
+.env
+
+# Local editor and observability files
+.vscode/
+.langfuse/
+
