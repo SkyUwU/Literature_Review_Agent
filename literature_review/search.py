@@ -3,15 +3,18 @@
 import argparse
 import json
 import sys
+import time
 from collections.abc import Callable
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
-from literature_review.models import Paper, SearchRequest, SearchResponse
+from literature_review.models import FilterPolicy, Paper, SearchRequest, SearchResponse
+from literature_review.ranking import filter_and_rank
 
 OPENALEX_SEARCH_URL = "https://api.openalex.org/works"
+USER_AGENT = "LiteratureReviewAgent/0.1 (academic-project)"
 REQUESTED_FIELDS = (
     "id,title,authorships,publication_year,abstract_inverted_index,"
     "primary_location,cited_by_count"
@@ -44,17 +47,23 @@ def build_search_url(request: SearchRequest) -> str:
 
 def fetch_json(url: str) -> dict[str, Any]:
     """Fetch JSON with a timeout and turn network failures into domain errors."""
-    try:
-        with urlopen(url, timeout=20) as response:  # noqa: S310 - fixed HTTPS provider URL
-            return json.load(response)
-    except HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace").strip()
-        if detail:
-            detail = detail[:500]
-            raise PaperSearchError(f"OpenAlex returned HTTP {error.code}: {detail}") from error
-        raise PaperSearchError(f"OpenAlex returned HTTP {error.code}.") from error
-    except URLError as error:
-        raise PaperSearchError("Could not connect to OpenAlex.") from error
+    for attempt in range(3):
+        try:
+            request = Request(url, headers={"User-Agent": USER_AGENT})
+            with urlopen(request, timeout=20) as response:  # noqa: S310 - fixed HTTPS provider URL
+                return json.load(response)
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace").strip()
+            if detail:
+                detail = detail[:500]
+                raise PaperSearchError(f"OpenAlex returned HTTP {error.code}: {detail}") from error
+            raise PaperSearchError(f"OpenAlex returned HTTP {error.code}.") from error
+        except URLError as error:
+            if attempt == 2:
+                raise PaperSearchError(f"Could not connect to OpenAlex: {error.reason}") from error
+            time.sleep(2**attempt)
+
+    raise AssertionError("The retry loop must return or raise.")
 
 
 def reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str | None:
@@ -116,6 +125,8 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--year-from", type=int)
     parser.add_argument("--year-to", type=int)
+    parser.add_argument("--rank", action="store_true", help="Filter and rank the retrieved papers")
+    parser.add_argument("--min-citations", type=int, default=0)
     arguments = parser.parse_args()
 
     request = SearchRequest(
@@ -129,6 +140,17 @@ def main() -> None:
     except PaperSearchError as error:
         print(f"Search failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
+    if arguments.rank:
+        ranked_response = filter_and_rank(
+            response,
+            FilterPolicy(
+                min_year=arguments.year_from,
+                max_year=arguments.year_to,
+                min_citation_count=arguments.min_citations,
+            ),
+        )
+        print(ranked_response.model_dump_json(indent=2))
+        return
     print(response.model_dump_json(indent=2))
 
 

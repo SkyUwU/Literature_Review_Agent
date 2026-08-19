@@ -28,3 +28,9 @@ python -m literature_review.demo
 ```powershell
 uv run python -m literature_review.search "literature review agent" --limit 5 --year-from 2024
 ```
+
+Add `--rank` to apply the current transparent baseline ranking:
+
+```powershell
+uv run python -m literature_review.search "literature review agent" --limit 10 --year-from 2024 --rank
+```

@@ -49,6 +49,32 @@ class SearchResponse(BaseModel):
     skipped_candidates: int = Field(ge=0)
 
 
+class FilterPolicy(BaseModel):
+    """Transparent rules for excluding unsuitable search candidates."""
+
+    min_year: int | None = Field(default=None, ge=1900, le=2100)
+    max_year: int | None = Field(default=None, ge=1900, le=2100)
+    min_citation_count: int = Field(default=0, ge=0)
+
+
+class RankedPaper(BaseModel):
+    """A candidate paper with a reproducible baseline-ranking explanation."""
+
+    paper: Paper
+    rank: int = Field(ge=1)
+    score: float = Field(ge=0)
+    matched_terms: list[str]
+    rationale: str
+
+
+class RankedSearchResponse(BaseModel):
+    """The filtered and ranked view of one search response."""
+
+    search_response: SearchResponse
+    filter_policy: FilterPolicy
+    ranked_papers: list[RankedPaper]
+
+
 class PaperAssessment(BaseModel):
     """Why a paper is or is not useful for the current idea."""
 
