@@ -107,6 +107,39 @@ class SelectedPaperSet(BaseModel):
     selected_papers: list[RankedPaper]
 
 
+class PageText(BaseModel):
+    """Text extracted from one numbered page of a paper."""
+
+    page_number: int = Field(ge=1)
+    text: str = Field(min_length=20)
+
+
+class FullTextDocument(BaseModel):
+    """Extracted paper text, retained with its local source and page numbers."""
+
+    paper_id: str
+    source_path: str = Field(min_length=1)
+    pages: list[PageText] = Field(min_length=1)
+    extraction_method: str = Field(min_length=3)
+
+
+class ChunkPolicy(BaseModel):
+    """Reproducible settings for splitting full text into evidence units."""
+
+    max_words: int = Field(default=250, ge=50, le=1_000)
+    overlap_words: int = Field(default=30, ge=0, le=500)
+
+
+class EvidenceChunk(BaseModel):
+    """A page-bounded excerpt available for relevance ranking and citation."""
+
+    chunk_id: str
+    paper_id: str
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    text: str = Field(min_length=20)
+
+
 class PaperAssessment(BaseModel):
     """Why a paper is or is not useful for the current idea."""
 
