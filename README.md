@@ -40,3 +40,9 @@ Select a bounded reading set (this still uses metadata and abstracts only):
 ```powershell
 uv run python -m literature_review.search "literature review agent" --limit 20 --year-from 2024 --top-k 5 --min-score 3
 ```
+
+Create an initial metadata-and-abstract assessment. It is a reading-priority recommendation, not a full-text review:
+
+```powershell
+uv run python -m literature_review.search "literature review agent" --limit 20 --year-from 2024 --top-k 5 --assess
+```

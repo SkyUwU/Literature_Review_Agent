@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from literature_review.models import (
+    AssessmentPolicy,
     FilterPolicy,
     Paper,
     SearchRequest,
@@ -19,6 +20,7 @@ from literature_review.models import (
 )
 from literature_review.ranking import filter_and_rank
 from literature_review.selection import select_papers
+from literature_review.assessment import assess_selected_papers
 
 OPENALEX_SEARCH_URL = "https://api.openalex.org/works"
 USER_AGENT = "LiteratureReviewAgent/0.1 (academic-project)"
@@ -136,6 +138,7 @@ def main() -> None:
     parser.add_argument("--min-citations", type=int, default=0)
     parser.add_argument("--top-k", type=int, help="Select the top K ranked papers for reading")
     parser.add_argument("--min-score", type=float, help="Minimum ranking score for selection")
+    parser.add_argument("--assess", action="store_true", help="Create metadata-only assessments for selected papers")
     arguments = parser.parse_args()
 
     request = SearchRequest(
@@ -149,7 +152,12 @@ def main() -> None:
     except PaperSearchError as error:
         print(f"Search failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
-    should_rank = arguments.rank or arguments.top_k is not None or arguments.min_score is not None
+    should_rank = (
+        arguments.rank
+        or arguments.top_k is not None
+        or arguments.min_score is not None
+        or arguments.assess
+    )
     if should_rank:
         ranked_response = filter_and_rank(
             response,
@@ -159,7 +167,7 @@ def main() -> None:
                 min_citation_count=arguments.min_citations,
             ),
         )
-        if arguments.top_k is not None or arguments.min_score is not None:
+        if arguments.top_k is not None or arguments.min_score is not None or arguments.assess:
             selected_response = select_papers(
                 ranked_response,
                 SelectionPolicy(
@@ -167,6 +175,10 @@ def main() -> None:
                     min_score=arguments.min_score,
                 ),
             )
+            if arguments.assess:
+                assessed_response = assess_selected_papers(selected_response, AssessmentPolicy())
+                print(assessed_response.model_dump_json(indent=2))
+                return
             print(selected_response.model_dump_json(indent=2))
             return
         print(ranked_response.model_dump_json(indent=2))

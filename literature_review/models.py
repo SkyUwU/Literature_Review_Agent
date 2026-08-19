@@ -100,6 +100,23 @@ class PaperAssessment(BaseModel):
     rationale: str = Field(min_length=20)
 
 
+class AssessmentPolicy(BaseModel):
+    """Explainable thresholds for a metadata-only paper assessment."""
+
+    include_relevance_score: int = Field(default=4, ge=1, le=5)
+    include_evidence_quality_score: int = Field(default=3, ge=1, le=5)
+    consider_relevance_score: int = Field(default=3, ge=1, le=5)
+
+
+class AssessmentResponse(BaseModel):
+    """Initial assessments that retain the selected-paper provenance."""
+
+    selected_paper_set: SelectedPaperSet
+    assessment_policy: AssessmentPolicy
+    assessments: list[PaperAssessment]
+    limitations: list[str]
+
+
 class FutureDirection(BaseModel):
     """A proposed next step with links back to supporting papers."""
 
