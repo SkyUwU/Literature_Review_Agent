@@ -1,4 +1,4 @@
-"""Search scholarly papers through the Semantic Scholar Academic Graph API."""
+"""Search scholarly papers through the OpenAlex API."""
 
 import argparse
 import json
@@ -10,8 +10,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from literature_review.models import FilterPolicy, Paper, SearchRequest, SearchResponse
+from literature_review.models import (
+    FilterPolicy,
+    Paper,
+    SearchRequest,
+    SearchResponse,
+    SelectionPolicy,
+)
 from literature_review.ranking import filter_and_rank
+from literature_review.selection import select_papers
 
 OPENALEX_SEARCH_URL = "https://api.openalex.org/works"
 USER_AGENT = "LiteratureReviewAgent/0.1 (academic-project)"
@@ -127,6 +134,8 @@ def main() -> None:
     parser.add_argument("--year-to", type=int)
     parser.add_argument("--rank", action="store_true", help="Filter and rank the retrieved papers")
     parser.add_argument("--min-citations", type=int, default=0)
+    parser.add_argument("--top-k", type=int, help="Select the top K ranked papers for reading")
+    parser.add_argument("--min-score", type=float, help="Minimum ranking score for selection")
     arguments = parser.parse_args()
 
     request = SearchRequest(
@@ -140,7 +149,8 @@ def main() -> None:
     except PaperSearchError as error:
         print(f"Search failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
-    if arguments.rank:
+    should_rank = arguments.rank or arguments.top_k is not None or arguments.min_score is not None
+    if should_rank:
         ranked_response = filter_and_rank(
             response,
             FilterPolicy(
@@ -149,6 +159,16 @@ def main() -> None:
                 min_citation_count=arguments.min_citations,
             ),
         )
+        if arguments.top_k is not None or arguments.min_score is not None:
+            selected_response = select_papers(
+                ranked_response,
+                SelectionPolicy(
+                    max_papers=arguments.top_k or 5,
+                    min_score=arguments.min_score,
+                ),
+            )
+            print(selected_response.model_dump_json(indent=2))
+            return
         print(ranked_response.model_dump_json(indent=2))
         return
     print(response.model_dump_json(indent=2))

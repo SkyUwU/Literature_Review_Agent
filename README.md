@@ -13,7 +13,7 @@ The goal is to turn a research idea into a traceable literature-review report:
 
 The first milestone defines validated data models. It intentionally does not call an LLM or a paper-search API yet.
 
-The second milestone searches the OpenAlex API without requiring an API key. Papers without an abstract or author metadata are skipped because the later summarization stage needs source evidence.
+The second milestone searches the OpenAlex API without requiring an API key. Papers without an abstract or author metadata are skipped because the later summarization stage needs source evidence. The third milestone filters, ranks, and selects a small reading set while preserving the full search provenance.
 
 ## Run the demo
 
@@ -33,4 +33,10 @@ Add `--rank` to apply the current transparent baseline ranking:
 
 ```powershell
 uv run python -m literature_review.search "literature review agent" --limit 10 --year-from 2024 --rank
+```
+
+Select a bounded reading set (this still uses metadata and abstracts only):
+
+```powershell
+uv run python -m literature_review.search "literature review agent" --limit 20 --year-from 2024 --top-k 5 --min-score 3
 ```

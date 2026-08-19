@@ -75,6 +75,21 @@ class RankedSearchResponse(BaseModel):
     ranked_papers: list[RankedPaper]
 
 
+class SelectionPolicy(BaseModel):
+    """Explicit rules for choosing papers to pass to the reading stage."""
+
+    max_papers: int = Field(default=5, ge=1, le=50)
+    min_score: float | None = Field(default=None, ge=0)
+
+
+class SelectedPaperSet(BaseModel):
+    """Ranked papers selected as input for later reading and synthesis."""
+
+    ranked_search_response: RankedSearchResponse
+    selection_policy: SelectionPolicy
+    selected_papers: list[RankedPaper]
+
+
 class PaperAssessment(BaseModel):
     """Why a paper is or is not useful for the current idea."""
 
