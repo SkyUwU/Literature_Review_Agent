@@ -3,7 +3,7 @@ import unittest
 from pydantic import ValidationError
 
 from literature_review.demo import build_demo_report
-from literature_review.models import PaperAssessment
+from literature_review.models import PaperAssessment, SearchRequest
 
 
 class ModelTests(unittest.TestCase):
@@ -20,6 +20,10 @@ class ModelTests(unittest.TestCase):
                 recommendation="include",
                 rationale="This rationale is intentionally long enough to validate.",
             )
+
+    def test_search_limit_must_be_positive(self) -> None:
+        with self.assertRaises(ValidationError):
+            SearchRequest(query="literature review", limit=0)
 
 
 if __name__ == "__main__":

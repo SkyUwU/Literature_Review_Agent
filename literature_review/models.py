@@ -27,6 +27,26 @@ class Paper(BaseModel):
     abstract: str = Field(min_length=20)
     url: HttpUrl
     venue: str | None = None
+    citation_count: int | None = Field(default=None, ge=0)
+
+
+class SearchRequest(BaseModel):
+    """Search constraints supplied to one scholarly-paper provider."""
+
+    query: str = Field(min_length=3)
+    limit: int = Field(default=10, ge=1, le=100)
+    year_from: int | None = Field(default=None, ge=1900, le=2100)
+    year_to: int | None = Field(default=None, ge=1900, le=2100)
+
+
+class SearchResponse(BaseModel):
+    """Normalized results returned by a scholarly-paper provider."""
+
+    provider: str
+    request: SearchRequest
+    total_candidates: int = Field(ge=0)
+    papers: list[Paper]
+    skipped_candidates: int = Field(ge=0)
 
 
 class PaperAssessment(BaseModel):
