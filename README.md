@@ -15,6 +15,8 @@ The first milestone defines validated data models. It intentionally does not cal
 
 The second milestone searches the OpenAlex API without requiring an API key. Papers without an abstract or author metadata are skipped because the later summarization stage needs source evidence. The third milestone filters, ranks, and selects a small reading set while preserving the full search provenance.
 
+Before retrieval, `literature_review.planning.create_rule_based_plan()` creates a traceable `SearchPlan` from a `ResearchIdea`. A future LLM planner will produce the same validated format.
+
 ## Run the demo
 
 After setting up the environment, run:

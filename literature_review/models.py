@@ -17,6 +17,23 @@ class ResearchIdea(BaseModel):
     research_questions: list[str] = Field(default_factory=list)
 
 
+class PlannedQuery(BaseModel):
+    """One search query and the information need it is intended to cover."""
+
+    query: str = Field(min_length=3)
+    purpose: str = Field(min_length=10)
+
+
+class SearchPlan(BaseModel):
+    """A traceable search strategy, authored by rules or later by an LLM."""
+
+    idea: ResearchIdea
+    queries: list[PlannedQuery] = Field(min_length=1, max_length=10)
+    perspectives: list[str] = Field(min_length=1)
+    generated_by: Literal["rule_based", "llm"]
+    rationale: str = Field(min_length=20)
+
+
 class Paper(BaseModel):
     """Metadata and available evidence for one candidate paper."""
 
