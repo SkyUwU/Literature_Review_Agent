@@ -11,7 +11,7 @@
    uv run python -m unittest discover -s tests -v
    ```
 
-As of 2026-08-21, the latest committed milestone is `9abd987 feat: retrieve evidence chunks and improve deduplication`. The working tree also contains an uncommitted LLM interface and handoff documentation. The only expected untracked source PDF is `Summer_Project.pdf`; do not commit it.
+As of 2026-08-21, the latest committed work includes the LLM interface and handoff documentation. The only expected untracked source PDF is `Summer_Project.pdf`; do not commit it.
 
 ## Goal and scope
 
@@ -79,5 +79,5 @@ Suggested sequence after the live LLM step:
 ## Handoff prompt for another coding agent
 
 ```text
-Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDOFF.md first. Inspect git status and preserve user changes. Implement only the “Next milestone: Gemini evidence summarization and re-ranking” described in HANDOFF.md. Do not request or print API keys; use .env/environment variables. Keep Pydantic contracts, add unit tests with a fake client, run the full test suite, and report the exact PowerShell commands for the user to commit. Reply in Traditional Chinese and keep explanations concise.
+Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDOFF.md first. Inspect git status and preserve user changes. Implement only the “Next milestone: wire the LLM stage into a small end-to-end flow” described in HANDOFF.md. Do not request or print API keys; use .env/environment variables. Keep Pydantic contracts, add tests where needed, run the full test suite, and report the exact PowerShell commands for the user to commit. Reply in Traditional Chinese and keep explanations concise.
 ```
