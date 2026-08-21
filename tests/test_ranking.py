@@ -24,7 +24,17 @@ class RankingTests(unittest.TestCase):
             paper("Older Agent", 2020, 100),
         ]
         filtered = filter_papers(papers, FilterPolicy(min_year=2024))
-        self.assertEqual([item.title for item in filtered], ["Literature Review Agent"])
+        self.assertEqual([item.citation_count for item in filtered], [20])
+
+    def test_filter_prefers_duplicate_with_better_metadata(self) -> None:
+        weaker = paper("Literature Review Agent", 2025, 10)
+        stronger = paper("literature review agent", 2024, 10)
+        stronger.venue = "Journal of Test Cases"
+        stronger.abstract = "This is a longer abstract with evidence about literature review agents and retrieval."
+
+        filtered = filter_papers([weaker, stronger], FilterPolicy())
+
+        self.assertEqual(filtered, [stronger])
 
     def test_rank_prefers_query_term_in_title(self) -> None:
         title_match = paper("Literature Review Agent", 2024, 5)

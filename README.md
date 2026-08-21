@@ -19,6 +19,8 @@ Before retrieval, `literature_review.planning.create_rule_based_plan()` creates 
 
 The evidence layer extracts local PDFs with `literature_review.extraction.extract_pdf_text()` and splits the page text into overlapping `EvidenceChunk` objects. Chunks may span consecutive pages and retain their inclusive page range. Store local paper PDFs in `data/papers/`; this directory is intentionally not tracked by Git.
 
+`literature_review.evidence_ranking.retrieve_evidence()` is the first evidence-selection stage. It currently uses an inexpensive lexical baseline to retrieve top-k chunks; a later embedding retriever and LLM contextual-summary stage will use the same data contracts.
+
 ## Run the demo
 
 After setting up the environment, run:

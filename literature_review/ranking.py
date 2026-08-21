@@ -24,23 +24,36 @@ def query_terms(query: str) -> set[str]:
 
 
 def filter_papers(papers: list[Paper], policy: FilterPolicy) -> list[Paper]:
-    """Remove duplicate titles and candidates outside explicit quality constraints."""
-    filtered: list[Paper] = []
-    seen_titles: set[str] = set()
+    """Remove unsuitable papers and retain the best-metadata same-title record."""
+    by_title: dict[str, Paper] = {}
     for paper in papers:
         normalized_title = " ".join(paper.title.lower().split())
         citation_count = paper.citation_count or 0
-        if normalized_title in seen_titles:
-            continue
         if policy.min_year is not None and paper.year < policy.min_year:
             continue
         if policy.max_year is not None and paper.year > policy.max_year:
             continue
         if citation_count < policy.min_citation_count:
             continue
-        seen_titles.add(normalized_title)
-        filtered.append(paper)
-    return filtered
+        current = by_title.get(normalized_title)
+        if current is None or duplicate_preference_key(paper) > duplicate_preference_key(current):
+            by_title[normalized_title] = paper
+    return list(by_title.values())
+
+
+def duplicate_preference_key(paper: Paper) -> tuple[int, bool, int, int]:
+    """Prefer a same-title record with stronger available metadata.
+
+    This is a pragmatic provider-record choice, not proof that two title-equal
+    records are the same scholarly work. Exact DOI-based matching can replace it
+    when DOI metadata is added.
+    """
+    return (
+        paper.citation_count or 0,
+        paper.venue is not None,
+        len(paper.abstract),
+        paper.year,
+    )
 
 
 def rank_papers(papers: list[Paper], query: str) -> list[RankedPaper]:

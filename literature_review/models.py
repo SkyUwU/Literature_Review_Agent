@@ -140,6 +140,30 @@ class EvidenceChunk(BaseModel):
     text: str = Field(min_length=20)
 
 
+class RankedEvidenceChunk(BaseModel):
+    """A retrieved evidence chunk with an explainable first-stage score."""
+
+    chunk: EvidenceChunk
+    rank: int = Field(ge=1)
+    score: float = Field(ge=0)
+    matched_terms: list[str]
+    rationale: str
+
+
+class EvidenceRetrievalPolicy(BaseModel):
+    """Bounded, low-cost retrieval settings before LLM contextual summarization."""
+
+    top_k: int = Field(default=10, ge=1, le=100)
+
+
+class EvidenceRetrievalResponse(BaseModel):
+    """Top evidence chunks for one research question or search query."""
+
+    query: str = Field(min_length=3)
+    policy: EvidenceRetrievalPolicy
+    ranked_chunks: list[RankedEvidenceChunk]
+
+
 class PaperAssessment(BaseModel):
     """Why a paper is or is not useful for the current idea."""
 
