@@ -12,10 +12,10 @@
 
 - Read `HANDOFF.md` before changing this project. Update it when a material milestone or architectural decision changes.
 - Inspect `git status` before editing. Preserve existing user changes and never add `Summer_Project.pdf` or `data/papers/` to Git.
-- Make one bounded milestone at a time. Add or update tests, run them, then state the exact `git add`, `git commit`, and `git status` commands.
+- Make one bounded milestone at a time. Do not combine unrelated refactors, dependencies, or features in one change. Add or update tests, run them, then state the exact `git add`, `git commit`, and `git status` commands.
 - Use Pydantic models as the interfaces between stages. Outputs must preserve source provenance, such as provider, paper ID, file path, and page range.
 - Avoid claiming that an abstract- or metadata-based score is a full-text scholarly assessment.
-- Prefer deterministic, testable baselines before adding LLM/API behavior. Later model-based components must use the same data contracts where practical.
+- Prefer deterministic, testable baselines before adding LLM/API behavior. Later model-based components must use the same data contracts where practical. For LLM JSON, send the Pydantic JSON schema when the provider supports it and still validate the returned text with `model_validate_json()`.
 
 ## Commands
 

@@ -38,7 +38,15 @@ class GeminiJsonClient:
         self._model = model
 
     def generate_json(self, prompt: str) -> str:
-        interaction = self._client.interactions.create(model=self._model, input=prompt)
+        interaction = self._client.interactions.create(
+            model=self._model,
+            input=prompt,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": LlmEvidenceAssessmentBatch.model_json_schema(),
+            },
+        )
         if not interaction.output_text:
             raise LlmEvidenceError("Gemini returned no text output.")
         return interaction.output_text

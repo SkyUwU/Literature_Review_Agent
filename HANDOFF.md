@@ -46,7 +46,7 @@ The current suite has 24 tests. Do not replace tests with only live API checks.
 
 ## Next milestone: wire the LLM stage into a small end-to-end flow
 
-`literature_review.llm_evidence` now contains a provider-agnostic `JsonGenerationClient`, a `GeminiJsonClient`, prompt construction, Pydantic validation, provenance enrichment, and fake-client tests. It has not made a live request.
+`literature_review.llm_evidence` now contains a provider-agnostic `JsonGenerationClient`, a `GeminiJsonClient`, prompt construction, Pydantic-schema structured output, `model_validate_json()` validation, provenance enrichment, and fake-client tests. It has not made a live request.
 
 1. Ask the user to run `uv sync` and confirm that Google AI Studio shows an existing key and quota. Do not ask them to share the key.
 2. The user copies `.env.example` to `.env` and fills in `GEMINI_API_KEY` locally. `.env` is ignored by Git.
