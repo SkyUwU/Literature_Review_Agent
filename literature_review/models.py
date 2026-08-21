@@ -164,6 +164,39 @@ class EvidenceRetrievalResponse(BaseModel):
     ranked_chunks: list[RankedEvidenceChunk]
 
 
+class LlmEvidenceAssessment(BaseModel):
+    """Structured assessment requested from an LLM for one retrieved chunk."""
+
+    chunk_id: str
+    summary: str = Field(min_length=20)
+    relevance_score: int = Field(ge=1, le=5)
+    evidence_quality_score: int = Field(ge=1, le=5)
+    recommendation: Literal["include", "consider", "exclude", "insufficient_evidence"]
+    rationale: str = Field(min_length=20)
+
+
+class LlmEvidenceAssessmentBatch(BaseModel):
+    """The JSON object an LLM must return for one bounded evidence batch."""
+
+    assessments: list[LlmEvidenceAssessment] = Field(min_length=1)
+
+
+class EvidenceSummary(LlmEvidenceAssessment):
+    """LLM assessment enriched with trusted local evidence provenance."""
+
+    paper_id: str
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+
+
+class EvidenceRerankResponse(BaseModel):
+    """Second-stage LLM assessments tied to the first retrieval result."""
+
+    retrieval_response: EvidenceRetrievalResponse
+    summaries: list[EvidenceSummary]
+    limitations: list[str]
+
+
 class PaperAssessment(BaseModel):
     """Why a paper is or is not useful for the current idea."""
 

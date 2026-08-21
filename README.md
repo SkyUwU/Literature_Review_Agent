@@ -21,6 +21,8 @@ The evidence layer extracts local PDFs with `literature_review.extraction.extrac
 
 `literature_review.evidence_ranking.retrieve_evidence()` is the first evidence-selection stage. It currently uses an inexpensive lexical baseline to retrieve top-k chunks; a later embedding retriever and LLM contextual-summary stage will use the same data contracts.
 
+`literature_review.llm_evidence.summarize_and_rerank()` is the second stage. It validates structured LLM assessments and preserves the trusted paper ID and page range from retrieved chunks. Gemini reads `GEMINI_API_KEY` only from the environment; no key is needed for unit tests.
+
 ## Run the demo
 
 After setting up the environment, run:
