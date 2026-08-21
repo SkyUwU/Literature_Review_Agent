@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+data/papers/
 
 # Secrets: never commit API keys
 .env
@@ -9,4 +10,3 @@ __pycache__/
 # Local editor and observability files
 .vscode/
 .langfuse/
-

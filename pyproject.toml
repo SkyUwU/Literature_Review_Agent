@@ -5,8 +5,8 @@ description = "A traceable literature-review workflow for research ideas."
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0",
+    "pypdf>=5.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

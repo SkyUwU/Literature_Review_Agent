@@ -17,7 +17,7 @@ The second milestone searches the OpenAlex API without requiring an API key. Pap
 
 Before retrieval, `literature_review.planning.create_rule_based_plan()` creates a traceable `SearchPlan` from a `ResearchIdea`. A future LLM planner will produce the same validated format.
 
-The evidence layer represents extracted page text as `FullTextDocument` and splits it into page-traceable `EvidenceChunk` objects. PDF extraction is deliberately a separate upcoming step.
+The evidence layer extracts local PDFs with `literature_review.extraction.extract_pdf_text()` and splits the page text into overlapping `EvidenceChunk` objects. Chunks may span consecutive pages and retain their inclusive page range. Store local paper PDFs in `data/papers/`; this directory is intentionally not tracked by Git.
 
 ## Run the demo
 

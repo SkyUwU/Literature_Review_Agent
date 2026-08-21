@@ -32,6 +32,23 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             chunk_document(document, ChunkPolicy(max_words=50, overlap_words=50))
 
+    def test_chunk_can_span_consecutive_pages(self) -> None:
+        document = FullTextDocument(
+            paper_id="paper-1",
+            source_path="papers/paper-1.pdf",
+            extraction_method="test",
+            pages=[
+                PageText(page_number=1, text=" ".join(f"first{i}" for i in range(35))),
+                PageText(page_number=2, text=" ".join(f"second{i}" for i in range(35))),
+            ],
+        )
+
+        chunks = chunk_document(document, ChunkPolicy(max_words=50, overlap_words=10))
+
+        self.assertEqual((chunks[0].page_start, chunks[0].page_end), (1, 2))
+        self.assertIn("first34", chunks[0].text)
+        self.assertIn("second14", chunks[0].text)
+
 
 if __name__ == "__main__":
     unittest.main()
