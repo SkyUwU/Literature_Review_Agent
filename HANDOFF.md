@@ -33,7 +33,7 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | First-stage chunk retrieval | `evidence_ranking.py` | Done; lexical baseline |
 | LLM contextual-summary/re-ranking contract | `llm_evidence.py` | Done; fake-client tested; first live attempt reached output validation |
 
-The current suite has 27 tests. Do not replace tests with only live API checks.
+The current suite has 28 tests. Do not replace tests with only live API checks.
 
 ## Important design decisions
 
@@ -50,7 +50,7 @@ The current suite has 27 tests. Do not replace tests with only live API checks.
 
 `literature_review.pipeline` now provides the opt-in CLI flow: local PDF -> extraction -> chunking -> top-k retrieval -> `summarize_and_rerank`. Its `--dry-run` option performs only the local steps and never reads a key or calls an API.
 
-1. The user has already run the local dry-run successfully and made one live attempt, which reported that the output did not pass the expected Pydantic schema. The parser now accepts a JSON Markdown fence and reports the first validation field without echoing model output.
+1. The user has already run the local dry-run successfully and made two live attempts. The latest model response was syntactically incomplete JSON. The parser accepts a JSON Markdown fence, reports validation fields without echoing model output, and retries exactly once with a bounded JSON-repair prompt only for malformed JSON.
 2. Ask the user to run `uv sync` and confirm that Google AI Studio shows an existing key and quota. Do not ask them to share the key.
 3. The user copies `.env.example` to `.env` and fills in `GEMINI_API_KEY` locally. `.env` is ignored by Git.
 4. Repeat the live smoke test with one PDF and `--top-k 2`. Display only non-secret error details and page-traceable output.
@@ -58,20 +58,18 @@ The current suite has 27 tests. Do not replace tests with only live API checks.
 
 ## Windows and WSL/OpenCode handoff
 
-- The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment.
-- Recommended one-time WSL setup:
+- The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.
+- Recommended one-time WSL project setup:
 
   ```bash
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  source "$HOME/.local/bin/env"
   mkdir -p ~/projects
   git clone /mnt/c/Users/User/Desktop/Literature_Review_Agent ~/projects/Literature_Review_Agent
   cd ~/projects/Literature_Review_Agent
   uv sync
   ```
 
-- These are two independent Git working copies. Choose one as the active copy for a milestone; commit there, then use a shared GitHub remote to `git push` and `git pull` in the other copy. Do not copy `.venv`, `.env`, PDFs, or uncommitted source files between them. Re-create `.env` locally in WSL if Gemini is needed.
-- If no remote has been configured yet, do not make parallel edits in both copies. Set up a private GitHub remote before switching frequently.
+- These are two independent Git working copies. Clone only once; do not repeatedly copy or re-clone after every handoff. Choose one as the active copy for a milestone, commit there, then `git push` and `git pull` through one shared Git remote in the other copy. GitHub is recommended but not required: a private GitHub repository or a deliberately configured local bare repository both work. Do not use either checked-out working directory as an informal bidirectional remote.
+- Do not copy `.venv`, `.env`, PDFs, or uncommitted source files between copies. Re-create `.env` locally in WSL if Gemini is needed. If no shared remote has been configured yet, do not make parallel edits in both copies.
 
 Suggested sequence after the live LLM step:
 

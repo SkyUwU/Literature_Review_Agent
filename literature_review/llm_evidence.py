@@ -17,6 +17,10 @@ class LlmEvidenceError(RuntimeError):
     """Raised for missing configuration or invalid model output."""
 
 
+class LlmOutputSyntaxError(LlmEvidenceError):
+    """Raised when a model response is not syntactically valid JSON."""
+
+
 class JsonGenerationClient(Protocol):
     """Minimal provider interface; tests use a fake and Gemini is one implementation."""
 
@@ -85,10 +89,19 @@ def build_evidence_prompt(response: EvidenceRetrievalResponse) -> str:
         "Assess each supplied evidence chunk only against the research query. "
         "Do not use outside knowledge and do not invent claims. Return exactly one JSON object, "
         "without Markdown code fences or any surrounding explanation. "
-        "with an 'assessments' array. Each item must include chunk_id, summary, relevance_score "
+        "The object must contain an 'assessments' array. Each item must include chunk_id, summary, relevance_score "
         "(1-5), evidence_quality_score (1-5), recommendation "
         "(include, consider, exclude, or insufficient_evidence), and rationale. "
         f"Research query: {response.query}\nEvidence chunks: {json.dumps(chunks, ensure_ascii=False)}"
+    )
+
+
+def build_json_repair_prompt(raw_output: str) -> str:
+    """Request one bounded repair attempt when structured output was malformed."""
+    return (
+        "The previous response was malformed JSON. Return a repaired version as exactly one JSON object, "
+        "without Markdown or explanation. Preserve the intended assessments and follow the response schema. "
+        f"Previous response:\n{raw_output}"
     )
 
 
@@ -107,6 +120,8 @@ def validate_evidence_assessments(raw_output: str) -> LlmEvidenceAssessmentBatch
             if issues:
                 location = ".".join(str(part) for part in issues[0]["loc"])
                 details = f"{location}: {issues[0]['msg']}"
+                if issues[0].get("type") == "json_invalid":
+                    raise LlmOutputSyntaxError(f"LLM output is malformed JSON ({details}).") from error
         raise LlmEvidenceError(f"LLM output failed evidence-assessment validation ({details}).") from error
 
 
@@ -115,7 +130,11 @@ def summarize_and_rerank(
     client: JsonGenerationClient,
 ) -> EvidenceRerankResponse:
     """Validate LLM assessments and enrich them only with trusted chunk provenance."""
-    generated = validate_evidence_assessments(client.generate_json(build_evidence_prompt(response)))
+    raw_output = client.generate_json(build_evidence_prompt(response))
+    try:
+        generated = validate_evidence_assessments(raw_output)
+    except LlmOutputSyntaxError:
+        generated = validate_evidence_assessments(client.generate_json(build_json_repair_prompt(raw_output)))
 
     by_chunk_id = {item.chunk.chunk_id: item.chunk for item in response.ranked_chunks}
     returned_ids = [item.chunk_id for item in generated.assessments]

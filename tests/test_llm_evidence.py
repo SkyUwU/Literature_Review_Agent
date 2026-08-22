@@ -20,6 +20,16 @@ class FakeClient:
         return json.dumps(self.response)
 
 
+class RetryClient:
+    def __init__(self, valid_response: dict[str, object]) -> None:
+        self.responses = ['{"assessments": [', json.dumps(valid_response)]
+        self.prompts: list[str] = []
+
+    def generate_json(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self.responses.pop(0)
+
+
 def retrieval_response() -> EvidenceRetrievalResponse:
     chunks = [
         EvidenceChunk(
@@ -111,6 +121,36 @@ class LlmEvidenceTests(unittest.TestCase):
     def test_reports_the_first_schema_failure_without_echoing_model_output(self) -> None:
         with self.assertRaisesRegex(LlmEvidenceError, "summary"):
             validate_evidence_assessments('{"assessments": [{"chunk_id": "chunk-1"}]}')
+
+    def test_retries_once_when_the_first_response_is_malformed_json(self) -> None:
+        client = RetryClient(
+            {
+                "assessments": [
+                    {
+                        "chunk_id": "chunk-1",
+                        "summary": "This valid repaired summary is sufficiently long for Pydantic validation.",
+                        "relevance_score": 4,
+                        "evidence_quality_score": 3,
+                        "recommendation": "consider",
+                        "rationale": "This valid repaired rationale is sufficiently long for Pydantic validation.",
+                    },
+                    {
+                        "chunk_id": "chunk-2",
+                        "summary": "This second valid summary is sufficiently long for Pydantic validation.",
+                        "relevance_score": 3,
+                        "evidence_quality_score": 3,
+                        "recommendation": "consider",
+                        "rationale": "This second valid rationale is sufficiently long for Pydantic validation.",
+                    },
+                ]
+            }
+        )
+
+        result = summarize_and_rerank(retrieval_response(), client)
+
+        self.assertEqual(len(client.prompts), 2)
+        self.assertIn("malformed JSON", client.prompts[1])
+        self.assertEqual(len(result.summaries), 2)
 
 
 if __name__ == "__main__":
