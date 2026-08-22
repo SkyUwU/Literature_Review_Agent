@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 from typing import Protocol
 
 from literature_review.models import (
@@ -27,6 +28,7 @@ class GeminiJsonClient:
     """Google Gemini implementation that reads its key only from the environment."""
 
     def __init__(self, model: str = "gemini-2.5-flash") -> None:
+        load_local_env()
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise LlmEvidenceError("GEMINI_API_KEY is not set in the environment.")
@@ -50,6 +52,21 @@ class GeminiJsonClient:
         if not interaction.output_text:
             raise LlmEvidenceError("Gemini returned no text output.")
         return interaction.output_text
+
+
+def load_local_env(path: str | Path = ".env") -> None:
+    """Load simple KEY=VALUE entries only when that key is not already set."""
+    env_path = Path(path)
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", maxsplit=1)
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
 
 
 def build_evidence_prompt(response: EvidenceRetrievalResponse) -> str:

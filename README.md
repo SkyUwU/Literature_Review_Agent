@@ -23,6 +23,14 @@ The evidence layer extracts local PDFs with `literature_review.extraction.extrac
 
 `literature_review.llm_evidence.summarize_and_rerank()` is the second stage. It validates structured LLM assessments and preserves the trusted paper ID and page range from retrieved chunks. Gemini reads `GEMINI_API_KEY` only from the environment; no key is needed for unit tests.
 
+Run the local extraction and retrieval path without any API key:
+
+```powershell
+uv run python -m literature_review.pipeline data/papers/example.pdf "literature review agent" --top-k 3 --dry-run
+```
+
+After copying `.env.example` to `.env` and setting `GEMINI_API_KEY`, omit `--dry-run` to run the LLM re-ranking stage. Start with one PDF and `--top-k 2` or `--top-k 3`.
+
 ## Run the demo
 
 After setting up the environment, run:

@@ -23,6 +23,7 @@
 uv sync
 uv run python -m unittest discover -s tests -v
 uv run python -m literature_review.search "literature review agent" --limit 10 --year-from 2024 --rank
+uv run python -m literature_review.pipeline data/papers/example.pdf "literature review agent" --top-k 3 --dry-run
 ```
 
 If Git reports a dubious-ownership error, the user previously resolved it with:

@@ -44,15 +44,17 @@ The current suite has 24 tests. Do not replace tests with only live API checks.
 - The second stage should be an LLM contextual-summary/re-ranking step. It must receive a bounded set of retrieved chunks, return structured evidence summaries with page references, and then support a paper-level assessment.
 - Same-title records are a pragmatic deduplication baseline. The current rule prefers higher citation count, then venue presence, abstract length, then year. It is not proof of identity. Add DOI-based deduplication when DOI metadata is available.
 
-## Next milestone: wire the LLM stage into a small end-to-end flow
+## Next milestone: run the first small live Gemini smoke test
 
 `literature_review.llm_evidence` now contains a provider-agnostic `JsonGenerationClient`, a `GeminiJsonClient`, prompt construction, Pydantic-schema structured output, `model_validate_json()` validation, provenance enrichment, and fake-client tests. It has not made a live request.
 
+`literature_review.pipeline` now provides the opt-in CLI flow: local PDF -> extraction -> chunking -> top-k retrieval -> `summarize_and_rerank`. Its `--dry-run` option performs only the local steps and never reads a key or calls an API.
+
 1. Ask the user to run `uv sync` and confirm that Google AI Studio shows an existing key and quota. Do not ask them to share the key.
 2. The user copies `.env.example` to `.env` and fills in `GEMINI_API_KEY` locally. `.env` is ignored by Git.
-3. Add a small opt-in CLI flow: local PDF -> extraction -> chunking -> top-k retrieval -> `summarize_and_rerank`.
-4. Start with one PDF and 2-3 chunks. Display only non-secret error details and page-traceable output.
-5. Run one live smoke test only after the user confirms the key setup. Keep the fake-client tests.
+3. First run `--dry-run` with one PDF and `--top-k 2` or `--top-k 3`.
+4. Then omit `--dry-run` for one live smoke test. Display only non-secret error details and page-traceable output.
+5. Keep the fake-client tests.
 
 Suggested sequence after the live LLM step:
 
