@@ -31,7 +31,7 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | Search planning contract | `planning.py` | Done; rule-based fallback |
 | PDF extraction and cross-page chunks | `extraction.py`, `evidence.py` | Done |
 | First-stage chunk retrieval | `evidence_ranking.py` | Done; lexical baseline |
-| LLM contextual-summary/re-ranking contract | `llm_evidence.py` | Done; fake-client tested; first live attempt reached output validation |
+| LLM contextual-summary/re-ranking contract | `llm_evidence.py` | Done; fake-client tested and live Gemini smoke test succeeded |
 
 The current suite has 28 tests. Do not replace tests with only live API checks.
 
@@ -44,17 +44,16 @@ The current suite has 28 tests. Do not replace tests with only live API checks.
 - The second stage should be an LLM contextual-summary/re-ranking step. It must receive a bounded set of retrieved chunks, return structured evidence summaries with page references, and then support a paper-level assessment.
 - Same-title records are a pragmatic deduplication baseline. The current rule prefers higher citation count, then venue presence, abstract length, then year. It is not proof of identity. Add DOI-based deduplication when DOI metadata is available.
 
-## Next milestone: repeat the small live Gemini smoke test with diagnostics
+## Next milestone: aggregate evidence into a paper-level assessment
 
-`literature_review.llm_evidence` now contains a provider-agnostic `JsonGenerationClient`, a `GeminiJsonClient`, prompt construction, Pydantic-schema structured output, `model_validate_json()` validation, provenance enrichment, and fake-client tests. It has not made a live request.
+`literature_review.llm_evidence` contains a provider-agnostic `JsonGenerationClient`, a `GeminiJsonClient`, prompt construction, Pydantic-schema structured output, `model_validate_json()` validation, provenance enrichment, and fake-client tests. A live Gemini smoke test succeeded on `PaperQA2.pdf`, producing page-traceable summaries such as `PaperQA2.pdf-p12-13-c32`.
 
 `literature_review.pipeline` now provides the opt-in CLI flow: local PDF -> extraction -> chunking -> top-k retrieval -> `summarize_and_rerank`. Its `--dry-run` option performs only the local steps and never reads a key or calls an API.
 
-1. The user has already run the local dry-run successfully and made two live attempts. The latest model response was syntactically incomplete JSON. The parser accepts a JSON Markdown fence, reports validation fields without echoing model output, and retries exactly once with a bounded JSON-repair prompt only for malformed JSON.
-2. Ask the user to run `uv sync` and confirm that Google AI Studio shows an existing key and quota. Do not ask them to share the key.
-3. The user copies `.env.example` to `.env` and fills in `GEMINI_API_KEY` locally. `.env` is ignored by Git.
-4. Repeat the live smoke test with one PDF and `--top-k 2`. Display only non-secret error details and page-traceable output.
-5. Keep the fake-client tests.
+1. Preserve the successful two-stage flow: local lexical top-k chunks -> LLM structured summaries/re-ranking.
+2. Add a Pydantic-based aggregation from `EvidenceRerankResponse` to an evidence-based `PaperAssessment`; preserve chunk IDs and page ranges as rationale/provenance.
+3. Do not present this as a whole-paper scholarly verdict: it is limited to supplied top-k chunks.
+4. Keep deterministic and fake-client tests. Do not require a live API call for tests.
 
 ## Windows and WSL/OpenCode handoff
 
@@ -63,13 +62,14 @@ The current suite has 28 tests. Do not replace tests with only live API checks.
 
   ```bash
   mkdir -p ~/projects
-  git clone /mnt/c/Users/User/Desktop/Literature_Review_Agent ~/projects/Literature_Review_Agent
+  cd ~/projects
+  git clone https://github.com/SkyUwU/Literature_Review_Agent.git
   cd ~/projects/Literature_Review_Agent
   uv sync
   ```
 
-- These are two independent Git working copies. Clone only once; do not repeatedly copy or re-clone after every handoff. Choose one as the active copy for a milestone, commit there, then `git push` and `git pull` through one shared Git remote in the other copy. GitHub is recommended but not required: a private GitHub repository or a deliberately configured local bare repository both work. Do not use either checked-out working directory as an informal bidirectional remote.
-- Do not copy `.venv`, `.env`, PDFs, or uncommitted source files between copies. Re-create `.env` locally in WSL if Gemini is needed. If no shared remote has been configured yet, do not make parallel edits in both copies.
+- These are two independent Git working copies. Clone only once; do not repeatedly copy or re-clone after every handoff. The private GitHub remote `origin` is now configured. Choose one as the active copy for a milestone, commit there, run `git push`, then run `git pull --ff-only` in the other copy before editing. A configured local bare repository could also serve this role, but do not use either checked-out working directory as an informal bidirectional remote.
+- Do not copy `.venv`, PDFs, or uncommitted source files between copies. For a one-time WSL setup on this same private machine, copying the ignored `.env` from Windows is acceptable; alternatively create it from `.env.example`. Never commit, paste, or upload `.env`. If Gemini is needed in WSL, ensure that the WSL clone has its own local `.env`.
 
 Suggested sequence after the live LLM step:
 
