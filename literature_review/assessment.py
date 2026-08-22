@@ -1,10 +1,15 @@
-"""Transparent, metadata-only initial assessment of selected papers."""
+"""Transparent metadata and bounded-evidence paper assessment helpers."""
 
 import math
 
 from literature_review.models import (
     AssessmentPolicy,
     AssessmentResponse,
+    EvidenceAggregationPolicy,
+    EvidenceAssessmentResponse,
+    EvidenceCitation,
+    EvidenceRerankResponse,
+    EvidenceSummary,
     PaperAssessment,
     SelectedPaperSet,
 )
@@ -66,5 +71,77 @@ def assess_selected_papers(
         limitations=[
             "This is a metadata-and-abstract assessment, not a full-text quality review.",
             "Citation counts can disadvantage recent papers and vary across providers.",
+        ],
+    )
+
+
+def _rounded_mean(scores: list[int]) -> int:
+    """Return a deterministic nearest-integer mean without banker's rounding."""
+    return math.floor(sum(scores) / len(scores) + 0.5)
+
+
+def aggregate_evidence_assessments(
+    rerank_response: EvidenceRerankResponse,
+    policy: EvidenceAggregationPolicy,
+) -> EvidenceAssessmentResponse:
+    """Aggregate LLM chunk summaries into per-paper, page-traceable assessments.
+
+    The result is limited to the chunks supplied by first-stage retrieval; it does
+    not claim to judge the paper outside that bounded evidence set.
+    """
+    summaries_by_paper: dict[str, list[EvidenceSummary]] = {}
+    for summary in rerank_response.summaries:
+        summaries_by_paper.setdefault(summary.paper_id, []).append(summary)
+
+    assessments: list[PaperAssessment] = []
+    for paper_id, summaries in summaries_by_paper.items():
+        relevance = _rounded_mean([summary.relevance_score for summary in summaries])
+        evidence_quality = _rounded_mean([summary.evidence_quality_score for summary in summaries])
+        if (
+            relevance >= policy.include_relevance_score
+            and evidence_quality >= policy.include_evidence_quality_score
+        ):
+            recommendation = "include"
+        elif relevance >= policy.consider_relevance_score:
+            recommendation = "consider"
+        else:
+            recommendation = "exclude"
+
+        evidence = [
+            EvidenceCitation(
+                chunk_id=summary.chunk_id,
+                page_start=summary.page_start,
+                page_end=summary.page_end,
+                summary=summary.summary,
+                relevance_score=summary.relevance_score,
+                evidence_quality_score=summary.evidence_quality_score,
+                recommendation=summary.recommendation,
+            )
+            for summary in summaries
+        ]
+        sources = ", ".join(
+            f"{item.chunk_id} (pages {item.page_start}-{item.page_end})" for item in evidence
+        )
+        assessments.append(
+            PaperAssessment(
+                paper_id=paper_id,
+                relevance_score=relevance,
+                evidence_quality_score=evidence_quality,
+                recommendation=recommendation,
+                rationale=(
+                    f"Evidence-based aggregate from {len(evidence)} supplied retrieved chunk(s): {sources}. "
+                    f"Aggregate relevance score {relevance}; aggregate evidence quality score {evidence_quality}."
+                ),
+                evidence=evidence,
+            )
+        )
+
+    return EvidenceAssessmentResponse(
+        evidence_rerank_response=rerank_response,
+        aggregation_policy=policy,
+        assessments=assessments,
+        limitations=[
+            *rerank_response.limitations,
+            "Each paper assessment is limited to the supplied top-k retrieved chunks, not the whole paper.",
         ],
     )

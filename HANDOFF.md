@@ -32,8 +32,9 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | PDF extraction and cross-page chunks | `extraction.py`, `evidence.py` | Done |
 | First-stage chunk retrieval | `evidence_ranking.py` | Done; lexical baseline |
 | LLM contextual-summary/re-ranking contract | `llm_evidence.py` | Done; fake-client tested and live Gemini smoke test succeeded |
+| Evidence-based paper assessment | `assessment.py`, `models.py` | Done; deterministic aggregation retains chunk IDs and page ranges |
 
-The current suite has 28 tests. Do not replace tests with only live API checks.
+The current suite has 29 tests. Do not replace tests with only live API checks.
 
 ## Important design decisions
 
@@ -44,16 +45,21 @@ The current suite has 28 tests. Do not replace tests with only live API checks.
 - The second stage should be an LLM contextual-summary/re-ranking step. It must receive a bounded set of retrieved chunks, return structured evidence summaries with page references, and then support a paper-level assessment.
 - Same-title records are a pragmatic deduplication baseline. The current rule prefers higher citation count, then venue presence, abstract length, then year. It is not proof of identity. Add DOI-based deduplication when DOI metadata is available.
 
-## Next milestone: aggregate evidence into a paper-level assessment
+## Next milestone: build synthesis with evidence citations
 
 `literature_review.llm_evidence` contains a provider-agnostic `JsonGenerationClient`, a `GeminiJsonClient`, prompt construction, Pydantic-schema structured output, `model_validate_json()` validation, provenance enrichment, and fake-client tests. A live Gemini smoke test succeeded on `PaperQA2.pdf`, producing page-traceable summaries such as `PaperQA2.pdf-p12-13-c32`.
 
 `literature_review.pipeline` now provides the opt-in CLI flow: local PDF -> extraction -> chunking -> top-k retrieval -> `summarize_and_rerank`. Its `--dry-run` option performs only the local steps and never reads a key or calls an API.
 
-1. Preserve the successful two-stage flow: local lexical top-k chunks -> LLM structured summaries/re-ranking.
-2. Add a Pydantic-based aggregation from `EvidenceRerankResponse` to an evidence-based `PaperAssessment`; preserve chunk IDs and page ranges as rationale/provenance.
-3. Do not present this as a whole-paper scholarly verdict: it is limited to supplied top-k chunks.
-4. Keep deterministic and fake-client tests. Do not require a live API call for tests.
+`aggregate_evidence_assessments()` converts an `EvidenceRerankResponse` into an
+`EvidenceAssessmentResponse` with an explicit `EvidenceAggregationPolicy`. Each
+`PaperAssessment.evidence` item retains the chunk ID, page range, summary, scores,
+and original chunk recommendation. Aggregate scores are deterministic nearest-integer
+means, and the final recommendation follows the explicit policy thresholds.
+
+1. Use the evidence-based paper assessments to produce a synthesis with citations to chunk IDs and page ranges.
+2. Keep all generated claims traceable to the bounded retrieved evidence; distinguish this from a whole-paper review.
+3. Keep deterministic and fake-client tests. Do not require a live API call for tests.
 
 ## Windows and WSL/OpenCode handoff
 
@@ -71,10 +77,9 @@ The current suite has 28 tests. Do not replace tests with only live API checks.
 - These are two independent Git working copies. Clone only once; do not repeatedly copy or re-clone after every handoff. The private GitHub remote `origin` is now configured. Choose one as the active copy for a milestone, commit there, run `git push`, then run `git pull --ff-only` in the other copy before editing. A configured local bare repository could also serve this role, but do not use either checked-out working directory as an informal bidirectional remote.
 - Do not copy `.venv`, PDFs, or uncommitted source files between copies. For a one-time WSL setup on this same private machine, copying the ignored `.env` from Windows is acceptable; alternatively create it from `.env.example`. Never commit, paste, or upload `.env`. If Gemini is needed in WSL, ensure that the WSL clone has its own local `.env`.
 
-Suggested sequence after the live LLM step:
+Suggested sequence after the evidence-assessment step:
 
-1. aggregate selected evidence summaries into an evidence-based `PaperAssessment`;
-2. build synthesis with citations to chunks/pages;
+1. build synthesis with citations to chunks/pages;
 3. add an LLM search planner only if the rule-based planner proves inadequate;
 4. consider an embedding retriever and GROBID/Docling only after the baseline works on real PDFs.
 

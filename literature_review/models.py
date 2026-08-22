@@ -197,6 +197,18 @@ class EvidenceRerankResponse(BaseModel):
     limitations: list[str]
 
 
+class EvidenceCitation(BaseModel):
+    """Trusted provenance and LLM assessment for one chunk used in a paper assessment."""
+
+    chunk_id: str
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    summary: str = Field(min_length=20)
+    relevance_score: int = Field(ge=1, le=5)
+    evidence_quality_score: int = Field(ge=1, le=5)
+    recommendation: Literal["include", "consider", "exclude", "insufficient_evidence"]
+
+
 class PaperAssessment(BaseModel):
     """Why a paper is or is not useful for the current idea."""
 
@@ -205,10 +217,19 @@ class PaperAssessment(BaseModel):
     evidence_quality_score: int = Field(ge=1, le=5)
     recommendation: Literal["include", "consider", "exclude"]
     rationale: str = Field(min_length=20)
+    evidence: list[EvidenceCitation] = Field(default_factory=list)
 
 
 class AssessmentPolicy(BaseModel):
     """Explainable thresholds for a metadata-only paper assessment."""
+
+    include_relevance_score: int = Field(default=4, ge=1, le=5)
+    include_evidence_quality_score: int = Field(default=3, ge=1, le=5)
+    consider_relevance_score: int = Field(default=3, ge=1, le=5)
+
+
+class EvidenceAggregationPolicy(BaseModel):
+    """Transparent thresholds for aggregating supplied chunk assessments per paper."""
 
     include_relevance_score: int = Field(default=4, ge=1, le=5)
     include_evidence_quality_score: int = Field(default=3, ge=1, le=5)
@@ -221,6 +242,15 @@ class AssessmentResponse(BaseModel):
     selected_paper_set: SelectedPaperSet
     assessment_policy: AssessmentPolicy
     assessments: list[PaperAssessment]
+    limitations: list[str]
+
+
+class EvidenceAssessmentResponse(BaseModel):
+    """Paper assessments aggregated from bounded, provenance-preserving chunk evidence."""
+
+    evidence_rerank_response: EvidenceRerankResponse
+    aggregation_policy: EvidenceAggregationPolicy
+    assessments: list[PaperAssessment] = Field(min_length=1)
     limitations: list[str]
 
 
