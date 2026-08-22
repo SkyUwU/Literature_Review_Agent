@@ -5,6 +5,7 @@
 - The user is a new CS master's student working on ADSL summer-project Task 1A, a Literature Review Agent.
 - Reply primarily in Traditional Chinese. Keep explanations short and implementation-focused unless the user asks to learn a concept.
 - The user uses Windows PowerShell and an Anaconda environment in which `uv` is available. Give PowerShell commands.
+- OpenCode may run in WSL. Treat the Windows project and a WSL-native clone as separate Git working copies; synchronize through a shared remote, and never edit the same feature in both copies before committing.
 - The user prefers progress on the assignment over broad tutorials. Explain only new decisions, errors, and commands they must run.
 - Do not ask the user to paste API keys. Keep secrets in a local `.env`, which is ignored by Git.
 

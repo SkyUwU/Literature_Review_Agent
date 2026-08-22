@@ -11,7 +11,7 @@
    uv run python -m unittest discover -s tests -v
    ```
 
-As of 2026-08-21, the latest committed work includes the LLM interface and handoff documentation. The only expected untracked source PDF is `Summer_Project.pdf`; do not commit it.
+As of 2026-08-22, the latest committed work includes the local PDF-to-LLM pipeline. The only expected untracked source PDF is `Summer_Project.pdf`; do not commit it.
 
 ## Goal and scope
 
@@ -31,9 +31,9 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | Search planning contract | `planning.py` | Done; rule-based fallback |
 | PDF extraction and cross-page chunks | `extraction.py`, `evidence.py` | Done |
 | First-stage chunk retrieval | `evidence_ranking.py` | Done; lexical baseline |
-| LLM contextual-summary/re-ranking contract | `llm_evidence.py` | Done; fake-client tested, not live-tested |
+| LLM contextual-summary/re-ranking contract | `llm_evidence.py` | Done; fake-client tested; first live attempt reached output validation |
 
-The current suite has 24 tests. Do not replace tests with only live API checks.
+The current suite has 27 tests. Do not replace tests with only live API checks.
 
 ## Important design decisions
 
@@ -44,17 +44,34 @@ The current suite has 24 tests. Do not replace tests with only live API checks.
 - The second stage should be an LLM contextual-summary/re-ranking step. It must receive a bounded set of retrieved chunks, return structured evidence summaries with page references, and then support a paper-level assessment.
 - Same-title records are a pragmatic deduplication baseline. The current rule prefers higher citation count, then venue presence, abstract length, then year. It is not proof of identity. Add DOI-based deduplication when DOI metadata is available.
 
-## Next milestone: run the first small live Gemini smoke test
+## Next milestone: repeat the small live Gemini smoke test with diagnostics
 
 `literature_review.llm_evidence` now contains a provider-agnostic `JsonGenerationClient`, a `GeminiJsonClient`, prompt construction, Pydantic-schema structured output, `model_validate_json()` validation, provenance enrichment, and fake-client tests. It has not made a live request.
 
 `literature_review.pipeline` now provides the opt-in CLI flow: local PDF -> extraction -> chunking -> top-k retrieval -> `summarize_and_rerank`. Its `--dry-run` option performs only the local steps and never reads a key or calls an API.
 
-1. Ask the user to run `uv sync` and confirm that Google AI Studio shows an existing key and quota. Do not ask them to share the key.
-2. The user copies `.env.example` to `.env` and fills in `GEMINI_API_KEY` locally. `.env` is ignored by Git.
-3. First run `--dry-run` with one PDF and `--top-k 2` or `--top-k 3`.
-4. Then omit `--dry-run` for one live smoke test. Display only non-secret error details and page-traceable output.
+1. The user has already run the local dry-run successfully and made one live attempt, which reported that the output did not pass the expected Pydantic schema. The parser now accepts a JSON Markdown fence and reports the first validation field without echoing model output.
+2. Ask the user to run `uv sync` and confirm that Google AI Studio shows an existing key and quota. Do not ask them to share the key.
+3. The user copies `.env.example` to `.env` and fills in `GEMINI_API_KEY` locally. `.env` is ignored by Git.
+4. Repeat the live smoke test with one PDF and `--top-k 2`. Display only non-secret error details and page-traceable output.
 5. Keep the fake-client tests.
+
+## Windows and WSL/OpenCode handoff
+
+- The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment.
+- Recommended one-time WSL setup:
+
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  source "$HOME/.local/bin/env"
+  mkdir -p ~/projects
+  git clone /mnt/c/Users/User/Desktop/Literature_Review_Agent ~/projects/Literature_Review_Agent
+  cd ~/projects/Literature_Review_Agent
+  uv sync
+  ```
+
+- These are two independent Git working copies. Choose one as the active copy for a milestone; commit there, then use a shared GitHub remote to `git push` and `git pull` in the other copy. Do not copy `.venv`, `.env`, PDFs, or uncommitted source files between them. Re-create `.env` locally in WSL if Gemini is needed.
+- If no remote has been configured yet, do not make parallel edits in both copies. Set up a private GitHub remote before switching frequently.
 
 Suggested sequence after the live LLM step:
 
@@ -81,5 +98,5 @@ Suggested sequence after the live LLM step:
 ## Handoff prompt for another coding agent
 
 ```text
-Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDOFF.md first. Inspect git status and preserve user changes. Implement only the “Next milestone: wire the LLM stage into a small end-to-end flow” described in HANDOFF.md. Do not request or print API keys; use .env/environment variables. Keep Pydantic contracts, add tests where needed, run the full test suite, and report the exact PowerShell commands for the user to commit. Reply in Traditional Chinese and keep explanations concise.
+Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDOFF.md first. Inspect git status and preserve user changes. Implement only the current next milestone in HANDOFF.md. Do not request or print API keys; use .env/environment variables. Keep Pydantic contracts, add tests where needed, run the full test suite, and report the exact PowerShell or WSL commands for the user to commit. Reply in Traditional Chinese and keep explanations concise.
 ```

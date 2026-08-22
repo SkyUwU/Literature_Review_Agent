@@ -83,7 +83,8 @@ def build_evidence_prompt(response: EvidenceRetrievalResponse) -> str:
     ]
     return (
         "Assess each supplied evidence chunk only against the research query. "
-        "Do not use outside knowledge and do not invent claims. Return exactly one JSON object "
+        "Do not use outside knowledge and do not invent claims. Return exactly one JSON object, "
+        "without Markdown code fences or any surrounding explanation. "
         "with an 'assessments' array. Each item must include chunk_id, summary, relevance_score "
         "(1-5), evidence_quality_score (1-5), recommendation "
         "(include, consider, exclude, or insufficient_evidence), and rationale. "
@@ -91,15 +92,30 @@ def build_evidence_prompt(response: EvidenceRetrievalResponse) -> str:
     )
 
 
+def validate_evidence_assessments(raw_output: str) -> LlmEvidenceAssessmentBatch:
+    """Accept structured JSON while reporting schema failures without exposing model text."""
+    normalized = raw_output.strip()
+    if normalized.startswith("```") and normalized.endswith("```"):
+        lines = normalized.splitlines()
+        normalized = "\n".join(lines[1:-1]).strip()
+    try:
+        return LlmEvidenceAssessmentBatch.model_validate_json(normalized)
+    except ValueError as error:
+        details = "invalid JSON or schema mismatch"
+        if hasattr(error, "errors"):
+            issues = error.errors(include_url=False)
+            if issues:
+                location = ".".join(str(part) for part in issues[0]["loc"])
+                details = f"{location}: {issues[0]['msg']}"
+        raise LlmEvidenceError(f"LLM output failed evidence-assessment validation ({details}).") from error
+
+
 def summarize_and_rerank(
     response: EvidenceRetrievalResponse,
     client: JsonGenerationClient,
 ) -> EvidenceRerankResponse:
     """Validate LLM assessments and enrich them only with trusted chunk provenance."""
-    try:
-        generated = LlmEvidenceAssessmentBatch.model_validate_json(client.generate_json(build_evidence_prompt(response)))
-    except ValueError as error:
-        raise LlmEvidenceError("LLM output is not valid evidence-assessment JSON.") from error
+    generated = validate_evidence_assessments(client.generate_json(build_evidence_prompt(response)))
 
     by_chunk_id = {item.chunk.chunk_id: item.chunk for item in response.ranked_chunks}
     returned_ids = [item.chunk_id for item in generated.assessments]

@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from literature_review.llm_evidence import LlmEvidenceError, summarize_and_rerank
+from literature_review.llm_evidence import LlmEvidenceError, summarize_and_rerank, validate_evidence_assessments
 from literature_review.models import (
     EvidenceChunk,
     EvidenceRetrievalPolicy,
@@ -96,6 +96,21 @@ class LlmEvidenceTests(unittest.TestCase):
 
         with self.assertRaises(LlmEvidenceError):
             summarize_and_rerank(retrieval_response(), client)
+
+    def test_accepts_json_wrapped_in_a_markdown_fence(self) -> None:
+        result = validate_evidence_assessments(
+            "```json\n"
+            '{"assessments": [{"chunk_id": "chunk-1", "summary": "This summary is long enough to satisfy the validation requirement.", '
+            '"relevance_score": 3, "evidence_quality_score": 3, "recommendation": "consider", '
+            '"rationale": "This rationale is long enough to satisfy the validation requirement."}]}\n'
+            "```"
+        )
+
+        self.assertEqual(result.assessments[0].chunk_id, "chunk-1")
+
+    def test_reports_the_first_schema_failure_without_echoing_model_output(self) -> None:
+        with self.assertRaisesRegex(LlmEvidenceError, "summary"):
+            validate_evidence_assessments('{"assessments": [{"chunk_id": "chunk-1"}]}')
 
 
 if __name__ == "__main__":
