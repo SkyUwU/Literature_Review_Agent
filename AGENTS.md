@@ -41,4 +41,4 @@ ResearchIdea -> SearchPlan -> OpenAlex retrieval -> metadata filter/rank/select
 -> evidence-backed paper assessment -> synthesis/future directions
 ```
 
-The LLM contextual-summary/re-ranking interface is implemented but has not made a live API call. See `HANDOFF.md` for the next integration scope and decisions.
+The LLM contextual-summary/re-ranking interface is implemented and its Gemini PDF smoke test succeeded. See `HANDOFF.md` for the next integration scope and decisions.

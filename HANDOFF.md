@@ -80,8 +80,8 @@ means, and the final recommendation follows the explicit policy thresholds.
 Suggested sequence after the evidence-assessment step:
 
 1. build synthesis with citations to chunks/pages;
-3. add an LLM search planner only if the rule-based planner proves inadequate;
-4. consider an embedding retriever and GROBID/Docling only after the baseline works on real PDFs.
+2. add an LLM search planner only if the rule-based planner proves inadequate;
+3. consider an embedding retriever and GROBID/Docling only after the baseline works on real PDFs.
 
 ## API and operational notes
 
@@ -109,5 +109,5 @@ Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDO
 Use this prompt when starting a fresh Codex task for this repository. It intentionally delegates details to the tracked documents instead of replaying long chat history:
 
 ```text
-Continue the ADSL Summer Project Task 1A in C:\Users\User\Desktop\Literature_Review_Agent. Read AGENTS.md and HANDOFF.md before taking action. The Gemini PDF evidence smoke test has succeeded; implement only the current next milestone: aggregate EvidenceRerankResponse into a provenance-preserving, evidence-based PaperAssessment. Inspect git status first, do not commit Summer_Project.pdf or data/papers/, add tests, run the full suite, and give exact PowerShell commit commands. Reply concisely in Traditional Chinese. Do not ask for or print API keys.
+Continue the ADSL Summer Project Task 1A in C:\Users\User\Desktop\Literature_Review_Agent. Read AGENTS.md and HANDOFF.md before taking action. The Gemini PDF evidence smoke test and the provenance-preserving evidence-based PaperAssessment aggregation are complete; implement only the current next milestone: evidence-cited synthesis and future directions. Inspect git status first, do not commit Summer_Project.pdf or data/papers/, add tests, run the full suite, and give exact PowerShell commit commands. Reply concisely in Traditional Chinese. Do not ask for or print API keys.
 ```
