@@ -83,7 +83,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
 > Implementation + Test = ONE todo. Never separate.
 <!-- APPEND TASK BATCHES BELOW THIS LINE WITH edit/apply_patch - never rewrite the headers above. -->
 
-- [ ] 1. models.py 新增 synthesis 契約與政策欄位＋模型測試
+- [x] 1. models.py 新增 synthesis 契約與政策欄位＋模型測試
   What to do / Must NOT do: 在 `literature_review/models.py` 末尾依序新增 `ChunkReference{chunk_id, paper_id, page_start>=1, page_end>=1, quote: str min_length=20}`、`PaperSummaryClaim{text: str min_length=20, aspect: str min_length=3, evidence: list[ChunkReference] min_length=1}`、`PaperSummary{paper_id: str, claims: list[PaperSummaryClaim] min_length=1, stated_limitations: list[PaperSummaryClaim] default_factory=list, coverage_chunk_ids: list[str] min_length=1}`、`LlmNoteClaim{text: str min_length=20, chunk_ids: list[str] min_length=1, aspect: str min_length=3}`、`LlmPaperSummaryNote{claims: list[LlmNoteClaim] min_length=1, stated_limitations: list[LlmNoteClaim] default_factory=list, coverage_chunk_ids: list[str] default_factory=list}`、`LlmSynthesisDirection{title: str min_length=3, rationale: str min_length=20, supporting_paper_ids: list[str] min_length=1, supporting_chunk_ids: list[str] min_length=1}`、`LlmSynthesisBatch{report: str min_length=100（含行內 [chunk_id] 引用標記）, future_directions: list[LlmSynthesisDirection] min_length=1}`、`PaperSource{paper_id: str, source_path: str min_length=1}`、`CoveragePackPolicy{max_chunks_per_paper: int default=6 ge=1 le=50, llm_input_cap: int default=40 ge=1 le=200}`、`SynthesisResponse{paper_sources: list[PaperSource] min_length=1, evidence_assessment_response: EvidenceAssessmentResponse, paper_summaries: list[PaperSummary] min_length=1, report: str min_length=100（含行內 [chunk_id] 引用標記）, future_directions: list[FutureDirection] min_length=1, limitations: list[str], generated_by: Literal["deterministic","llm"]}`；`EvidenceAggregationPolicy` 增 `prior_score: int = Field(default=3, ge=1, le=5)` 與 `shrinkage_strength: int = Field(default=4, ge=0)`；`FutureDirection` 增 `supporting_chunk_ids: list[str] = Field(default_factory=list)`。MUST NOT：改任何既有必填欄位、動 `LiteratureReviewReport`、動 `demo.py`、**不新增 SynthesizedClaim 或任何 claims 中間層契約**。
   Parallelization: Wave 1 | Blocked by: - | Blocks: 2,3,4,5
   References (executor has NO interview context - be exhaustive): literature_review/models.py:200-273（EvidenceCitation/PaperAssessment/policies/Responses/FutureDirection 既有形狀與欄位語法）；literature_review/models.py:1-5（import 與 Field 用法）；tests/test_models.py（既有模型測試風格）
@@ -91,7 +91,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
   QA scenarios (name the exact tool + invocation): happy=`uv run python -m unittest tests.test_models -v` 輸出存 `.omo/evidence/task-1-evidence-cited-synthesis.log`；failure=故意省略 `LlmNoteClaim.text` → Pydantic ValidationError（測試以 `assertRaises(ValidationError)` 斷言）。
   Commit: N | 併入最終單一 commit（見 Commit strategy；指令由使用者執行）
 
-- [ ] 2. assessment.py 收縮平均聚合＋更新 test_assessment.py
+- [x] 2. assessment.py 收縮平均聚合＋更新 test_assessment.py
   What to do / Must NOT do: 在 `literature_review/assessment.py` 新增 `_shrunk_mean(scores: list[int], policy: EvidenceAggregationPolicy) -> int`，公式 `math.floor((len(scores)*mean + policy.shrinkage_strength*policy.prior_score)/(len(scores)+policy.shrinkage_strength) + 0.5)`；`aggregate_evidence_assessments()` 內 relevance 與 evidence_quality 改用它；rationale 字串加入 `from N chunk(s) (shrunk mean, prior p=..., strength m=...)`；`limitations` 附加 `"Chunk counts partly reflect retrieval allocation across papers, not absolute paper quality."`。MUST NOT：動 `assess_selected_papers()`、`_rounded_mean()` 保留（或移除其唯一使用處時同步刪除）、動 `EvidenceCitation` 建構欄位。
   Parallelization: Wave 1 | Blocked by: 1 | Blocks: 5
   References (executor has NO interview context - be exhaustive): literature_review/assessment.py:78-80（_rounded_mean）；literature_review/assessment.py:83-147（aggregate_evidence_assessments 現況與 rationale/limitations 格式）；tests/test_assessment.py:37-99（現有期望值：relevance 5/quality 4 → 收縮後 n=2、scores [5,4] → 21/6=3.5→4，quality [4,3] → 19/6≈3.17→3，recommendation 仍 "include"）；literature_review/models.py:231-236（EvidenceAggregationPolicy）
@@ -99,7 +99,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
   QA scenarios (name the exact tool + invocation): happy=`uv run python -m unittest tests.test_assessment -v` 存 `.omo/evidence/task-2-evidence-cited-synthesis.log`；failure=建構 `EvidenceAggregationPolicy(prior_score=0)` → ValidationError（Pydantic ge=1）。
   Commit: N | 併入最終單一 commit
 
-- [ ] 3. synthesis.py deterministic 路徑（覆蓋包/筆記/模板報告）＋測試
+- [x] 3. synthesis.py deterministic 路徑（覆蓋包/筆記/模板報告）＋測試
   What to do / Must NOT do: 新檔 `literature_review/synthesis.py`：`SynthesisError(RuntimeError)`；`build_coverage_packs(all_chunks, policy)` 依 Scope-Must-have 的 regex/優先序（含附錄區最低優先）/cap/stride-fallback 規則實作；`detect_limitation_chunks(paper_chunks)` cue regex；`build_deterministic_paper_notes(paper_chunks, assessment, policy) -> PaperSummary`（claims 引用覆蓋包 chunks，quote=chunk.text 前 240 字元（至少保留 20 字元），aspect=偵測章節名或 "other"；coverage_chunk_ids=覆蓋包 chunk_ids 排序聯集（與 claims 引用一致）；stated_limitations 來自 `detect_limitation_chunks`）；deterministic 方向規則：≥2 個 include/consider 論文各有 relevance_score>=4 的 citation → 收斂方向（引用這些 chunk ids 與 paper ids）；各論文有 limitation chunks → 限制方向（rationale 指名該限制並引用 chunk ids）；皆無 → fallback 方向引用最高分 assessment 的 citations；`build_deterministic_synthesis(evidence_assessment_response, coverage_packs, paper_sources, policy) -> SynthesisResponse`（`generated_by="deterministic"`；**report 由模板組成**：每篇 include/consider 論文一段，逐條列出其筆記 claims 句並在句尾附 `[chunk_id]` 標記；續以每篇 assessment 的 rationale 句附 `[chunk_id]` 標記作為綜合段；文末附「材料來源清單」段落（使用的證據摘要與筆記出處）；limitations 含 "Section-sampled coverage, not a full-text reading." 與 "Every factual sentence carries an inline [chunk_id] citation; this is not a whole-paper review."）。MUST NOT：import llm_evidence 以外不改其行為；不做任何網路/金鑰存取。
   Parallelization: Wave 2 | Blocked by: 1 | Blocks: 4,5
   References (executor has NO interview context - be exhaustive): literature_review/evidence.py:22-33（chunk_id 格式 `{paper_id}-p{start}-{end}-c{n}` 與 page 欄位）；literature_review/models.py:200-220（EvidenceCitation 欄位）；literature_review/assessment.py:110-124（citation 建構與 rationale 內 chunk 標記格式先例）；本計畫 Scope-Must-have 的 regex/優先序規格
@@ -107,7 +107,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
   QA scenarios (name the exact tool + invocation): happy=`uv run python -m unittest tests.test_synthesis -v` 存 `.omo/evidence/task-3-evidence-cited-synthesis.log`；failure=空 chunks 輸入 → `build_coverage_packs` 回傳空 dict 而非 raise（合成文件測試斷言）。
   Commit: N | 併入最終單一 commit
 
-- [ ] 4. synthesis.py LLM 路徑（逐篇筆記＋直接成文綜合報告）＋假 client 測試
+- [x] 4. synthesis.py LLM 路徑（逐篇筆記＋直接成文綜合報告）＋假 client 測試
   What to do / Must NOT do: 在 `literature_review/synthesis.py` 新增 `build_paper_notes_prompt(paper_id, chunks)`（內容：僅依供應 chunks 分類章節、每 aspect 挑代表 chunk_ids、抽取 stated limitations、禁止使用外部知識、aspect 一律用完整英文單詞（contribution/method/experiments/results/limitations/other 等，長度至少 3）、回傳單一 JSON 物件無 code fence，附 chunks 的 id/paper_id/page_start/page_end/text 清單）；`summarize_paper_notes(paper_id, chunks, client, policy) -> PaperSummary`（超過 `llm_input_cap` 先裁減——**若偵測到附錄邊界，先用附錄前的正文 chunks 等距填滿上限，名額有剩才以 stride 補入附錄 chunks；無附錄則全文等距**；fence strip＋`LlmPaperSummaryNote.model_validate_json()`＋語法錯誤一次修補重試（模式照 llm_evidence.py:108-137 本地複製，錯誤型別 `SynthesisError`）；grounding：所有 chunk_ids ⊆ 供應集合否則 `SynthesisError`；enrich：`LlmNoteClaim` → `PaperSummaryClaim`，`ChunkReference.quote` 取自受信任的 chunk.text 前 240 字元；`PaperSummary.coverage_chunk_ids` = claims 與 stated_limitations 引用的 chunk_ids 排序聯集（空 → `SynthesisError`））；`build_synthesis_prompt(evidence_assessment_response, paper_summaries)`（**僅供應 include/consider 論文**的證據摘要（RCS 摘要＋分數＋頁碼）與逐篇筆記＋規則：直接寫出流暢的綜合報告文章、每個事實句尾附 `[chunk_id]` 行內標記（僅可用供應的 ID）、文末附「材料來源清單」、future_directions 以 JSON 陣列回傳且 ids 皆須來自供應集合、限制/未來方向參考以 limitation/future-work 材料為主、禁止使用外部知識）；`synthesize_report(evidence_assessment_response, coverage_packs, paper_summaries, client) -> SynthesisResponse`（驗證 `LlmSynthesisBatch`；**行內標記驗證**：以 regex 抽取 report 內所有 `[chunk_id]` → 必須 ⊆（證據摘要 chunk_ids ∪ 筆記 coverage_chunk_ids）且至少一個標記，否則 `SynthesisError`；enrich `LlmSynthesisDirection` → `FutureDirection`；`generated_by="llm"`；limitations 同 deterministic 句並附「N 條被排除論文的證據摘要未納入綜合」當有 exclude 論文時）。MUST NOT：修改 `llm_evidence.py`；不列印模型原始輸出於錯誤訊息。
   Parallelization: Wave 2 | Blocked by: 3 | Blocks: 5
   References (executor has NO interview context - be exhaustive): literature_review/llm_evidence.py:24-29（JsonGenerationClient Protocol）；literature_review/llm_evidence.py:76-105（prompt 風格與 repair prompt 先例）；literature_review/llm_evidence.py:108-125（fence strip 與 schema 錯誤訊息模式）；literature_review/llm_evidence.py:133-142（一次修補重試與嚴格 ID 檢查先例）；tests/test_llm_evidence.py:13-31（FakeClient/RetryClient 模式）
@@ -115,7 +115,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
   QA scenarios (name the exact tool + invocation): happy=`uv run python -m unittest tests.test_synthesis -v` 存 `.omo/evidence/task-4-evidence-cited-synthesis.log`；failure=client 拋 `LlmEvidenceError` 樣態以 FakeClient 子類模擬 → `SynthesisError` 轉型斷言。
   Commit: N | 併入最終單一 commit
 
-- [ ] 5. pipeline.py 多檔/資料夾 + 端到端 synthesis + 測試
+- [x] 5. pipeline.py 多檔/資料夾 + 端到端 synthesis + 測試
   What to do / Must NOT do: `literature_review/pipeline.py` 新增 `expand_pdf_inputs(inputs: list[str]) -> list[str]`（目錄→`sorted(glob "*.pdf")`、檔案保留、保序去重、空 → ValueError）；新增 `run_synthesis_pipeline(documents: list[FullTextDocument], query, client: JsonGenerationClient, *, chunk_policy, retrieval_policy, coverage_policy, aggregation_policy) -> SynthesisResponse`（client 必填——RCS 與筆記皆為 LLM 步驟；流程如 Scope-Must-have；deterministic 筆記/綜合由 todo 3 的公開函式另行直接呼叫，不經本函式）；`main()` 改 `inputs` `nargs="+"`，`--paper-id` 僅單一輸入允許（否則 parser.error），非 dry-run 建 `GeminiJsonClient` 跑完整流程並印 `SynthesisResponse.model_dump(mode="json")`；`--dry-run` 維持現行行為（合併檢索 JSON、不讀 key）；except 元組加 `SynthesisError`。既有 `run_evidence_pipeline()` 與 `retrieve_from_pdf()` 簽名與行為不變。MUST NOT：動 extraction/chunking 內部；dry-run 下建構任何 client。
   Parallelization: Wave 3 | Blocked by: 1,2,3,4 | Blocks: 6
   References (executor has NO interview context - be exhaustive): literature_review/pipeline.py:14-43（既有流程函式）；literature_review/pipeline.py:46-74（CLI 與錯誤處理）；literature_review/evidence_ranking.py（retrieve_evidence 簽名）；literature_review/models.py:117-123（FullTextDocument.source_path → PaperSource）；tests/test_pipeline.py:26-49（fake-client 流程測試風格）
@@ -123,7 +123,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
   QA scenarios (name the exact tool + invocation): happy=`uv run python -m unittest tests.test_pipeline -v` 存 `.omo/evidence/task-5-evidence-cited-synthesis.log`；failure=`uv run python -m literature_review.pipeline data/papers "query" --paper-id x --dry-run`（多輸入+--paper-id）→ stderr 含錯誤訊息且 exit 1（以 subprocess 或直接呼叫 parser 邏輯之單元測試斷言）。
   Commit: N | 併入最終單一 commit
 
-- [ ] 6. 文件與 gitignore 更新：HANDOFF.md / AGENTS.md / README.md / .gitignore
+- [x] 6. 文件與 gitignore 更新：HANDOFF.md / AGENTS.md / README.md / .gitignore
   What to do / Must NOT do: `HANDOFF.md`：(1) 「Next milestone」整節改寫為本計畫規格（多 PDF/資料夾、收縮聚合、include/consider 逐篇筆記、limitation 錨地方向、直接成文 synthesis＋行內引用標記驗證、三層溯源），保留指令碼區塊格式；(2) 「Important design decisions」新增三條（相關性 vs 覆蓋兩種證據視角；低相關/exclude chunk 非缺口證據、缺口僅來自明示 limitations 與後續 aspect-coverage 分析；收縮聚合與檢索分配混淆聲明）；(3) 里程碑表加「Evidence-cited synthesis and future directions | `synthesis.py`, `pipeline.py`, `models.py`, `assessment.py` | Done; …」一行、測試數改為實際數字；(4) 「Suggested sequence」改為：report 組裝（搜尋端合流）→ aspect-coverage 缺口分析 → embedding/GROBID/LLM planner；(5) 兩個 starter prompt 的「current next milestone」措辭更新為 report 組裝。`AGENTS.md`：(1) Current architecture 圖改為 `ResearchIdea -> SearchPlan -> OpenAlex retrieval -> metadata filter/rank/select -> local PDF extraction (multi-PDF) -> EvidenceChunk retrieval -> LLM contextual summary/re-rank -> evidence-backed paper assessment -> per-paper coverage notes (include/consider) -> synthesis report with inline citations / future directions`；(2) 第 18 行句尾延伸「; a chunk-based synthesis is likewise not a whole-paper review」；(3) Commands 區 pipeline 範例改 `uv run python -m literature_review.pipeline data/papers "literature review agent" --top-k 8 --dry-run`；(4) 檔案末尾新增 `## Terminology` 中英詞彙表（每詞一句定義，至少含：Chunk 證據段落（`{paper_id}-p{start}-{end}-c{n}`）、證據摘要 evidence summary（RCS 對某 chunk 的摘要＋分數＋頁碼）、覆蓋包 coverage pack、RCS（summarize_and_rerank）、筆記主張 PaperSummaryClaim（單篇、引 ChunkReference）、逐篇筆記 PaperSummary/per-paper notes、綜合報告 synthesis report（直接成文、行內 [chunk_id] 標記）、未來方向 FutureDirection、收縮平均 shrunk mean、include/consider/exclude 推薦等級（僅 include/consider 有筆記與綜合）、bounded evidence 有限證據集）。`README.md`：Current milestone 後新增一段說明 `literature_review.synthesis`（三層溯源、include/consider 筆記、direction 來源）與多檔指令範例。`.gitignore`：新增段落 `# Planner artifacts (committed plans live under .omo/plans/; drafts/evidence/run-state stay untracked)` 並加入 `.omo/drafts/`、`.omo/run-continuation/`、`.omo/evidence/` 三行。MUST NOT：提交 `.omo/drafts/`、`.omo/run-continuation/`、`.omo/evidence/`、`.env`、`Summer_Project.pdf`、`data/papers/`；不刪除既有正確章節。
   Parallelization: Wave 3 | Blocked by: 5 | Blocks: F1-F4
   References (executor has NO interview context - be exhaustive): HANDOFF.md:22-37（里程碑表與測試數）、HANDOFF.md:39-62（design decisions 與 Next milestone）、HANDOFF.md:80-84（Suggested sequence）、HANDOFF.md:101-113（兩個 prompt）、AGENTS.md:17-19（workflow 原則句）、AGENTS.md:36-42（架構圖）、AGENTS.md:21-28（Commands）、README.md（Current milestone 段落位置）、.gitignore（現有 12 行結構）
@@ -135,7 +135,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
 
 > Runs in parallel after ALL todos. ALL must APPROVE. Surface results and wait for the user's explicit okay before declaring complete.
 
-- [ ] F1. Plan compliance audit
+- [x] F1. Plan compliance audit
   What to do / Must NOT do: 逐條核對本計畫 Scope-Must-have 與每個 todo 的 Acceptance criteria 是否皆有對應實作與測試；核對 Must-NOT-Have 清單零違反（唯讀 `git status`/`git diff --stat` 確認僅含預期檔案；無 `.omo/drafts/`、`.env`、PDF、`data/papers/` 被 staged）。
   Parallelization: Final wave | Blocked by: 1-6 | Blocks: 交付
   References: 本計畫全文；`git status`；`git diff --stat`
@@ -143,7 +143,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
   QA scenarios: happy=清單全 PASS；failure=任何 FAIL → 回到對應 todo 修復後重審。
   Commit: N
 
-- [ ] F2. Code quality review
+- [x] F2. Code quality review
   What to do / Must NOT do: 審查新程式碼：型別標註完整、無裸 `except`、錯誤訊息不外洩模型原文、函式單一職責、與既有模組風格一致（docstring 風格、命名）。
   Parallelization: Final wave | Blocked by: 1-6 | Blocks: 交付
   References: literature_review/synthesis.py、pipeline.py、models.py、assessment.py 的 diff
@@ -151,7 +151,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
   QA scenarios: happy=零 blocking；failure=有 blocking → 修復＋重跑 `uv run python -m unittest discover -s tests -v`。
   Commit: N
 
-- [ ] F3. Real manual QA（keyless 煙霧測試）
+- [x] F3. Real manual QA（keyless 煙霧測試）
   What to do / Must NOT do: 以合成 FullTextDocument（兩份、含章節標題與 limitation 句）與一個內聯最小 FakeClient（keyless、無網路，定義在煙霧腳本內）呼叫 `run_synthesis_pipeline(...)`，驗證端到端 JSON：三層溯源齊備（report 內行內 `[chunk_id]` 標記全部可驗證、directions 帶 paper+chunk ids、paper_sources 帶路徑）、limitations 含非全文聲明；另以 `--dry-run` 跑真實資料夾路徑（若 `data/papers/` 有 PDF）確認不讀 key。
   Parallelization: Final wave | Blocked by: 1-6 | Blocks: 交付
   References: literature_review/pipeline.py 的 run_synthesis_pipeline；tests/test_pipeline.py 的合成文件建法
@@ -159,7 +159,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
   QA scenarios: happy=斷言全過；failure=任何斷言失敗 → 回對應 todo。
   Commit: N
 
-- [ ] F4. Scope fidelity
+- [x] F4. Scope fidelity
   What to do / Must NOT do: 確認無 scope creep：無新依賴（`git diff pyproject.toml uv.lock` 為空或僅鎖定雜訊）、未動 Scope-OUT 模組（`git diff --name-only` 核對）、測試零 live API（`grep -rn "GEMINI" tests/` 僅出現於既有 llm_evidence 測試的環境變數相關或全無）。
   Parallelization: Final wave | Blocked by: 1-6 | Blocks: 交付
   References: `git diff --name-only`、pyproject.toml、tests/
@@ -174,7 +174,7 @@ Your next move: 審核本計畫後，以 `/start-work evidence-cited-synthesis` 
 ```bash
 cd ~/projects/Literature_Review_Agent
 git status
-git add literature_review/models.py literature_review/assessment.py literature_review/synthesis.py literature_review/pipeline.py tests/test_models.py tests/test_assessment.py tests/test_synthesis.py tests/test_pipeline.py .gitignore HANDOFF.md AGENTS.md README.md
+git add literature_review/models.py literature_review/assessment.py literature_review/coverage.py literature_review/synthesis.py literature_review/pipeline.py tests/test_models.py tests/test_assessment.py tests/test_synthesis.py tests/test_pipeline.py .gitignore HANDOFF.md AGENTS.md README.md
 git commit -m "feat(synthesis): evidence-cited multi-paper synthesis with future directions"
 git status
 git push   # upstream 已由使用者首次推送時以 -u 建立

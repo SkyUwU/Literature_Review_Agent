@@ -31,6 +31,14 @@ uv run python -m literature_review.pipeline data/papers/example.pdf "literature 
 
 After copying `.env.example` to `.env` and setting `GEMINI_API_KEY`, omit `--dry-run` to run the LLM re-ranking stage. Start with one PDF and `--top-k 2` or `--top-k 3`.
 
+`literature_review.synthesis` completes the evidence-cited report with three-layer traceability: every claim flows from an `EvidenceChunk` through a per-paper note (`PaperSummary`) into the final report prose, which carries inline `[chunk_id]` citation markers. Per-paper notes are built only for papers recommended as include or consider. Future directions come from three sources: strong cross-paper convergence, explicit limitations stated in the retrieved evidence, and a deterministic fallback when neither yields a direction.
+
+Run the multi-PDF synthesis flow over a folder of papers (requires `GEMINI_API_KEY`):
+
+```powershell
+uv run python -m literature_review.pipeline data/papers "literature review agent" --top-k 8
+```
+
 ## Run the demo
 
 After setting up the environment, run:

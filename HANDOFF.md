@@ -33,8 +33,9 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | First-stage chunk retrieval | `evidence_ranking.py` | Done; lexical baseline |
 | LLM contextual-summary/re-ranking contract | `llm_evidence.py` | Done; fake-client tested and live Gemini smoke test succeeded |
 | Evidence-based paper assessment | `assessment.py`, `models.py` | Done; deterministic aggregation retains chunk IDs and page ranges |
+| Evidence-cited synthesis and future directions | `synthesis.py`, `pipeline.py`, `models.py`, `assessment.py` | Done; three-layer traceability from chunks to report |
 
-The current suite has 29 tests. Do not replace tests with only live API checks.
+The current suite has 71 tests. Do not replace tests with only live API checks.
 
 ## Important design decisions
 
@@ -44,22 +45,21 @@ The current suite has 29 tests. Do not replace tests with only live API checks.
 - The first chunk retrieval stage is intentionally cheap and deterministic. It currently ranks lexical matches; an embedding retriever can later replace it without changing the response contract.
 - The second stage should be an LLM contextual-summary/re-ranking step. It must receive a bounded set of retrieved chunks, return structured evidence summaries with page references, and then support a paper-level assessment.
 - Same-title records are a pragmatic deduplication baseline. The current rule prefers higher citation count, then venue presence, abstract length, then year. It is not proof of identity. Add DOI-based deduplication when DOI metadata is available.
+- Evidence supports two distinct perspectives: relevance (how directly a chunk answers the query) and coverage (which topic aspects a paper addresses). Relevance drives retrieval and scoring; per-paper notes capture coverage so both views stay traceable.
+- Low-relevance/exclude chunks are NOT gap evidence. Research gaps come only from explicit limitations stated in the retrieved evidence plus subsequent aspect-coverage analysis across papers; an unretrieved or excluded chunk does not prove absence.
+- Aggregate scores use shrunk means (the sample mean blended toward a prior score when few chunks support a paper). Caveat: per-paper top-k retrieval allocation gives papers unequal chunk counts, so raw mean comparisons remain partially confounded even after shrinkage.
 
-## Next milestone: build synthesis with evidence citations
+## Latest milestone: evidence-cited synthesis and future directions
 
-`literature_review.llm_evidence` contains a provider-agnostic `JsonGenerationClient`, a `GeminiJsonClient`, prompt construction, Pydantic-schema structured output, `model_validate_json()` validation, provenance enrichment, and fake-client tests. A live Gemini smoke test succeeded on `PaperQA2.pdf`, producing page-traceable summaries such as `PaperQA2.pdf-p12-13-c32`.
+`literature_review.synthesis` implements the evidence-cited synthesis stage with three-layer traceability: every synthesized claim traces from an `EvidenceChunk` through a per-paper `PaperSummary` note to the final report prose.
 
-`literature_review.pipeline` now provides the opt-in CLI flow: local PDF -> extraction -> chunking -> top-k retrieval -> `summarize_and_rerank`. Its `--dry-run` option performs only the local steps and never reads a key or calls an API.
+- `literature_review.pipeline` accepts multiple PDFs or a folder of PDFs in one run (`expand_pdf_inputs()` with order-preserving deduplication) and retrieves top-k chunks per paper before aggregation. `--dry-run` still performs only local steps and never reads a key or calls an API.
+- Aggregate paper scores use deterministic shrunk means; each retained `PaperAssessment.evidence` item keeps the chunk ID, page range, summary, scores, and original chunk recommendation.
+- Per-paper notes are generated only for papers whose aggregated recommendation is include or consider; exclude papers contribute no synthesized claims.
+- Future directions are anchored in explicit limitations found in the retrieved evidence, with deterministic convergence and fallback sources. LLM output is validated with `model_validate_json()` against Pydantic schemas; unknown chunk IDs or missing/invalid inline citation markers raise `SynthesisError`.
+- The report is direct prose with inline `[chunk_id]` citation markers validated against the supplied evidence set; deterministic and fake-client tests cover the path without a live API call.
 
-`aggregate_evidence_assessments()` converts an `EvidenceRerankResponse` into an
-`EvidenceAssessmentResponse` with an explicit `EvidenceAggregationPolicy`. Each
-`PaperAssessment.evidence` item retains the chunk ID, page range, summary, scores,
-and original chunk recommendation. Aggregate scores are deterministic nearest-integer
-means, and the final recommendation follows the explicit policy thresholds.
-
-1. Use the evidence-based paper assessments to produce a synthesis with citations to chunk IDs and page ranges.
-2. Keep all generated claims traceable to the bounded retrieved evidence; distinguish this from a whole-paper review.
-3. Keep deterministic and fake-client tests. Do not require a live API call for tests.
+The next milestone is report assembly driven by search convergence; see the suggested sequence below.
 
 ## Windows and WSL/OpenCode handoff
 
@@ -77,11 +77,11 @@ means, and the final recommendation follows the explicit policy thresholds.
 - These are two independent Git working copies. Clone only once; do not repeatedly copy or re-clone after every handoff. The private GitHub remote `origin` is now configured. Choose one as the active copy for a milestone, commit there, run `git push`, then run `git pull --ff-only` in the other copy before editing. A configured local bare repository could also serve this role, but do not use either checked-out working directory as an informal bidirectional remote.
 - Do not copy `.venv`, PDFs, or uncommitted source files between copies. For a one-time WSL setup on this same private machine, copying the ignored `.env` from Windows is acceptable; alternatively create it from `.env.example`. Never commit, paste, or upload `.env`. If Gemini is needed in WSL, ensure that the WSL clone has its own local `.env`.
 
-Suggested sequence after the evidence-assessment step:
+Suggested sequence after the evidence-cited synthesis step:
 
-1. build synthesis with citations to chunks/pages;
-2. add an LLM search planner only if the rule-based planner proves inadequate;
-3. consider an embedding retriever and GROBID/Docling only after the baseline works on real PDFs.
+1. report assembly (search convergence);
+2. aspect-coverage gap analysis;
+3. embedding retriever/GROBID/LLM planner upgrades once the baseline works on real PDFs.
 
 ## API and operational notes
 
@@ -101,7 +101,7 @@ Suggested sequence after the evidence-assessment step:
 ## Handoff prompt for another coding agent
 
 ```text
-Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDOFF.md first. Inspect git status and preserve user changes. Implement only the current next milestone in HANDOFF.md. Do not request or print API keys; use .env/environment variables. Keep Pydantic contracts, add tests where needed, run the full test suite, and report the exact PowerShell or WSL commands for the user to commit. Reply in Traditional Chinese and keep explanations concise.
+Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDOFF.md first. Inspect git status and preserve user changes. Implement only the current next milestone in HANDOFF.md (report assembly/search convergence). Do not request or print API keys; use .env/environment variables. Keep Pydantic contracts, add tests where needed, run the full test suite, and report the exact PowerShell or WSL commands for the user to commit. Reply in Traditional Chinese and keep explanations concise.
 ```
 
 ## New Codex session starter prompt
@@ -109,5 +109,5 @@ Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDO
 Use this prompt when starting a fresh Codex task for this repository. It intentionally delegates details to the tracked documents instead of replaying long chat history:
 
 ```text
-Continue the ADSL Summer Project Task 1A in C:\Users\User\Desktop\Literature_Review_Agent. Read AGENTS.md and HANDOFF.md before taking action. The Gemini PDF evidence smoke test and the provenance-preserving evidence-based PaperAssessment aggregation are complete; implement only the current next milestone: evidence-cited synthesis and future directions. Inspect git status first, do not commit Summer_Project.pdf or data/papers/, add tests, run the full suite, and give exact PowerShell commit commands. Reply concisely in Traditional Chinese. Do not ask for or print API keys.
+Continue the ADSL Summer Project Task 1A in C:\Users\User\Desktop\Literature_Review_Agent. Read AGENTS.md and HANDOFF.md before taking action. The Gemini PDF evidence smoke test, provenance-preserving PaperAssessment aggregation, and evidence-cited synthesis with future directions are complete; implement only the current next milestone: report assembly (search convergence). Inspect git status first, do not commit Summer_Project.pdf or data/papers/, add tests, run the full suite, and give exact PowerShell commit commands. Reply concisely in Traditional Chinese. Do not ask for or print API keys.
 ```
