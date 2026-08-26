@@ -10,3 +10,8 @@ data/papers/
 # Local editor and observability files
 .vscode/
 .langfuse/
+
+# Planner artifacts (committed plans live under .omo/plans/; drafts/evidence/run-state stay untracked)
+.omo/drafts/
+.omo/run-continuation/
+.omo/evidence/

@@ -234,6 +234,8 @@ class EvidenceAggregationPolicy(BaseModel):
     include_relevance_score: int = Field(default=4, ge=1, le=5)
     include_evidence_quality_score: int = Field(default=3, ge=1, le=5)
     consider_relevance_score: int = Field(default=3, ge=1, le=5)
+    prior_score: int = Field(default=3, ge=1, le=5)
+    shrinkage_strength: int = Field(default=4, ge=0)
 
 
 class AssessmentResponse(BaseModel):
@@ -260,6 +262,7 @@ class FutureDirection(BaseModel):
     title: str = Field(min_length=3)
     rationale: str = Field(min_length=20)
     supporting_paper_ids: list[str] = Field(min_length=1)
+    supporting_chunk_ids: list[str] = Field(default_factory=list)
 
 
 class LiteratureReviewReport(BaseModel):
@@ -271,3 +274,88 @@ class LiteratureReviewReport(BaseModel):
     synthesis: str = Field(min_length=20)
     future_directions: list[FutureDirection] = Field(min_length=1)
     limitations: list[str] = Field(default_factory=list)
+
+
+class ChunkReference(BaseModel):
+    """One cited evidence chunk that backs a summary claim."""
+
+    chunk_id: str
+    paper_id: str
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    quote: str = Field(min_length=20)
+
+
+class PaperSummaryClaim(BaseModel):
+    """One claim in a per-paper summary, tied to cited evidence chunks."""
+
+    text: str = Field(min_length=20)
+    aspect: str = Field(min_length=3)
+    evidence: list[ChunkReference] = Field(min_length=1)
+
+
+class PaperSummary(BaseModel):
+    """An evidence-backed summary of one selected paper."""
+
+    paper_id: str
+    claims: list[PaperSummaryClaim] = Field(min_length=1)
+    stated_limitations: list[PaperSummaryClaim] = Field(default_factory=list)
+    coverage_chunk_ids: list[str] = Field(min_length=1)
+
+
+class LlmNoteClaim(BaseModel):
+    """One claim requested from an LLM for a per-paper note."""
+
+    text: str = Field(min_length=20)
+    chunk_ids: list[str] = Field(min_length=1)
+    aspect: str = Field(min_length=3)
+
+
+class LlmPaperSummaryNote(BaseModel):
+    """The JSON object an LLM must return to summarize one paper."""
+
+    claims: list[LlmNoteClaim] = Field(min_length=1)
+    stated_limitations: list[LlmNoteClaim] = Field(default_factory=list)
+    coverage_chunk_ids: list[str] = Field(default_factory=list)
+
+
+class LlmSynthesisDirection(BaseModel):
+    """A future direction requested from an LLM during synthesis."""
+
+    title: str = Field(min_length=3)
+    rationale: str = Field(min_length=20)
+    supporting_paper_ids: list[str] = Field(min_length=1)
+    supporting_chunk_ids: list[str] = Field(min_length=1)
+
+
+class LlmSynthesisBatch(BaseModel):
+    """The JSON object an LLM must return for one bounded synthesis batch."""
+
+    report: str = Field(min_length=100)
+    future_directions: list[LlmSynthesisDirection] = Field(min_length=1)
+
+
+class PaperSource(BaseModel):
+    """Local file provenance for one paper used in synthesis."""
+
+    paper_id: str
+    source_path: str = Field(min_length=1)
+
+
+class CoveragePackPolicy(BaseModel):
+    """Reproducible settings for bounding the evidence sent to synthesis."""
+
+    max_chunks_per_paper: int = Field(default=6, ge=1, le=50)
+    llm_input_cap: int = Field(default=40, ge=1, le=200)
+
+
+class SynthesisResponse(BaseModel):
+    """Evidence-cited synthesis that preserves every upstream provenance layer."""
+
+    paper_sources: list[PaperSource] = Field(min_length=1)
+    evidence_assessment_response: EvidenceAssessmentResponse
+    paper_summaries: list[PaperSummary] = Field(min_length=1)
+    report: str = Field(min_length=100)
+    future_directions: list[FutureDirection] = Field(min_length=1)
+    limitations: list[str]
+    generated_by: Literal["deterministic", "llm"]

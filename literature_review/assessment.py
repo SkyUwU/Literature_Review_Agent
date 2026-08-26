@@ -75,9 +75,17 @@ def assess_selected_papers(
     )
 
 
-def _rounded_mean(scores: list[int]) -> int:
-    """Return a deterministic nearest-integer mean without banker's rounding."""
-    return math.floor(sum(scores) / len(scores) + 0.5)
+def _shrunk_mean(scores: list[int], policy: EvidenceAggregationPolicy) -> int:
+    """Blend the sample mean toward the prior score when few chunks support a paper.
+
+    Formula: floor((n*mean + m*prior)/(n+m) + 0.5)
+    where n=len(scores), m=policy.shrinkage_strength, prior=policy.prior_score.
+    """
+    n = len(scores)
+    m = policy.shrinkage_strength
+    prior = policy.prior_score
+    mean = sum(scores) / n
+    return math.floor((n * mean + m * prior) / (n + m) + 0.5)
 
 
 def aggregate_evidence_assessments(
@@ -95,8 +103,10 @@ def aggregate_evidence_assessments(
 
     assessments: list[PaperAssessment] = []
     for paper_id, summaries in summaries_by_paper.items():
-        relevance = _rounded_mean([summary.relevance_score for summary in summaries])
-        evidence_quality = _rounded_mean([summary.evidence_quality_score for summary in summaries])
+        relevance = _shrunk_mean([summary.relevance_score for summary in summaries], policy)
+        evidence_quality = _shrunk_mean(
+            [summary.evidence_quality_score for summary in summaries], policy
+        )
         if (
             relevance >= policy.include_relevance_score
             and evidence_quality >= policy.include_evidence_quality_score
@@ -129,7 +139,9 @@ def aggregate_evidence_assessments(
                 evidence_quality_score=evidence_quality,
                 recommendation=recommendation,
                 rationale=(
-                    f"Evidence-based aggregate from {len(evidence)} supplied retrieved chunk(s): {sources}. "
+                    f"Evidence-based aggregate from {len(evidence)} chunk(s) "
+                    f"(shrunk mean, prior p={policy.prior_score}, "
+                    f"strength m={policy.shrinkage_strength}): {sources}. "
                     f"Aggregate relevance score {relevance}; aggregate evidence quality score {evidence_quality}."
                 ),
                 evidence=evidence,
@@ -143,5 +155,6 @@ def aggregate_evidence_assessments(
         limitations=[
             *rerank_response.limitations,
             "Each paper assessment is limited to the supplied top-k retrieved chunks, not the whole paper.",
+            "Chunk counts partly reflect retrieval allocation across papers, not absolute paper quality.",
         ],
     )
