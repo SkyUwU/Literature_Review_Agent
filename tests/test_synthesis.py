@@ -256,13 +256,14 @@ class PaperNotesTests(unittest.TestCase):
         )
         self.assertTrue(all(len(claim.evidence) == 1 for claim in note.claims))
         self.assertEqual(note.claims[0].evidence[0].quote, chunks[0].text[:240])
-        self.assertEqual([claim.aspect for claim in note.stated_limitations], ["limitations"])
+        limitation_claims = [c for c in note.claims if c.aspect == "limitations"]
+        self.assertEqual([claim.aspect for claim in limitation_claims], ["limitations"])
         self.assertEqual(
             note.coverage_chunk_ids,
             sorted(
                 {
                     reference.chunk_id
-                    for claim in [*note.claims, *note.stated_limitations]
+                    for claim in note.claims
                     for reference in claim.evidence
                 }
             ),
@@ -313,7 +314,7 @@ class FakeNoteClient:
         self.response = response
         self.prompt = ""
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.prompt = prompt
         return json.dumps(self.response)
 
@@ -323,7 +324,7 @@ class RetryNoteClient:
         self.responses = ['{"claims": [', json.dumps(valid_response)]
         self.prompts: list[str] = []
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.prompts.append(prompt)
         return self.responses.pop(0)
 
@@ -332,7 +333,7 @@ class FakeSynthesisClient:
     def __init__(self, report: str, directions: list[dict[str, object]]) -> None:
         self.payload: dict[str, object] = {"report": report, "future_directions": directions}
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         return json.dumps(self.payload)
 
 
@@ -349,13 +350,11 @@ def valid_note_payload() -> dict[str, object]:
                 "chunk_ids": ["p1-p2-2-c4"],
                 "aspect": "method",
             },
-        ],
-        "stated_limitations": [
             {
                 "text": "The evaluation is restricted to English computer-science papers only.",
                 "chunk_ids": ["p1-p4-4-c8"],
                 "aspect": "limitations",
-            }
+            },
         ],
     }
 
@@ -389,11 +388,12 @@ class LlmPaperNotesTests(unittest.TestCase):
             self.assertIn(chunk.chunk_id, client.prompt)
         self.assertIn("only", client.prompt)
         self.assertEqual(note.paper_id, "p1")
-        self.assertEqual([claim.aspect for claim in note.claims], ["contribution", "method"])
+        self.assertEqual([claim.aspect for claim in note.claims], ["contribution", "method", "limitations"])
         self.assertEqual(note.claims[0].evidence[0].chunk_id, "p1-p1-1-c1")
         self.assertEqual(note.claims[0].evidence[0].paper_id, "p1")
         self.assertEqual(note.claims[0].evidence[0].quote, chunks[0].text[:240])
-        self.assertEqual(note.stated_limitations[0].evidence[0].chunk_id, "p1-p4-4-c8")
+        limitation_claims = [c for c in note.claims if c.aspect == "limitations"]
+        self.assertEqual(limitation_claims[0].evidence[0].chunk_id, "p1-p4-4-c8")
         self.assertEqual(note.coverage_chunk_ids, ["p1-p1-1-c1", "p1-p2-2-c4", "p1-p4-4-c8"])
 
     def test_llm_notes_unknown_chunk_id(self) -> None:
@@ -418,7 +418,7 @@ class LlmPaperNotesTests(unittest.TestCase):
         note = summarize_paper_notes("p1", sectioned_chunks("p1"), client, CoveragePackPolicy())
 
         self.assertEqual(len(client.prompts), 2)
-        self.assertIn("malformed", client.prompts[1])
+        self.assertIn("schema validation errors", client.prompts[1])
         self.assertEqual(note.coverage_chunk_ids, ["p1-p1-1-c1", "p1-p2-2-c4", "p1-p4-4-c8"])
 
 

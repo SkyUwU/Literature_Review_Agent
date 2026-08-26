@@ -15,7 +15,7 @@ class FakeClient:
         self.response = response
         self.prompt = ""
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.prompt = prompt
         return json.dumps(self.response)
 
@@ -25,7 +25,7 @@ class RetryClient:
         self.responses = ['{"assessments": [', json.dumps(valid_response)]
         self.prompts: list[str] = []
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.prompts.append(prompt)
         return self.responses.pop(0)
 

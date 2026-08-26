@@ -86,14 +86,16 @@ def build_deterministic_paper_notes(
     if not pack:
         raise SynthesisError(f"No evidence chunks available for paper {assessment.paper_id}.")
     claims = _claims_from_chunks(pack)
-    stated_limitations = _claims_from_chunks(
-        detect_limitation_chunks(paper_chunks), aspect="limitations"
-    )
-    referenced = {ref.chunk_id for claim in [*claims, *stated_limitations] for ref in claim.evidence}
+    covered_ids = {ref.chunk_id for claim in claims for ref in claim.evidence}
+    limitation_chunks = [
+        chunk for chunk in detect_limitation_chunks(paper_chunks) if chunk.chunk_id not in covered_ids
+    ]
+    limitation_claims = _claims_from_chunks(limitation_chunks, aspect="limitations")
+    all_claims = claims + limitation_claims
+    referenced = {ref.chunk_id for claim in all_claims for ref in claim.evidence}
     return PaperSummary(
         paper_id=assessment.paper_id,
-        claims=claims,
-        stated_limitations=stated_limitations,
+        claims=all_claims,
         coverage_chunk_ids=sorted(referenced),
     )
 
@@ -159,18 +161,19 @@ def _convergence_direction(strong: list[PaperAssessment]) -> LlmSynthesisDirecti
 
 
 def _limitation_directions(
-    assessments: list[PaperAssessment],
-    coverage_packs: dict[str, list[EvidenceChunk]],
+    notes: list[PaperSummary],
 ) -> list[LlmSynthesisDirection]:
     directions: list[LlmSynthesisDirection] = []
-    for assessment in assessments:
-        limited = detect_limitation_chunks(coverage_packs.get(assessment.paper_id, []))
-        chunk_ids = sorted({chunk.chunk_id for chunk in limited})
+    for note in notes:
+        limitation_claims = [c for c in note.claims if c.aspect == "limitations"]
+        if not limitation_claims:
+            continue
+        chunk_ids = sorted({ref.chunk_id for claim in limitation_claims for ref in claim.evidence})
         direction = _make_direction(
-            f"Target the stated limitations of {assessment.paper_id}",
-            f"The authors of {assessment.paper_id} state limitations in chunks "
+            f"Target the stated limitations of {note.paper_id}",
+            f"The authors of {note.paper_id} state limitations in chunks "
             f"{', '.join(chunk_ids)}; future work should address them directly.",
-            [assessment.paper_id],
+            [note.paper_id],
             chunk_ids,
         )
         if direction is not None:
@@ -196,13 +199,13 @@ def _fallback_direction(assessments: list[PaperAssessment]) -> LlmSynthesisDirec
 
 def _deterministic_directions(
     response: EvidenceAssessmentResponse,
-    coverage_packs: dict[str, list[EvidenceChunk]],
+    notes: list[PaperSummary],
 ) -> list[LlmSynthesisDirection]:
     assessments = _usable_assessments(response)
     convergence = _convergence_direction(
         [item for item in assessments if item.relevance_score >= _CONVERGENCE_RELEVANCE_SCORE]
     )
-    limitation_directions = _limitation_directions(assessments, coverage_packs)
+    limitation_directions = _limitation_directions(notes)
     if convergence is not None:
         return [convergence, *limitation_directions]
     if limitation_directions:
@@ -223,11 +226,6 @@ def _render_report(
         lines.extend(
             f"- {claim.aspect}: {claim.text} [{reference.chunk_id}]"
             for claim in note.claims
-            for reference in claim.evidence
-        )
-        lines.extend(
-            f"- stated limitation: {claim.text} [{reference.chunk_id}]"
-            for claim in note.stated_limitations
             for reference in claim.evidence
         )
         lines.append("")
@@ -273,7 +271,7 @@ def build_deterministic_synthesis(
 
     directions = [
         FutureDirection(**direction.model_dump())
-        for direction in _deterministic_directions(evidence_assessment_response, coverage_packs)
+        for direction in _deterministic_directions(evidence_assessment_response, notes)
     ]
     if not directions:
         raise SynthesisError("Could not derive any deterministic future direction.")
@@ -297,6 +295,9 @@ def _strip_code_fence(raw_output: str) -> str:
     if normalized.startswith("```") and normalized.endswith("```"):
         lines = normalized.splitlines()
         normalized = "\n".join(lines[1:-1]).strip()
+    last_brace = normalized.rfind("}")
+    if last_brace != -1:
+        normalized = normalized[: last_brace + 1]
     return normalized
 
 
@@ -326,13 +327,24 @@ def _build_repair_prompt(raw_output: str) -> str:
     )
 
 
-def _generate_validated(client: JsonGenerationClient, model: type[_MODEL_T], prompt: str) -> _MODEL_T:
-    """Call the client once and retry exactly once when the JSON was malformed."""
-    raw_output = client.generate_json(prompt)
+def _build_schema_repair_prompt(raw_output: str, error_details: str) -> str:
+    return (
+        "The previous response had schema validation errors. Return a repaired version "
+        "as exactly one JSON object, without Markdown or explanation. "
+        "Fix the specific issue described below while preserving all other correct content. "
+        f"Validation error: {error_details}\n"
+        f"Previous response:\n{raw_output}"
+    )
+
+
+def _generate_validated(client: JsonGenerationClient, model: type[_MODEL_T], prompt: str, schema: dict) -> _MODEL_T:
+    """Call the client once and retry exactly once on any SynthesisError."""
+    raw_output = client.generate_json(prompt, schema)
     try:
         return _parse_llm_model(model, raw_output)
-    except SynthesisOutputSyntaxError:
-        return _parse_llm_model(model, client.generate_json(_build_repair_prompt(raw_output)))
+    except SynthesisError as exc:
+        repair = _build_schema_repair_prompt(raw_output, str(exc))
+        return _parse_llm_model(model, client.generate_json(repair, schema))
 
 
 def _strided_indices(count: int, slots: int) -> list[int]:
@@ -379,13 +391,14 @@ def build_paper_notes_prompt(paper_id: str, chunks: list[EvidenceChunk]) -> str:
     return (
         "Summarize this single paper using only the supplied evidence chunks. "
         "Do not use outside knowledge and do not invent claims. "
-        "Classify each chunk by section, select representative chunk_ids per aspect, and extract the stated "
-        f"limitations. Detected limitation cues: {json.dumps(limitation_ids)}. "
+        "Classify each chunk by section and select representative chunk_ids per aspect. "
+        "If a chunk states limitations or future work, give it aspect='limitations'. "
+        f"Detected limitation cues: {json.dumps(limitation_ids)}. "
         f"Section classification of the supplied chunks: {json.dumps(sections_by_aspect)}. "
         "Every aspect must be one full English word of at least three letters chosen from: "
         f"{', '.join(_NOTE_ASPECTS)}. "
-        "Return exactly one JSON object, without Markdown code fences or surrounding explanation, containing "
-        "'claims', 'stated_limitations', and 'coverage_chunk_ids'. Each claim must contain 'text' of at least "
+        "Return exactly one JSON object, without Markdown code fences or surrounding explanation, "
+        "containing 'claims' and 'coverage_chunk_ids'. Each claim must contain 'text' of at least "
         "20 characters, 'chunk_ids' as a non-empty subset of the supplied chunk identifiers, and 'aspect'. "
         f"Paper ID: {paper_id}\n"
         f"Evidence chunks: {json.dumps(payload, ensure_ascii=False)}"
@@ -408,7 +421,7 @@ def _claim_from_note(
                 quote=chunk.text[:_QUOTE_MAX_CHARS],
             )
         )
-    return PaperSummaryClaim(text=claim.text, aspect=claim.aspect, evidence=references)
+    return PaperSummaryClaim(text=claim.text, aspect=claim.aspect if claim.aspect else "limitations", evidence=references)
 
 
 def summarize_paper_notes(
@@ -421,10 +434,14 @@ def summarize_paper_notes(
     supplied = _bounded_chunks_for_llm(chunks, policy.llm_input_cap)
     if not supplied:
         raise SynthesisError(f"No evidence chunks available for paper {paper_id}.")
-    note = _generate_validated(client, LlmPaperSummaryNote, build_paper_notes_prompt(paper_id, supplied))
+    note = _generate_validated(
+        client, LlmPaperSummaryNote,
+        build_paper_notes_prompt(paper_id, supplied),
+        LlmPaperSummaryNote.model_json_schema(),
+    )
     chunk_by_id = {chunk.chunk_id: chunk for chunk in supplied}
     cited_ids = {
-        chunk_id for claim in [*note.claims, *note.stated_limitations] for chunk_id in claim.chunk_ids
+        chunk_id for claim in note.claims for chunk_id in claim.chunk_ids
     } | set(note.coverage_chunk_ids)
     unknown_ids = sorted(cited_ids - chunk_by_id.keys())
     if unknown_ids:
@@ -432,16 +449,14 @@ def summarize_paper_notes(
             f"LLM note for paper {paper_id} cites unknown chunk ids: {', '.join(unknown_ids)}."
         )
     claims = [_claim_from_note(claim, chunk_by_id) for claim in note.claims]
-    stated_limitations = [_claim_from_note(claim, chunk_by_id) for claim in note.stated_limitations]
     coverage_chunk_ids = sorted(
-        {reference.chunk_id for claim in [*claims, *stated_limitations] for reference in claim.evidence}
+        {reference.chunk_id for claim in claims for reference in claim.evidence}
     )
     if not coverage_chunk_ids:
         raise SynthesisError(f"LLM note for paper {paper_id} cites no evidence chunks.")
     return PaperSummary(
         paper_id=paper_id,
         claims=claims,
-        stated_limitations=stated_limitations,
         coverage_chunk_ids=coverage_chunk_ids,
     )
 
@@ -476,14 +491,6 @@ def build_synthesis_prompt(
                     "chunk_ids": [reference.chunk_id for reference in claim.evidence],
                 }
                 for claim in note.claims
-            ],
-            "stated_limitations": [
-                {
-                    "text": claim.text,
-                    "aspect": claim.aspect,
-                    "chunk_ids": [reference.chunk_id for reference in claim.evidence],
-                }
-                for claim in note.stated_limitations
             ],
             "coverage_chunk_ids": note.coverage_chunk_ids,
         }
@@ -541,6 +548,7 @@ def synthesize_report(
         client,
         LlmSynthesisBatch,
         build_synthesis_prompt(evidence_assessment_response, paper_summaries),
+        LlmSynthesisBatch.model_json_schema(),
     )
     allowed_ids = _allowed_marker_ids(evidence_assessment_response, paper_summaries, usable_ids)
     markers = _MARKER_REGEX.findall(batch.report)

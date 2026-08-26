@@ -299,7 +299,6 @@ class PaperSummary(BaseModel):
 
     paper_id: str
     claims: list[PaperSummaryClaim] = Field(min_length=1)
-    stated_limitations: list[PaperSummaryClaim] = Field(default_factory=list)
     coverage_chunk_ids: list[str] = Field(min_length=1)
 
 
@@ -315,7 +314,6 @@ class LlmPaperSummaryNote(BaseModel):
     """The JSON object an LLM must return to summarize one paper."""
 
     claims: list[LlmNoteClaim] = Field(min_length=1)
-    stated_limitations: list[LlmNoteClaim] = Field(default_factory=list)
     coverage_chunk_ids: list[str] = Field(default_factory=list)
 
 

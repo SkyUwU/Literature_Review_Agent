@@ -24,7 +24,7 @@ class LlmOutputSyntaxError(LlmEvidenceError):
 class JsonGenerationClient(Protocol):
     """Minimal provider interface; tests use a fake and Gemini is one implementation."""
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         """Return exactly one JSON object encoded as text."""
 
 
@@ -43,14 +43,14 @@ class GeminiJsonClient:
         self._client = genai.Client(api_key=api_key)
         self._model = model
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         interaction = self._client.interactions.create(
             model=self._model,
             input=prompt,
             response_format={
                 "type": "text",
                 "mime_type": "application/json",
-                "schema": LlmEvidenceAssessmentBatch.model_json_schema(),
+                "schema": schema if schema is not None else LlmEvidenceAssessmentBatch.model_json_schema(),
             },
         )
         if not interaction.output_text:
@@ -130,11 +130,13 @@ def summarize_and_rerank(
     client: JsonGenerationClient,
 ) -> EvidenceRerankResponse:
     """Validate LLM assessments and enrich them only with trusted chunk provenance."""
-    raw_output = client.generate_json(build_evidence_prompt(response))
+    raw_output = client.generate_json(build_evidence_prompt(response), LlmEvidenceAssessmentBatch.model_json_schema())
     try:
         generated = validate_evidence_assessments(raw_output)
     except LlmOutputSyntaxError:
-        generated = validate_evidence_assessments(client.generate_json(build_json_repair_prompt(raw_output)))
+        generated = validate_evidence_assessments(client.generate_json(
+            build_json_repair_prompt(raw_output), LlmEvidenceAssessmentBatch.model_json_schema()
+        ))
 
     by_chunk_id = {item.chunk.chunk_id: item.chunk for item in response.ranked_chunks}
     returned_ids = [item.chunk_id for item in generated.assessments]

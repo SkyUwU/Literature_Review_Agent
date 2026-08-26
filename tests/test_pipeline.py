@@ -11,7 +11,7 @@ from literature_review.pipeline import expand_pdf_inputs, run_evidence_pipeline,
 
 
 class FakeClient:
-    def generate_json(self, _prompt: str) -> str:
+    def generate_json(self, _prompt: str, schema: dict | None = None) -> str:
         return json.dumps(
             {
                 "assessments": [
@@ -98,7 +98,6 @@ def note_payload(paper_id: str) -> dict[str, object]:
                 "aspect": "contribution",
             }
         ],
-        "stated_limitations": [],
     }
 
 
@@ -109,7 +108,7 @@ class SynthesisFakeClient:
         self.prompts: list[str] = []
         self.cited_chunk_ids: list[str] = []
 
-    def generate_json(self, prompt: str) -> str:
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.prompts.append(prompt)
         if prompt.startswith("Summarize this single paper"):
             for paper_id in ("paper-1", "paper-2"):
