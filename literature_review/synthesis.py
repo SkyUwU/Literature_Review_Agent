@@ -337,6 +337,20 @@ def _build_schema_repair_prompt(raw_output: str, error_details: str) -> str:
     )
 
 
+def _build_chunk_repair_prompt(raw_output: str, unknown_ids: list[str], valid_ids: list[str]) -> str:
+    """Ask the model to correct hallucinated chunk IDs against the allowed set."""
+    return (
+        "The previous response cited chunk ids that are invalid or absent from the supplied evidence: "
+        f"{json.dumps(unknown_ids)}. "
+        f"The only valid chunk_ids are: {json.dumps(valid_ids)}. "
+        "Never invent, guess, or modify chunk IDs. Only use the exact IDs from this set. "
+        "Return a repaired version of the previous JSON, preserving all other content (text, aspect) "
+        "but correcting every chunk_ids value and coverage_chunk_ids to use only valid chunk ids. "
+        "Return exactly one JSON object, without Markdown code fences or surrounding explanation. "
+        f"Previous response:\n{raw_output}"
+    )
+
+
 def _generate_validated(client: JsonGenerationClient, model: type[_MODEL_T], prompt: str, schema: dict) -> _MODEL_T:
     """Call the client once and retry exactly once on any SynthesisError."""
     raw_output = client.generate_json(prompt, schema)
@@ -388,6 +402,7 @@ def build_paper_notes_prompt(paper_id: str, chunks: list[EvidenceChunk]) -> str:
         _, aspect = classify_section(chunk.text)
         sections_by_aspect.setdefault(aspect, []).append(chunk.chunk_id)
     limitation_ids = sorted({chunk.chunk_id for chunk in detect_limitation_chunks(chunks)})
+    valid_ids = sorted(chunk.chunk_id for chunk in chunks)
     return (
         "Summarize this single paper using only the supplied evidence chunks. "
         "Do not use outside knowledge and do not invent claims. "
@@ -400,9 +415,23 @@ def build_paper_notes_prompt(paper_id: str, chunks: list[EvidenceChunk]) -> str:
         "Return exactly one JSON object, without Markdown code fences or surrounding explanation, "
         "containing 'claims' and 'coverage_chunk_ids'. Each claim must contain 'text' of at least "
         "20 characters, 'chunk_ids' as a non-empty subset of the supplied chunk identifiers, and 'aspect'. "
+        f"The complete set of valid chunk_ids is: {json.dumps(valid_ids)}. "
+        "Never invent, guess, or modify chunk IDs. Only use the exact IDs from this set. "
         f"Paper ID: {paper_id}\n"
         f"Evidence chunks: {json.dumps(payload, ensure_ascii=False)}"
     )
+
+
+def _check_unknown_ids(
+    note: LlmPaperSummaryNote,
+    supplied: list[EvidenceChunk],
+) -> list[str]:
+    """Return the sorted cited chunk ids that are not among the supplied chunks."""
+    chunk_by_id = {chunk.chunk_id for chunk in supplied}
+    cited_ids = {
+        chunk_id for claim in note.claims for chunk_id in claim.chunk_ids
+    } | set(note.coverage_chunk_ids)
+    return sorted(cited_ids - chunk_by_id)
 
 
 def _claim_from_note(
@@ -440,14 +469,19 @@ def summarize_paper_notes(
         LlmPaperSummaryNote.model_json_schema(),
     )
     chunk_by_id = {chunk.chunk_id: chunk for chunk in supplied}
-    cited_ids = {
-        chunk_id for claim in note.claims for chunk_id in claim.chunk_ids
-    } | set(note.coverage_chunk_ids)
-    unknown_ids = sorted(cited_ids - chunk_by_id.keys())
+    unknown_ids = _check_unknown_ids(note, supplied)
     if unknown_ids:
-        raise SynthesisError(
-            f"LLM note for paper {paper_id} cites unknown chunk ids: {', '.join(unknown_ids)}."
+        repair = _build_chunk_repair_prompt(
+            json.dumps(note.model_dump()), unknown_ids, sorted(chunk_by_id)
         )
+        note = _parse_llm_model(
+            LlmPaperSummaryNote, client.generate_json(repair, LlmPaperSummaryNote.model_json_schema())
+        )
+        unknown_ids = _check_unknown_ids(note, supplied)
+        if unknown_ids:
+            raise SynthesisError(
+                f"LLM note for paper {paper_id} cites unknown chunk ids: {', '.join(unknown_ids)}."
+            )
     claims = [_claim_from_note(claim, chunk_by_id) for claim in note.claims]
     coverage_chunk_ids = sorted(
         {reference.chunk_id for claim in claims for reference in claim.evidence}

@@ -329,6 +329,16 @@ class RetryNoteClient:
         return self.responses.pop(0)
 
 
+class ChunkRepairNoteClient:
+    def __init__(self, bad_response: dict[str, object], valid_response: dict[str, object]) -> None:
+        self.responses = [json.dumps(bad_response), json.dumps(valid_response)]
+        self.prompts: list[str] = []
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        self.prompts.append(prompt)
+        return self.responses.pop(0)
+
+
 class FakeSynthesisClient:
     def __init__(self, report: str, directions: list[dict[str, object]]) -> None:
         self.payload: dict[str, object] = {"report": report, "future_directions": directions}
@@ -411,6 +421,26 @@ class LlmPaperNotesTests(unittest.TestCase):
 
         with self.assertRaises(SynthesisError):
             summarize_paper_notes("p1", sectioned_chunks("p1"), client, CoveragePackPolicy())
+
+    def test_llm_notes_hallucinated_chunk_id_repair_retry(self) -> None:
+        hallucinated_payload = {
+            "claims": [
+                {
+                    "text": "A claim that mistakenly cites a plausible but nonexistent chunk id.",
+                    "chunk_ids": ["p1-p5-5-c16"],
+                    "aspect": "contribution",
+                }
+            ]
+        }
+        client = ChunkRepairNoteClient(hallucinated_payload, valid_note_payload())
+
+        note = summarize_paper_notes("p1", sectioned_chunks("p1"), client, CoveragePackPolicy())
+
+        self.assertEqual(len(client.prompts), 2)
+        self.assertIn("valid chunk_ids", client.prompts[1])
+        self.assertIn("p1-p5-5-c16", client.prompts[1])
+        self.assertEqual(note.paper_id, "p1")
+        self.assertEqual(note.coverage_chunk_ids, ["p1-p1-1-c1", "p1-p2-2-c4", "p1-p4-4-c8"])
 
     def test_llm_notes_repair_retry(self) -> None:
         client = RetryNoteClient(valid_note_payload())
