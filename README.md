@@ -19,9 +19,9 @@ Before retrieval, `literature_review.planning.create_rule_based_plan()` creates 
 
 The evidence layer extracts local PDFs with `literature_review.extraction.extract_pdf_text()` and splits the page text into overlapping `EvidenceChunk` objects. Chunks may span consecutive pages and retain their inclusive page range. Store local paper PDFs in `data/papers/`; this directory is intentionally not tracked by Git.
 
-`literature_review.evidence_ranking.retrieve_evidence()` is the first evidence-selection stage. It currently uses an inexpensive lexical baseline to retrieve top-k chunks; a later embedding retriever and LLM contextual-summary stage will use the same data contracts.
+`literature_review.evidence_ranking.retrieve_evidence()` is the first evidence-selection stage. It currently uses an inexpensive lexical baseline to retrieve the top-k chunks across all papers combined; a later embedding retriever and LLM contextual-summary stage will use the same data contracts.
 
-`literature_review.llm_evidence.summarize_and_rerank()` is the second stage. It validates structured LLM assessments and preserves the trusted paper ID and page range from retrieved chunks. Gemini reads `GEMINI_API_KEY` only from the environment; no key is needed for unit tests.
+`literature_review.llm_evidence.summarize_and_rerank()` is the second stage. It calls the LLM once for the corpus-wide top-k chunks across all papers and validates the structured LLM assessments while preserving the trusted paper ID and page range from retrieved chunks. Gemini reads `GEMINI_API_KEY` only from the environment; no key is needed for unit tests.
 
 Run the local extraction and retrieval path without any API key:
 
@@ -29,7 +29,7 @@ Run the local extraction and retrieval path without any API key:
 uv run python -m literature_review.pipeline data/papers/example.pdf "literature review agent" --top-k 3 --dry-run
 ```
 
-After copying `.env.example` to `.env` and setting `GEMINI_API_KEY`, omit `--dry-run` to run the LLM re-ranking stage. Start with one PDF and `--top-k 2` or `--top-k 3`.
+After copying `.env.example` to `.env` and setting `GEMINI_API_KEY`, omit `--dry-run` to run the LLM re-ranking stage. Start with one PDF and `--top-k 2` or `--top-k 3` (chunks across all papers combined, not per-paper).
 
 `literature_review.synthesis` completes the evidence-cited report with three-layer traceability: every claim flows from an `EvidenceChunk` through a per-paper note (`PaperSummary`) into the final report prose, which carries inline `[chunk_id]` citation markers. Per-paper notes are built only for papers recommended as include or consider. Future directions come from three sources: strong cross-paper convergence, explicit limitations stated in the retrieved evidence, and a deterministic fallback when neither yields a direction.
 
@@ -38,6 +38,8 @@ Run the multi-PDF synthesis flow over a folder of papers (requires `GEMINI_API_K
 ```powershell
 uv run python -m literature_review.pipeline data/papers "literature review agent" --top-k 8
 ```
+
+`--top-k 8` means 8 chunks across all papers combined, not per-paper.
 
 ## Run the demo
 
