@@ -61,6 +61,18 @@ PAPER_TEXT = (
     "Limitations Our evaluation remains restricted to English computer science papers."
 )
 
+UNRELATED_TEXT = (
+    "thermodynamics entropy enthalpy quantum lattice phonon heat capacity "
+    "molar mass statistical mechanics"
+)
+
+RETAINED_DIRECTION_PAYLOAD = {
+    "title": "Harden multilingual evaluation coverage",
+    "rationale": "The retained study states evaluation restrictions that motivate broader multilingual benchmarks.",
+    "supporting_paper_ids": ["paper-1"],
+    "supporting_chunk_ids": ["paper-1-p1-1-c1"],
+}
+
 DIRECTION_PAYLOAD = {
     "title": "Harden multilingual evaluation coverage",
     "rationale": "Both studies state evaluation restrictions that motivate broader multilingual benchmarks.",
@@ -130,6 +142,29 @@ class SynthesisFakeClient:
         chunk_ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
         self.cited_chunk_ids.extend(chunk_ids)
         return json.dumps({"assessments": [assessment_payload(chunk_id) for chunk_id in chunk_ids]})
+
+
+class PaperDropFakeClient(SynthesisFakeClient):
+    """SynthesisFakeClient variant whose future direction cites only the retained paper."""
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        self.prompts.append(prompt)
+        if prompt.startswith("Summarize this single paper") and "Paper ID: paper-1\n" in prompt:
+            return json.dumps(note_payload("paper-1"))
+        if prompt.startswith("Write a fluent literature-review"):
+            report = (
+                "# Evidence-cited synthesis\n"
+                + "".join(
+                    f"The reviewed study {paper} supplies retrieved evidence for its claims "
+                    f"in [{chunk_id}].\n"
+                    for paper, chunk_id in zip(
+                        ("paper-1",), self.cited_chunk_ids, strict=False
+                    )
+                )
+                + "\n## 材料來源清單\n- cited chunk identifiers appear inline above\n"
+            )
+            return json.dumps({"report": report, "future_directions": [RETAINED_DIRECTION_PAYLOAD]})
+        return super().generate_json(prompt, schema)
 
 
 class ExpandPdfInputsTests(unittest.TestCase):
@@ -214,3 +249,34 @@ class SynthesisPipelineTests(unittest.TestCase):
         self.assertIn("empty-paper", stderr.getvalue())
         self.assertEqual([note.paper_id for note in result.paper_summaries], ["paper-2"])
         self.assertEqual([source.paper_id for source in result.paper_sources], ["paper-2"])
+
+    def test_synthesis_pipeline_single_rcs_call(self) -> None:
+        client = SynthesisFakeClient()
+        result = run_synthesis_pipeline(
+            [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)],
+            "literature review agent",
+            client,
+            **self.policy_arguments(),
+        )
+
+        rcs_calls = sum(
+            1 for prompt in client.prompts if prompt.startswith("Assess each supplied evidence chunk")
+        )
+        self.assertEqual(rcs_calls, 1)
+        self.assertEqual(len(result.paper_summaries), 2)
+
+    def test_synthesis_pipeline_paper_dropped_out_of_corpus_top_k(self) -> None:
+        result = run_synthesis_pipeline(
+            [make_document("paper-1", PAPER_TEXT), make_document("paper-2", UNRELATED_TEXT)],
+            "literature review agent",
+            PaperDropFakeClient(),
+            chunk_policy=ChunkPolicy(max_words=60, overlap_words=10),
+            retrieval_policy=EvidenceRetrievalPolicy(top_k=1),
+        )
+
+        self.assertEqual(
+            [assessment.paper_id for assessment in result.evidence_assessment_response.assessments],
+            ["paper-1"],
+        )
+        self.assertEqual([note.paper_id for note in result.paper_summaries], ["paper-1"])
+        self.assertEqual([source.paper_id for source in result.paper_sources], ["paper-1"])
