@@ -94,24 +94,6 @@ def _prepare_documents(
     return prepared
 
 
-def _merge_rerank_responses(responses: list[EvidenceRerankResponse]) -> EvidenceRerankResponse:
-    """Combine per-document rerank results into one corpus-level response."""
-    first_retrieval = responses[0].retrieval_response
-    return EvidenceRerankResponse(
-        retrieval_response=EvidenceRetrievalResponse(
-            query=first_retrieval.query,
-            policy=first_retrieval.policy,
-            ranked_chunks=[
-                item for response in responses for item in response.retrieval_response.ranked_chunks
-            ],
-        ),
-        summaries=[summary for response in responses for summary in response.summaries],
-        limitations=list(
-            dict.fromkeys(limitation for response in responses for limitation in response.limitations)
-        ),
-    )
-
-
 def run_synthesis_pipeline(
     documents: list[FullTextDocument],
     query: str,
@@ -124,11 +106,9 @@ def run_synthesis_pipeline(
 ) -> SynthesisResponse:
     """Run retrieval, LLM re-ranking, aggregation, notes, and cited synthesis."""
     prepared = _prepare_documents(documents, chunk_policy)
-    rerank_response = _merge_rerank_responses(
-        [
-            summarize_and_rerank(retrieve_evidence(chunks, query, retrieval_policy), client)
-            for _, chunks in prepared
-        ]
+    all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
+    rerank_response = summarize_and_rerank(
+        retrieve_evidence(all_chunks, query, retrieval_policy), client
     )
     assessment_response = aggregate_evidence_assessments(rerank_response, aggregation_policy)
     usable_ids = {
@@ -162,7 +142,7 @@ def main() -> None:
     parser.add_argument("inputs", nargs="+", help="Path(s) to research-paper PDFs or folders of PDFs")
     parser.add_argument("query", help="Research question used to retrieve evidence")
     parser.add_argument("--paper-id", help="Stable local identifier; only allowed with a single PDF input")
-    parser.add_argument("--top-k", type=int, default=3, help="Number of chunks sent to the LLM")
+    parser.add_argument("--top-k", type=int, default=3, help="Number of chunks retrieved corpus-wide across all papers and sent to the LLM")
     parser.add_argument("--dry-run", action="store_true", help="Stop after local chunk retrieval; no key or API call")
     parser.add_argument("--model", default="gemini-2.5-flash", help="Gemini model for the LLM stage")
     arguments = parser.parse_args()
