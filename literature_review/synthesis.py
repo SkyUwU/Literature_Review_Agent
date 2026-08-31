@@ -33,6 +33,8 @@ from literature_review.models import (
     SynthesisResponse,
 )
 
+from langfuse import observe
+
 __all__ = [
     "SynthesisError",
     "SynthesisOutputSyntaxError",
@@ -453,6 +455,7 @@ def _claim_from_note(
     return PaperSummaryClaim(text=claim.text, aspect=claim.aspect if claim.aspect else "limitations", evidence=references)
 
 
+@observe(name="paper_notes")
 def summarize_paper_notes(
     paper_id: str,
     chunks: list[EvidenceChunk],
@@ -563,6 +566,7 @@ def _allowed_marker_ids(
     }
 
 
+@observe(name="synthesis_report")
 def synthesize_report(
     evidence_assessment_response: EvidenceAssessmentResponse,
     coverage_packs: dict[str, list[EvidenceChunk]],
