@@ -6,6 +6,11 @@ import json
 import os
 import sys
 
+try:
+    from langfuse import get_client
+except Exception:  # langfuse 未安裝或 import 失敗 — 不擋 pipeline
+    get_client = None
+
 from literature_review.assessment import aggregate_evidence_assessments
 from literature_review.evidence import chunk_document
 from literature_review.evidence_ranking import retrieve_evidence
@@ -137,6 +142,16 @@ def _default_paper_id(pdf_path: str) -> str:
     return pdf_path.rsplit("/", maxsplit=1)[-1].rsplit("\\", maxsplit=1)[-1]
 
 
+def _flush_langfuse() -> None:
+    """Best-effort flush Langfuse telemetry; observability must never block the pipeline."""
+    if get_client is None:
+        return
+    try:
+        get_client().flush()
+    except Exception:
+        pass  # observability must not fail the pipeline
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract, retrieve, and optionally synthesize PDF evidence.")
     parser.add_argument("inputs", nargs="+", help="Path(s) to research-paper PDFs or folders of PDFs")
@@ -167,6 +182,7 @@ def main() -> None:
                 retrieval_policy,
             )
             print(json.dumps(retrieved.model_dump(mode="json"), ensure_ascii=True, indent=2))
+            _flush_langfuse()
             return
         result = run_synthesis_pipeline(
             documents,
@@ -178,6 +194,7 @@ def main() -> None:
             aggregation_policy=aggregation_policy,
         )
         print(json.dumps(result.model_dump(mode="json"), ensure_ascii=True, indent=2))
+        _flush_langfuse()
     except (PdfExtractionError, LlmEvidenceError, SynthesisError, ValueError) as error:
         print(f"Pipeline failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
