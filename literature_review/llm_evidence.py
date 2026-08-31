@@ -12,6 +12,8 @@ from literature_review.models import (
     LlmEvidenceAssessmentBatch,
 )
 
+from langfuse import observe
+
 
 class LlmEvidenceError(RuntimeError):
     """Raised for missing configuration or invalid model output."""
@@ -43,6 +45,7 @@ class GeminiJsonClient:
         self._client = genai.Client(api_key=api_key)
         self._model = model
 
+    @observe(name="llm_call")
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         interaction = self._client.interactions.create(
             model=self._model,
@@ -125,6 +128,7 @@ def validate_evidence_assessments(raw_output: str) -> LlmEvidenceAssessmentBatch
         raise LlmEvidenceError(f"LLM output failed evidence-assessment validation ({details}).") from error
 
 
+@observe(name="rcs")
 def summarize_and_rerank(
     response: EvidenceRetrievalResponse,
     client: JsonGenerationClient,
