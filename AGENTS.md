@@ -4,10 +4,10 @@
 
 - The user is a new CS master's student working on ADSL summer-project Task 1A, a Literature Review Agent.
 - Reply primarily in Traditional Chinese. Keep explanations short and implementation-focused unless the user asks to learn a concept.
-- The user uses Windows PowerShell and an Anaconda environment in which `uv` is available. Give PowerShell commands.
-- OpenCode may run in WSL. Treat the Windows project and a WSL-native clone as separate Git working copies; synchronize through a shared Git remote (GitHub is recommended but not required), and never edit the same feature in both copies before committing.
+- The user works in Windows PowerShell (Anaconda `uv`) and OpenCode may run in a WSL clone. Give PowerShell commands.
+- Windows and WSL are independent Git working copies; sync through a shared remote (GitHub recommended) and never edit the same feature in both before committing.
 - The user prefers progress on the assignment over broad tutorials. Explain only new decisions, errors, and commands they must run.
-- Do not ask the user to paste API keys. Keep secrets in a local `.env`, which is ignored by Git.
+- Never ask the user to paste API keys. Keep secrets (Gemini, Langfuse) in a local `.env`, which is ignored by Git.
 
 ## Engineering workflow
 
@@ -25,7 +25,10 @@ uv sync
 uv run python -m unittest discover -s tests -v
 uv run python -m literature_review.search "literature review agent" --limit 10 --year-from 2024 --rank
 uv run python -m literature_review.pipeline data/papers "literature review agent" --top-k 8 --dry-run
+uv run python -m literature_review.pipeline data/papers "literature review agent" --top-k 8 --model gemini-3.6-flash
 ```
+
+Langfuse observability: confirm the self-hosted server is up with `curl http://localhost:3000/api/public/health` before a full run; traces appear in the dashboard at `http://localhost:3000`.
 
 If Git reports a dubious-ownership error, the user previously resolved it with:
 
@@ -42,7 +45,7 @@ ResearchIdea -> SearchPlan -> OpenAlex retrieval -> metadata filter/rank/select
 -> synthesis report with inline citations / future directions
 ```
 
-The LLM contextual-summary/re-ranking interface is implemented and its Gemini PDF smoke test succeeded. See `HANDOFF.md` for the next integration scope and decisions.
+The LLM contextual-summary/re-ranking interface and Langfuse observability (tree tracing on every LLM call, flushed before CLI exit) are implemented. See `HANDOFF.md` for the next integration scope and decisions.
 
 ## Terminology
 
