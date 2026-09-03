@@ -27,6 +27,7 @@ uv run python -m literature_review.search "literature review agent" --limit 10 -
 uv run python -m literature_review.pipeline data/papers "literature review agent" --top-k 8 --dry-run
 uv run python -m literature_review.pipeline data/papers "literature review agent" --top-k 8 --model gemini-3.6-flash
 uv run python -m literature_review.retrieval_eval data/papers "literature review agent" --top-k 8 --judge-model gemini-3.6-flash
+uv run python -m literature_review.pairwise_eval data/papers --top-k 16 --judge-model gemini-3.6-flash
 ```
 
 Langfuse observability: confirm the self-hosted server is up with `curl http://localhost:3000/api/public/health` before a full run; traces appear in the dashboard at `http://localhost:3000`.
