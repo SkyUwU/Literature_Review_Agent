@@ -358,6 +358,28 @@ def _claim_from_note(
 
 ---
 
+## Todo 9: 修復 LLM 幻覺 chunk ID（真實 API 測試發現）
+
+**問題**：`OpenScholar.pdf` 有 67 chunks 但只送 40 個給 LLM。LLM 看到 chunk ID 格式後發明 `OpenScholar.pdf-p5-5-c16` 等不存在的 ID，`unknown_ids` 檢查攔截後整條 pipeline 失敗。
+
+**What to do:**
+
+1. `literature_review/synthesis.py` — `build_paper_notes_prompt()` 強化：
+   - 在 prompt 中明確列出完整允許的 chunk ID 清單
+   - 加一段「Never invent, guess, or modify chunk IDs. Only use the exact IDs from the list below.」
+
+2. `literature_review/synthesis.py` — `_build_chunk_repair_prompt()`：新增 repair prompt，內容包含錯誤的 chunk IDs + 允許清單
+
+3. `literature_review/synthesis.py` — `summarize_paper_notes()`：當 `unknown_ids` 被攔截時，做**一次** repair 重試（不是直接失敗）
+
+4. 用泛型 helper 或直接在 `summarize_paper_notes` 內實作，重試邏輯與 `_generate_validated` 一致：「先試一次 → 失敗 → repair prompt 再試一次 → 再失敗才 raise」
+
+**Evidence of completion:**
+- 新增測試：fake client 第一次回傳幻覺 ID → 驗證會觸發 repair 重試 → 第二次回傳正確 → pipeline 成功
+- `uv run python -m unittest discover -s tests -v` 全綠
+
+---
+
 ## Final verification
 
 完成所有 Todo 後，執行：

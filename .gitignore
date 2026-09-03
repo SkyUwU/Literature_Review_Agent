@@ -15,3 +15,10 @@ data/papers/
 .omo/drafts/
 .omo/run-continuation/
 .omo/evidence/
+
+# opencode work artifacts (not for sync)
+.omo/evidence/
+.omo/notepads/
+.omo/notes/
+.omo/boulder.json
+.omo/start-work/
