@@ -13,7 +13,7 @@ except Exception:  # langfuse 未安裝或 import 失敗 — 不擋 pipeline
 
 from literature_review.assessment import aggregate_evidence_assessments
 from literature_review.evidence import chunk_document
-from literature_review.evidence_ranking import retrieve_evidence
+from literature_review.embedding_retriever import Encoder, retrieve_evidence_embedding
 from literature_review.extraction import PdfExtractionError, extract_pdf_text
 from literature_review.llm_evidence import GeminiJsonClient, JsonGenerationClient, LlmEvidenceError, summarize_and_rerank
 from literature_review.models import (
@@ -37,12 +37,18 @@ def run_evidence_pipeline(
     *,
     chunk_policy: ChunkPolicy,
     retrieval_policy: EvidenceRetrievalPolicy,
+    encoder: Encoder | None = None,
 ) -> EvidenceRerankResponse:
-    """Run chunking, first-stage retrieval, and LLM contextual re-ranking."""
+    """Run chunking, first-stage retrieval, and LLM contextual re-ranking.
+
+    ``encoder`` may be injected for tests; when omitted the real embedding model
+    is built (``default_encoder``), so retrieve_evidence_embedding downloads the
+    BGE weights on the first real run.
+    """
     chunks = chunk_document(document, chunk_policy)
     if not chunks:
         raise ValueError("The extracted document did not produce usable evidence chunks.")
-    retrieved = retrieve_evidence(chunks, query, retrieval_policy)
+    retrieved = retrieve_evidence_embedding(chunks, query, retrieval_policy, encoder)
     return summarize_and_rerank(retrieved, client)
 
 
@@ -53,13 +59,14 @@ def retrieve_from_pdf(
     *,
     chunk_policy: ChunkPolicy,
     retrieval_policy: EvidenceRetrievalPolicy,
+    encoder: Encoder | None = None,
 ) -> EvidenceRetrievalResponse:
     """Run only the local, no-key portion of the evidence workflow."""
     document = extract_pdf_text(pdf_path, paper_id)
     chunks = chunk_document(document, chunk_policy)
     if not chunks:
         raise ValueError("The extracted document did not produce usable evidence chunks.")
-    return retrieve_evidence(chunks, query, retrieval_policy)
+    return retrieve_evidence_embedding(chunks, query, retrieval_policy, encoder)
 
 
 def expand_pdf_inputs(inputs: list[str]) -> list[str]:
@@ -108,12 +115,13 @@ def run_synthesis_pipeline(
     retrieval_policy: EvidenceRetrievalPolicy = EvidenceRetrievalPolicy(),
     coverage_policy: CoveragePackPolicy = CoveragePackPolicy(),
     aggregation_policy: EvidenceAggregationPolicy = EvidenceAggregationPolicy(),
+    encoder: Encoder | None = None,
 ) -> SynthesisResponse:
     """Run retrieval, LLM re-ranking, aggregation, notes, and cited synthesis."""
     prepared = _prepare_documents(documents, chunk_policy)
     all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
     rerank_response = summarize_and_rerank(
-        retrieve_evidence(all_chunks, query, retrieval_policy), client
+        retrieve_evidence_embedding(all_chunks, query, retrieval_policy, encoder), client
     )
     assessment_response = aggregate_evidence_assessments(rerank_response, aggregation_policy)
     usable_ids = {
@@ -176,7 +184,7 @@ def main() -> None:
         ]
         if arguments.dry_run:
             prepared = _prepare_documents(documents, chunk_policy)
-            retrieved = retrieve_evidence(
+            retrieved = retrieve_evidence_embedding(
                 [chunk for _, document_chunks in prepared for chunk in document_chunks],
                 arguments.query,
                 retrieval_policy,

@@ -170,6 +170,126 @@ class CoveragePackTests(unittest.TestCase):
         self.assertEqual(build_coverage_packs([], CoveragePackPolicy()), {})
 
 
+def refs_region_chunks(paper_id: str, start_number: int, page: int, header: str) -> list[EvidenceChunk]:
+    """Build a references/appendix region: a header chunk followed by an entry chunk."""
+    return [
+        make_chunk(
+            paper_id,
+            start_number,
+            page,
+            f"{header}\n[1] Smith, J. (2020). A survey of evidence selection for review agents.",
+        ),
+        make_chunk(
+            paper_id,
+            start_number + 1,
+            page,
+            "[2] Doe, A. (2021). Another entry about automatic summarization of papers that pads.",
+        ),
+    ]
+
+
+class ReferencesCoverageTests(unittest.TestCase):
+    def test_t1_references_region_chunks_excluded(self) -> None:
+        body = [
+            make_chunk("p-t1", 1, 1, "Abstract Body text about evidence selection for review agents."),
+            make_chunk("p-t1", 2, 1, "Introduction More body text describing the review agent pipeline."),
+            make_chunk("p-t1", 3, 2, "Method We rank bounded evidence chunks deterministically."),
+            make_chunk("p-t1", 4, 3, "Results The retrieved scores are plausible and provenance-preserving."),
+            make_chunk("p-t1", 5, 4, "Limitations Only bounded evidence was assessed in this study."),
+        ]
+        refs = refs_region_chunks("p-t1", 6, 5, "References")
+        chunks = body + refs
+
+        pack = build_coverage_packs(chunks, CoveragePackPolicy(max_chunks_per_paper=4))
+
+        selected = {chunk.chunk_id for chunk in pack["p-t1"]}
+        self.assertEqual(selected, {"p-t1-p1-1-c1", "p-t1-p2-2-c3", "p-t1-p3-3-c4", "p-t1-p4-4-c5"})
+        self.assertFalse({chunk.chunk_id for chunk in refs} & selected)
+
+    def test_t2_no_references_regression(self) -> None:
+        body = [
+            make_chunk("p-t2", 1, 1, "Abstract Body text about evidence selection for review agents."),
+            make_chunk("p-t2", 2, 1, "Introduction More body text describing the review agent pipeline."),
+            make_chunk("p-t2", 3, 2, "Method We rank bounded evidence chunks deterministically."),
+            make_chunk("p-t2", 4, 3, "Results The retrieved scores are plausible and provenance-preserving."),
+            make_chunk("p-t2", 5, 4, "Limitations Only bounded evidence was assessed in this study."),
+        ]
+
+        pack = build_coverage_packs(body, CoveragePackPolicy(max_chunks_per_paper=4))
+
+        self.assertEqual(len(pack["p-t2"]), 4)
+
+    def test_t3_references_before_appendix(self) -> None:
+        body = [
+            make_chunk("p-t3", 1, 1, "Abstract Body text about evidence selection for review agents."),
+            make_chunk("p-t3", 2, 1, "Introduction More body text describing the review agent pipeline."),
+            make_chunk("p-t3", 3, 2, "Method We rank bounded evidence chunks deterministically."),
+            make_chunk("p-t3", 4, 3, "Results The retrieved scores are plausible and provenance-preserving."),
+            make_chunk("p-t3", 5, 4, "Limitations Only bounded evidence was assessed in this study."),
+        ]
+        refs = refs_region_chunks("p-t3", 6, 5, "References")
+        appendix = refs_region_chunks("p-t3", 8, 6, "Appendix")
+        chunks = body + refs + appendix
+
+        pack = build_coverage_packs(chunks, CoveragePackPolicy(max_chunks_per_paper=7))
+
+        selected = {chunk.chunk_id for chunk in pack["p-t3"]}
+        expected = {chunk.chunk_id for chunk in body} | {chunk.chunk_id for chunk in appendix}
+        self.assertEqual(selected, expected)
+        self.assertFalse({chunk.chunk_id for chunk in refs} & selected)
+
+    def test_t4_appendix_before_references(self) -> None:
+        body = [
+            make_chunk("p-t4", 1, 1, "Abstract Body text about evidence selection for review agents."),
+            make_chunk("p-t4", 2, 1, "Introduction More body text describing the review agent pipeline."),
+            make_chunk("p-t4", 3, 2, "Method We rank bounded evidence chunks deterministically."),
+            make_chunk("p-t4", 4, 3, "Results The retrieved scores are plausible and provenance-preserving."),
+            make_chunk("p-t4", 5, 4, "Limitations Only bounded evidence was assessed in this study."),
+        ]
+        appendix = refs_region_chunks("p-t4", 6, 5, "Appendix")
+        refs = refs_region_chunks("p-t4", 8, 6, "References")
+        chunks = body + appendix + refs
+
+        pack = build_coverage_packs(chunks, CoveragePackPolicy(max_chunks_per_paper=7))
+
+        selected = {chunk.chunk_id for chunk in pack["p-t4"]}
+        expected = {chunk.chunk_id for chunk in body} | {chunk.chunk_id for chunk in appendix}
+        self.assertEqual(selected, expected)
+        self.assertFalse({chunk.chunk_id for chunk in refs} & selected)
+
+    def test_t5_bibliography_synonym_excluded(self) -> None:
+        body = [
+            make_chunk("p-t5", 1, 1, "Abstract Body text about evidence selection for review agents."),
+            make_chunk("p-t5", 2, 1, "Introduction More body text describing the review agent pipeline."),
+            make_chunk("p-t5", 3, 2, "Method We rank bounded evidence chunks deterministically."),
+            make_chunk("p-t5", 4, 3, "Results The retrieved scores are plausible and provenance-preserving."),
+            make_chunk("p-t5", 5, 4, "Limitations Only bounded evidence was assessed in this study."),
+        ]
+        refs = refs_region_chunks("p-t5", 6, 5, "Bibliography")
+        chunks = body + refs
+
+        pack = build_coverage_packs(chunks, CoveragePackPolicy(max_chunks_per_paper=4))
+
+        self.assertFalse({chunk.chunk_id for chunk in refs} & {c.chunk_id for c in pack["p-t5"]})
+
+    def test_t6_no_section_headers_with_references_fallback(self) -> None:
+        body = [
+            make_chunk("p-t6", 1, 1, "Neutral body paragraph one describes pipeline parts in detail."),
+            make_chunk("p-t6", 2, 1, "Neutral body paragraph two describes pipeline parts in detail."),
+            make_chunk("p-t6", 3, 2, "Neutral body paragraph three describes pipeline parts in detail."),
+            make_chunk("p-t6", 4, 3, "Neutral body paragraph four describes pipeline parts in detail."),
+        ]
+        refs = refs_region_chunks("p-t6", 5, 4, "References")
+        chunks = body + refs
+
+        pack = build_coverage_packs(chunks, CoveragePackPolicy(max_chunks_per_paper=3))
+
+        selected = {chunk.chunk_id for chunk in pack["p-t6"]}
+        self.assertEqual(selected, {"p-t6-p1-1-c1", "p-t6-p1-1-c2", "p-t6-p2-2-c3"})
+        self.assertFalse({chunk.chunk_id for chunk in refs} & selected)
+        self.assertEqual(pack["p-t6"][0].page_start, 1)
+
+
 class LimitationDetectionTests(unittest.TestCase):
     def test_detect_limitation_chunks_hit(self) -> None:
         chunks = [

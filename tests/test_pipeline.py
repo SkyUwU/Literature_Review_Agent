@@ -5,7 +5,9 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import literature_review.pipeline as pipeline_module
 from literature_review.models import ChunkPolicy, EvidenceRetrievalPolicy, FullTextDocument, PageText
 from literature_review.pipeline import expand_pdf_inputs, run_evidence_pipeline, run_synthesis_pipeline
 
@@ -28,6 +30,13 @@ class FakeClient:
         )
 
 
+class FakeEncoder:
+    """Injected encoder so pipeline embedding tests never build the real model."""
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        return [[0.1, 0.1 * len(text), 0.2] for text in texts]
+
+
 class PipelineTests(unittest.TestCase):
     def test_runs_full_flow_with_fake_client(self) -> None:
         document = FullTextDocument(
@@ -48,10 +57,68 @@ class PipelineTests(unittest.TestCase):
             FakeClient(),
             chunk_policy=ChunkPolicy(max_words=50, overlap_words=10),
             retrieval_policy=EvidenceRetrievalPolicy(top_k=1),
+            encoder=FakeEncoder(),
         )
 
         self.assertEqual(result.summaries[0].paper_id, "paper-1")
         self.assertEqual(result.summaries[0].page_start, 1)
+
+
+class EmbeddingPipelineTests(unittest.TestCase):
+    def _document(self) -> FullTextDocument:
+        return FullTextDocument(
+            paper_id="paper-1",
+            source_path="data/papers/paper-1.pdf",
+            extraction_method="test",
+            pages=[
+                PageText(
+                    page_number=1,
+                    text=" ".join(["literature", "review", "agent", "evidence"] * 20),
+                )
+            ],
+        )
+
+    def test_injected_encoder_avoids_real_model_build(self) -> None:
+        """Injection must prevent the real default_encoder (model download) from running."""
+        with mock.patch(
+            "literature_review.embedding_retriever.default_encoder",
+            side_effect=AssertionError(
+                "default_encoder must not be called when an encoder is injected"
+            ),
+        ):
+            result = run_evidence_pipeline(
+                self._document(),
+                "literature review agent",
+                FakeClient(),
+                chunk_policy=ChunkPolicy(max_words=50, overlap_words=10),
+                retrieval_policy=EvidenceRetrievalPolicy(top_k=1),
+                encoder=FakeEncoder(),
+            )
+
+        self.assertEqual(result.summaries[0].paper_id, "paper-1")
+
+    def test_retrieval_path_emits_embedding_rationale(self) -> None:
+        """The pipeline's retrieval route produces embedding (semantic) rationale, not lexical terms."""
+        from literature_review.models import EvidenceChunk
+
+        chunks = [
+            EvidenceChunk(
+                chunk_id="paper-1-p1-1-c1",
+                paper_id="paper-1",
+                page_start=1,
+                page_end=1,
+                text=" ".join(["literature", "review", "agent", "evidence"] * 20),
+            )
+        ]
+        response = pipeline_module.retrieve_evidence_embedding(
+            chunks,
+            "literature review agent",
+            EvidenceRetrievalPolicy(top_k=1),
+            encoder=FakeEncoder(),
+        )
+
+        self.assertIn("Semantic retrieval", response.ranked_chunks[0].rationale)
+        self.assertEqual(response.ranked_chunks[0].matched_terms, [])
 
 
 PAPER_TEXT = (
@@ -199,6 +266,7 @@ class SynthesisPipelineTests(unittest.TestCase):
         return {
             "chunk_policy": ChunkPolicy(max_words=60, overlap_words=10),
             "retrieval_policy": EvidenceRetrievalPolicy(top_k=3),
+            "encoder": FakeEncoder(),
         }
 
     def test_synthesis_pipeline_happy(self) -> None:
@@ -272,6 +340,7 @@ class SynthesisPipelineTests(unittest.TestCase):
             PaperDropFakeClient(),
             chunk_policy=ChunkPolicy(max_words=60, overlap_words=10),
             retrieval_policy=EvidenceRetrievalPolicy(top_k=1),
+            encoder=FakeEncoder(),
         )
 
         self.assertEqual(

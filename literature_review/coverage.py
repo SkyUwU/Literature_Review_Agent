@@ -26,6 +26,8 @@ _LIMITATION_CUE_REGEX = re.compile(
 )
 _OTHER_PRIORITY = 12
 _APPENDIX_PRIORITY = 13
+_REFERENCES_REGEX = re.compile(r"(?i)^[0-9]*\.?\s*(?:references|bibliography)\b")
+_REFERENCES_PRIORITY = 14  # lowest; lower than appendix(13)
 
 
 def classify_section(text: str) -> tuple[int, str]:
@@ -70,24 +72,33 @@ def _has_appendix_header(text: str) -> bool:
     return False
 
 
+def _has_references_header(text: str) -> bool:
+    """Check whether *text* contains a references/bibliography header line < 80 chars."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if len(stripped) < 80 and _REFERENCES_REGEX.match(stripped):
+            return True
+    return False
+
+
 def _select_pack(chunks: list[EvidenceChunk], policy: CoveragePackPolicy) -> list[EvidenceChunk]:
     ordered = sorted(chunks, key=lambda item: (item.page_start, item.page_end, item.chunk_id))
+    refs_index = next(
+        (i for i, item in enumerate(ordered) if _has_references_header(item.text)), None
+    )
     if not any(classify_section(item.text)[0] != _OTHER_PRIORITY for item in ordered):
-        stride = max(1, len(ordered) // policy.max_chunks_per_paper)
-        indices = list(range(0, len(ordered), stride))[: policy.max_chunks_per_paper]
+        candidates = list(range(len(ordered)))
+        if refs_index is not None:
+            candidates = [i for i in candidates if i < refs_index] or [0]
+        stride = max(1, len(candidates) // policy.max_chunks_per_paper)
+        indices = candidates[::stride][: policy.max_chunks_per_paper]
         chosen = [(ordered[index].page_start, index) for index in indices]
     else:
         appendix_index = next(
             (i for i, item in enumerate(ordered) if _has_appendix_header(item.text)), None
         )
         priorities = [
-            (
-                classify_section(item.text)[0]
-                if appendix_index is None or i <= appendix_index
-                else _APPENDIX_PRIORITY,
-                item.page_start,
-                i,
-            )
+            _region_priority(item, i, refs_index, appendix_index)
             for i, item in enumerate(ordered)
         ]
         priorities.sort()
@@ -96,6 +107,38 @@ def _select_pack(chunks: list[EvidenceChunk], policy: CoveragePackPolicy) -> lis
             for _, page_start, index in priorities[: policy.max_chunks_per_paper]
         ]
     return [ordered[index] for _, index in sorted(chosen)]
+
+
+def _region_priority(
+    item: EvidenceChunk,
+    index: int,
+    refs_index: int | None,
+    appendix_index: int | None,
+) -> tuple[int, int, int]:
+    classified = classify_section(item.text)[0]
+    if refs_index is None:
+        # C1: no references header — unchanged original logic (appendix 13, body 1-12).
+        priority = classified if appendix_index is None or index <= appendix_index else _APPENDIX_PRIORITY
+    elif appendix_index is None:
+        # C2: references present, no appendix.
+        priority = classified if index < refs_index else _REFERENCES_PRIORITY
+    elif refs_index < appendix_index:
+        # C3: references before appendix.
+        if index < refs_index:
+            priority = classified
+        elif index < appendix_index:
+            priority = _REFERENCES_PRIORITY
+        else:
+            priority = _APPENDIX_PRIORITY
+    else:
+        # C4: appendix at or before references.
+        if index < appendix_index:
+            priority = classified
+        elif index < refs_index:
+            priority = _APPENDIX_PRIORITY
+        else:
+            priority = _REFERENCES_PRIORITY
+    return (priority, item.page_start, index)
 
 
 def detect_limitation_chunks(paper_chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
