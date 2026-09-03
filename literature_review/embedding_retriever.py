@@ -46,24 +46,33 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     return float(sum(x * y for x, y in zip(a, b, strict=False)))
 
 
-def retrieve_evidence_embedding(
+def encode_query(query: str, encoder: Encoder) -> list[float]:
+    """Encode a single query (with the official BGE retrieval prefix).
+
+    Chunk vectors are query-independent and computed once via ``encode_chunks``;
+    only the per-query vector changes between queries.
+    """
+    return encoder([QUERY_PREFIX + query])[0]
+
+
+def encode_chunks(chunks: Sequence[EvidenceChunk], encoder: Encoder) -> list[list[float]]:
+    """Encode every chunk's text once (query-independent). Call once per real run."""
+    texts = [chunk.text for chunk in chunks]
+    return encoder(texts) if texts else []
+
+
+def _score_ranked(
     chunks: list[EvidenceChunk],
+    chunk_vectors: list[list[float]],
+    query_vector: list[float],
     query: str,
     policy: EvidenceRetrievalPolicy,
-    encoder: Encoder | None = None,
 ) -> EvidenceRetrievalResponse:
-    """Rank chunks by semantic similarity of the query to each chunk, capped at top_k.
+    """Score ``chunks`` against ``query_vector`` by cosine and cap at ``policy.top_k``.
 
-    The query string is prefixed with the official BGE retrieval prefix; document chunk
-    text is NOT prefixed. When ``encoder`` is omitted the real model is built via
-    ``default_encoder()``.
+    ``chunk_vectors`` must be the embeddings of ``chunks`` in the same order
+    (computed once via ``encode_chunks``).
     """
-    encode = encoder if encoder is not None else default_encoder()
-    query_vector = encode([QUERY_PREFIX + query])[0]
-
-    chunk_texts = [chunk.text for chunk in chunks]
-    chunk_vectors = encode(chunk_texts) if chunk_texts else []
-
     scored: list[tuple[EvidenceChunk, float]] = []
     for chunk, vector in zip(chunks, chunk_vectors, strict=True):
         scored.append((chunk, _cosine(query_vector, vector)))
@@ -86,3 +95,36 @@ def retrieve_evidence_embedding(
             for index, (chunk, score) in enumerate(scored[: policy.top_k], start=1)
         ],
     )
+
+
+def retrieve_evidence_embedding(
+    chunks: list[EvidenceChunk],
+    query: str,
+    policy: EvidenceRetrievalPolicy,
+    encoder: Encoder | None = None,
+) -> EvidenceRetrievalResponse:
+    """Rank chunks by semantic similarity of the query to each chunk, capped at top_k.
+
+    The query string is prefixed with the official BGE retrieval prefix; document chunk
+    text is NOT prefixed. When ``encoder`` is omitted the real model is built via
+    ``default_encoder()``.
+    """
+    encode = encoder if encoder is not None else default_encoder()
+    query_vector = encode_query(query, encode)
+    chunk_vectors = encode_chunks(chunks, encode)
+    return _score_ranked(chunks, chunk_vectors, query_vector, query, policy)
+
+
+def retrieve_evidence_embedding_cached(
+    chunks: list[EvidenceChunk],
+    query: str,
+    policy: EvidenceRetrievalPolicy,
+    query_vector: list[float],
+    chunk_vectors: list[list[float]],
+) -> EvidenceRetrievalResponse:
+    """Rank chunks by cosine(query_vector, precomputed chunk_vectors), capped at top_k.
+
+    ``query_vector`` is the BGE-prefixed query embedding; ``chunk_vectors`` must be
+    the embeddings of ``chunks`` in the same order (computed once via ``encode_chunks``).
+    """
+    return _score_ranked(chunks, chunk_vectors, query_vector, query, policy)

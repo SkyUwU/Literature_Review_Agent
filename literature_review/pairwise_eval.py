@@ -22,7 +22,10 @@ from pydantic import BaseModel
 from literature_review.embedding_retriever import (
     Encoder,
     default_encoder,
+    encode_chunks,
+    encode_query,
     retrieve_evidence_embedding,
+    retrieve_evidence_embedding_cached,
 )
 from literature_review.evidence import chunk_document
 from literature_review.evidence_ranking import retrieve_evidence
@@ -33,8 +36,12 @@ from literature_review.llm_evidence import (
     LlmEvidenceError,
     LlmOutputSyntaxError,
     build_json_repair_prompt,
+    load_local_env,
 )
 from google.genai.errors import ClientError as GaosClientError  # 4xx 基底（其他 429 來源保險）
+from google.genai._gaos.lib.compat_errors import (
+    InternalServerError as GaosInternalServerError,
+)
 from google.genai._gaos.lib.compat_errors import RateLimitError as GaosRateLimitError
 from literature_review.models import (
     ChunkPolicy,
@@ -299,6 +306,33 @@ def judge_pair(
 MAX_BATCH = 8  # ≤10 is the quality-safe zone per LLM-as-judge research.
 
 
+def _generate_json_with_retry(
+    client: JsonGenerationClient,
+    prompt: str,
+    schema: dict | None,
+    request_delay_seconds: float = 0.0,
+    retries: int = 2,
+    base_backoff_seconds: float = 5.0,
+) -> str:
+    """Call ``client.generate_json`` with bounded backoff retry on transient errors.
+
+    Retries on rate-limit (429) and server (500 / high-demand) errors, which are
+    usually temporary. Backoff: base * 2**attempt (5s, 10s, 20s). Each retry also
+    sleeps ``request_delay_seconds`` (quota pacing) before re-issuing.
+    ``retries`` is the number of retries AFTER the first attempt (total attempts = retries + 1).
+    """
+    attempt = 0
+    while True:
+        try:
+            return client.generate_json(prompt, schema)
+        except (GaosRateLimitError, GaosInternalServerError) as error:
+            if attempt >= retries:
+                raise
+            sleep = base_backoff_seconds * (2**attempt) + request_delay_seconds
+            time.sleep(sleep)
+            attempt += 1
+
+
 def judge_batch(
     client: JsonGenerationClient,
     prompts: list[str],
@@ -312,13 +346,16 @@ def judge_batch(
     """
     _sleep_quota(request_delay_seconds)
     schema = BatchVerdictList.model_json_schema()
-    raw = client.generate_json(build_batch_prompt(prompts), schema)
+    raw = _generate_json_with_retry(client, build_batch_prompt(prompts), schema, request_delay_seconds)
     try:
         result = BatchVerdictList.model_validate_json(raw)
     except (ValueError, LlmOutputSyntaxError):
         _sleep_quota(request_delay_seconds)
-        repaired = client.generate_json(
-            build_json_repair_prompt(raw), schema
+        repaired = _generate_json_with_retry(
+            client,
+            build_json_repair_prompt(raw),
+            schema,
+            request_delay_seconds,
         )
         result = BatchVerdictList.model_validate_json(repaired)
     if len(result.verdicts) != len(prompts):
@@ -515,6 +552,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip queries already completed in the checkpoint file (requires --checkpoint).",
     )
+    parser.add_argument(
+        "--api-key-suffix",
+        type=int,
+        default=None,
+        help="Use GEMINI_API_KEY_{N} (e.g. --api-key-suffix 2 → GEMINI_API_KEY_2). Default: GEMINI_API_KEY.",
+    )
     return parser
 
 
@@ -537,10 +580,22 @@ def build_report(
     """
     per_query: list[dict[str, object]] = []
     completed: list[str] = []
-    for query in queries:
+
+    chunk_vectors = encode_chunks(chunks, encoder) if encoder is not None else []
+
+    total = len(queries)
+    for n, query in enumerate(queries, start=1):
+        print(f"Pairwise eval: query {n}/{total}: {query}", file=sys.stderr)
         lexical = retrieve_evidence(chunks, query, retrieval_policy)
-        embedding = retrieve_evidence_embedding(chunks, query, retrieval_policy, encoder=encoder)
+        if encoder is not None:
+            query_vector = encode_query(query, encoder)
+            embedding = retrieve_evidence_embedding_cached(
+                chunks, query, retrieval_policy, query_vector, chunk_vectors
+            )
+        else:
+            embedding = retrieve_evidence_embedding(chunks, query, retrieval_policy, encoder=encoder)
         per_query.append(evaluate_query(lexical, embedding, query, client, request_delay_seconds=request_delay_seconds))
+        print(f"Pairwise eval: query {n}/{total} done", file=sys.stderr)
         completed.append(query)
         if checkpoint_path is not None:
             _write_checkpoint(checkpoint_path, queries, per_query, completed)
@@ -633,7 +688,14 @@ def main(argv: list[str] | None = None) -> None:
             raise ValueError("No usable evidence chunks were produced from the supplied PDFs.")
 
         queries = arguments.query if arguments.query is not None else list(BUILTIN_QUERIES)
-        client = GeminiJsonClient(model=arguments.judge_model)
+        load_local_env()
+        if arguments.api_key_suffix is not None:
+            api_key = os.environ.get(f"GEMINI_API_KEY_{arguments.api_key_suffix}", "")
+            if not api_key:
+                raise ValueError(f"GEMINI_API_KEY_{arguments.api_key_suffix} is not set.")
+        else:
+            api_key = None  # fallback 到 GEMINI_API_KEY
+        client = GeminiJsonClient(model=arguments.judge_model, api_key=api_key)
 
         prior_report: dict[str, object] | None = None
         if arguments.resume:
@@ -662,7 +724,7 @@ def main(argv: list[str] | None = None) -> None:
         if prior_report is not None:
             report = _merge_resumed_report(prior_report, report)
         print(json.dumps(report, ensure_ascii=True, indent=2))
-    except (PdfExtractionError, LlmEvidenceError, ValueError, GaosRateLimitError) as error:
+    except (PdfExtractionError, LlmEvidenceError, ValueError, GaosRateLimitError, GaosInternalServerError) as error:
         print(f"Pairwise eval failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 

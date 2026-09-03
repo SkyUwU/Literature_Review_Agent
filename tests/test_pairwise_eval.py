@@ -1,5 +1,7 @@
 """TDD tests for the pair-wise lexical-vs-embedding comparison core."""
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -7,6 +9,13 @@ import tempfile
 import unittest
 from unittest import mock
 
+from literature_review.embedding_retriever import (
+    QUERY_PREFIX,
+    encode_chunks,
+    encode_query,
+    retrieve_evidence_embedding,
+    retrieve_evidence_embedding_cached,
+)
 from literature_review.models import (
     EvidenceChunk,
     EvidenceRetrievalPolicy,
@@ -18,6 +27,7 @@ from literature_review.pairwise_eval import (
     FIXED_SEED,
     MAX_BATCH,
     PairwiseVerdict,
+    _generate_json_with_retry,
     aggregate_overall,
     aggregate_query,
     assign_display_orders,
@@ -31,7 +41,10 @@ from literature_review.pairwise_eval import (
     main,
     pair_ranked,
 )
-from literature_review.llm_evidence import LlmEvidenceError
+from literature_review.llm_evidence import GeminiJsonClient, LlmEvidenceError
+from google.genai._gaos.lib.compat_errors import (
+    InternalServerError as GaosInternalServerError,
+)
 from google.genai._gaos.lib.compat_errors import RateLimitError as GaosRateLimitError
 
 
@@ -171,6 +184,35 @@ class BatchAlwaysMalformedFakeClient:
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.calls.append(prompt)
         return "{still not valid"
+
+
+class ScriptedClient:
+    """Fake client whose generate_json returns a scripted sequence of outcomes."""
+
+    def __init__(self, outcomes: list) -> None:
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        self.calls += 1
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _FakeRateLimit(GaosRateLimitError):
+    def __init__(self, message: str = "rate limited") -> None:
+        self.message = message
+
+
+class _FakeInternalServer(GaosInternalServerError):
+    def __init__(self, message: str = "server error") -> None:
+        self.message = message
+
+
+def _minimal_report() -> dict[str, object]:
+    return {"top_k": 16, "query_set": [], "queries": [], "overall_verdict": "comparable overall"}
 
 
 class PairRankedTests(unittest.TestCase):
@@ -708,6 +750,165 @@ class ResumeCheckpointTests(unittest.TestCase):
                             with mock.patch("literature_review.pairwise_eval.chunk_document", return_value=[chunk("c1", "text")]):
                                 main(["--checkpoint", ckpt, "dummy.pdf"])
             self.assertFalse(os.path.exists(ckpt))
+
+
+class EmbeddingCacheTests(unittest.TestCase):
+    def test_cached_embedding_reuses_precomputed_vectors(self) -> None:
+        class CountingEncoder:
+            def __init__(self) -> None:
+                self.batch_sizes: list[int] = []
+
+            def __call__(self, texts: list[str]) -> list[list[float]]:
+                self.batch_sizes.append(len(texts))
+                return [[0.0, float(len(t)), 0.0] for t in texts]
+
+        encoder = CountingEncoder()
+        policy = EvidenceRetrievalPolicy(top_k=3)
+        chunks = cli_test_chunks()
+        client = BatchPairwiseFakeClient({"pair-1": "A", "pair-2": "A", "pair-3": "A"})
+        build_report(chunks, ["lit query", "agent query"], policy, client, encoder)
+        full_batch_calls = encoder.batch_sizes.count(len(chunks))
+        self.assertEqual(full_batch_calls, 1)
+
+    def test_cached_retrieval_identical_to_non_cached(self) -> None:
+        chunks = cli_test_chunks()
+        query = "literature review agent"
+        policy = EvidenceRetrievalPolicy(top_k=3)
+        encoder = DummyEncoder()
+        non_cached = retrieve_evidence_embedding(chunks, query, policy, encoder=encoder)
+        query_vector = encode_query(query, encoder)
+        chunk_vectors = encode_chunks(chunks, encoder)
+        cached = retrieve_evidence_embedding_cached(chunks, query, policy, query_vector, chunk_vectors)
+        self.assertEqual(
+            [(r.chunk.chunk_id, r.score) for r in non_cached.ranked_chunks],
+            [(r.chunk.chunk_id, r.score) for r in cached.ranked_chunks],
+        )
+
+    def test_encode_query_uses_prefix(self) -> None:
+        class CaptureEncoder:
+            def __call__(self, texts: list[str]) -> list[list[float]]:
+                self.seen = list(texts)
+                return [[0.0, float(len(t)), 0.0] for t in texts]
+
+        encoder = CaptureEncoder()
+        query = "literature review"
+        encode_query(query, encoder)
+        self.assertEqual(encoder.seen, [QUERY_PREFIX + query])
+
+    def test_build_report_prints_progress(self) -> None:
+        policy = EvidenceRetrievalPolicy(top_k=3)
+        client = BatchPairwiseFakeClient({"pair-1": "A", "pair-2": "A", "pair-3": "A"})
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            build_report(cli_test_chunks(), ["lit query", "agent query"], policy, client, DummyEncoder())
+        text = buffer.getvalue()
+        self.assertIn("query 1/2: lit query", text)
+        self.assertIn("query 1/2 done", text)
+        self.assertIn("query 2/2: agent query", text)
+        self.assertIn("query 2/2 done", text)
+
+
+class RetryTests(unittest.TestCase):
+    def test_retry_succeeds_after_transient_error(self) -> None:
+        class FlakyBatch(BatchPairwiseFakeClient):
+            def __init__(self, failures, error):
+                super().__init__({"pair-1": "A"})
+                self._failures = failures
+                self._error = error
+                self.failures_seen = 0
+
+            def generate_json(self, prompt, schema=None):
+                if self.failures_seen < self._failures:
+                    self.failures_seen += 1
+                    raise self._error
+                return _batch_payload(prompt, self._winners)
+
+        prompts = [build_pairwise_prompt("q", chunk("c1", "lex"), chunk("c2", "emb"), "pair-a")]
+        client = FlakyBatch(2, _FakeRateLimit())
+        with mock.patch("literature_review.pairwise_eval.time.sleep"):
+            verdicts = judge_batch(client, prompts, request_delay_seconds=0.0)
+        self.assertEqual(len(verdicts), 1)
+
+    def test_retry_exhausts_then_raises(self) -> None:
+        class Always500(BatchPairwiseFakeClient):
+            def __init__(self):
+                super().__init__({})
+                self.calls = 0
+
+            def generate_json(self, prompt, schema=None):
+                self.calls += 1
+                raise _FakeInternalServer()
+
+        client = Always500()
+        with mock.patch("literature_review.pairwise_eval.time.sleep"):
+            with self.assertRaises(GaosInternalServerError):
+                judge_batch(client, ["prompt"], request_delay_seconds=0.0)
+        self.assertEqual(client.calls, 3)
+
+    def test_retry_backoff_increases(self) -> None:
+        client = ScriptedClient([_FakeRateLimit(), _FakeRateLimit(), '{"ok": true}'])
+        with mock.patch("literature_review.pairwise_eval.time.sleep") as mock_sleep:
+            result = _generate_json_with_retry(client, "p", None, request_delay_seconds=0.0)
+        self.assertEqual(result, '{"ok": true}')
+        self.assertEqual(mock_sleep.call_args_list, [mock.call(5.0), mock.call(10.0)])
+
+    def test_success_path_no_retry_sleep(self) -> None:
+        client = ScriptedClient(['{"ok": true}'])
+        with mock.patch("literature_review.pairwise_eval.time.sleep") as mock_sleep:
+            result = _generate_json_with_retry(client, "p", None, request_delay_seconds=0.0)
+        self.assertEqual(result, '{"ok": true}')
+        mock_sleep.assert_not_called()
+
+    def test_main_internal_server_error_clean_exit(self) -> None:
+        err = io.StringIO()
+        with mock.patch(
+            "literature_review.pairwise_eval.build_report", side_effect=_FakeInternalServer()
+        ):
+            with mock.patch("literature_review.pairwise_eval.GeminiJsonClient"):
+                with mock.patch("literature_review.pairwise_eval.expand_pdf_inputs", return_value=["dummy.pdf"]):
+                    with mock.patch("literature_review.pairwise_eval.extract_pdf_text") as mock_extract:
+                        mock_extract.return_value = mock.MagicMock()
+                        with mock.patch("literature_review.pairwise_eval.chunk_document", return_value=[chunk("c1", "text")]):
+                            with contextlib.redirect_stderr(err):
+                                with self.assertRaises(SystemExit) as ctx:
+                                    main(["dummy.pdf"])
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("Pairwise eval failed:", err.getvalue())
+
+
+class ApiKeySuffixTests(unittest.TestCase):
+    def test_suffix_selects_correct_env_var(self) -> None:
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY_2": "fake2"}):
+            with mock.patch("literature_review.pairwise_eval.GeminiJsonClient") as mock_client:
+                with mock.patch("literature_review.pairwise_eval.build_report", return_value=_minimal_report()):
+                    with mock.patch("literature_review.pairwise_eval.expand_pdf_inputs", return_value=["dummy.pdf"]):
+                        with mock.patch("literature_review.pairwise_eval.extract_pdf_text") as mock_extract:
+                            mock_extract.return_value = mock.MagicMock()
+                            with mock.patch("literature_review.pairwise_eval.chunk_document", return_value=[chunk("c1", "text")]):
+                                main(["--api-key-suffix", "2", "dummy.pdf"])
+        mock_client.assert_called_once()
+        self.assertEqual(mock_client.call_args.kwargs["api_key"], "fake2")
+
+    def test_no_suffix_uses_default_key(self) -> None:
+        with mock.patch("literature_review.pairwise_eval.GeminiJsonClient") as mock_client:
+            with mock.patch("literature_review.pairwise_eval.build_report", return_value=_minimal_report()):
+                with mock.patch("literature_review.pairwise_eval.expand_pdf_inputs", return_value=["dummy.pdf"]):
+                    with mock.patch("literature_review.pairwise_eval.extract_pdf_text") as mock_extract:
+                        mock_extract.return_value = mock.MagicMock()
+                        with mock.patch("literature_review.pairwise_eval.chunk_document", return_value=[chunk("c1", "text")]):
+                            main(["dummy.pdf"])
+        mock_client.assert_called_once()
+        self.assertEqual(mock_client.call_args.kwargs["api_key"], None)
+
+    def test_missing_suffix_raises(self) -> None:
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY_2": ""}):
+            with mock.patch("literature_review.pairwise_eval.expand_pdf_inputs", return_value=["dummy.pdf"]):
+                with mock.patch("literature_review.pairwise_eval.extract_pdf_text") as mock_extract:
+                    mock_extract.return_value = mock.MagicMock()
+                    with mock.patch("literature_review.pairwise_eval.chunk_document", return_value=[chunk("c1", "text")]):
+                        with self.assertRaises(SystemExit) as ctx:
+                            main(["--api-key-suffix", "2", "dummy.pdf"])
+        self.assertEqual(ctx.exception.code, 1)
 
 
 if __name__ == "__main__":

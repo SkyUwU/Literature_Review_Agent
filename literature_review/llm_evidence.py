@@ -31,18 +31,18 @@ class JsonGenerationClient(Protocol):
 
 
 class GeminiJsonClient:
-    """Google Gemini implementation that reads its key only from the environment."""
+    """Google Gemini implementation; the key comes from ``api_key`` or the environment."""
 
-    def __init__(self, model: str = "gemini-2.5-flash") -> None:
+    def __init__(self, model: str = "gemini-2.5-flash", api_key: str | None = None) -> None:
         load_local_env()
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
+        key = api_key or os.getenv("GEMINI_API_KEY")
+        if not key:
             raise LlmEvidenceError("GEMINI_API_KEY is not set in the environment.")
         try:
             from google import genai
         except ImportError as error:
             raise LlmEvidenceError("Install dependencies with 'uv sync' before using Gemini.") from error
-        self._client = genai.Client(api_key=api_key)
+        self._client = genai.Client(api_key=key)
         self._model = model
 
     @observe(name="llm_call")
