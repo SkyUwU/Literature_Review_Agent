@@ -19,7 +19,7 @@ Before retrieval, `literature_review.planning.create_rule_based_plan()` creates 
 
 The evidence layer extracts local PDFs with `literature_review.extraction.extract_pdf_text()` and splits the page text into overlapping `EvidenceChunk` objects. Chunks may span consecutive pages and retain their inclusive page range. Store local paper PDFs in `data/papers/`; this directory is intentionally not tracked by Git.
 
-`literature_review.evidence_ranking.retrieve_evidence()` is the first evidence-selection stage. It currently uses an inexpensive lexical baseline to retrieve the top-k chunks across all papers combined; a later embedding retriever and LLM contextual-summary stage will use the same data contracts.
+`literature_review.embedding_retriever.retrieve_evidence_embedding()` is the first evidence-selection stage. It uses semantic (embedding) ranking with a local `BAAI/bge-small-en-v1.5` encoder (free, no key needed) to retrieve the top-k chunks across all papers combined. The first run downloads ~130MB of model weights from Hugging Face. The lexical `evidence_ranking.retrieve_evidence()` is retained only as a compare/legacy baseline; it is no longer used by the pipeline. The LLM contextual-summary stage `summarize_and_rerank()` uses the same retrieval response contract.
 
 `literature_review.llm_evidence.summarize_and_rerank()` is the second stage. It calls the LLM once for the corpus-wide top-k chunks across all papers and validates the structured LLM assessments while preserving the trusted paper ID and page range from retrieved chunks. Gemini reads `GEMINI_API_KEY` only from the environment; no key is needed for unit tests.
 
