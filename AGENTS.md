@@ -47,7 +47,9 @@ ResearchIdea -> SearchPlan -> OpenAlex retrieval -> metadata filter/rank/select
 -> synthesis report with inline citations / future directions
 ```
 
-The pipeline now retrieves evidence with semantic (embedding) ranking by default — `literature_review.embedding_retriever.retrieve_evidence_embedding` replaced the lexical baseline for `pipeline.py`; the lexical `evidence_ranking.retrieve_evidence` is retained as compare/legacy only. The LLM contextual-summary/re-ranking interface and Langfuse observability (tree tracing on every LLM call, flushed before CLI exit) are implemented. See `HANDOFF.md` for the next integration scope and decisions.
+The pipeline now retrieves evidence with semantic (embedding) ranking by default — `literature_review.embedding_retriever.retrieve_evidence_embedding` replaced the lexical baseline for `pipeline.py`; the lexical `evidence_ranking.retrieve_evidence` is retained as compare/legacy only. The LLM contextual-summary/re-ranking interface and Langfuse observability (tree tracing on every LLM call, flushed before CLI exit) are implemented.
+
+The `SearchPlan` contract is now query-only: `SearchPlan.idea` is optional and `planning.create_rule_based_plan(query)` is the deterministic fallback, while `planning.create_llm_plan(query, client)` produces a validated plan (`generated_by="llm"`) using the shared `llm_evidence.generate_validated` call-once-parse-repair helper. See `HANDOFF.md` for the next integration scope and decisions.
 
 ## Terminology
 

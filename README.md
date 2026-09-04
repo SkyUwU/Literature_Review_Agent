@@ -15,7 +15,7 @@ The first milestone defines validated data models. It intentionally does not cal
 
 The second milestone searches the OpenAlex API without requiring an API key. Papers without an abstract or author metadata are skipped because the later summarization stage needs source evidence. The third milestone filters, ranks, and selects a small reading set while preserving the full search provenance.
 
-Before retrieval, `literature_review.planning.create_rule_based_plan()` creates a traceable `SearchPlan` from a `ResearchIdea`. A future LLM planner will produce the same validated format.
+Before retrieval, a search plan is produced from a bare query string. `literature_review.planning.create_rule_based_plan()` is the fallback (no key needed), and `literature_review.planning.create_llm_plan(query, client)` asks a Gemini client for the same validated `SearchPlan` (`generated_by="llm"`). Both keep `SearchPlan.idea` optional/`None`, so the downstream OpenAlex search consumes one query-only contract.
 
 The evidence layer extracts local PDFs with `literature_review.extraction.extract_pdf_text()` and splits the page text into overlapping `EvidenceChunk` objects. Chunks may span consecutive pages and retain their inclusive page range. Store local paper PDFs in `data/papers/`; this directory is intentionally not tracked by Git.
 
