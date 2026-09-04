@@ -2,8 +2,11 @@
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
+
+from pydantic import BaseModel
 
 from literature_review.models import (
     EvidenceRerankResponse,
@@ -126,6 +129,44 @@ def validate_evidence_assessments(raw_output: str) -> LlmEvidenceAssessmentBatch
                 if issues[0].get("type") == "json_invalid":
                     raise LlmOutputSyntaxError(f"LLM output is malformed JSON ({details}).") from error
         raise LlmEvidenceError(f"LLM output failed evidence-assessment validation ({details}).") from error
+
+
+_MODEL_T = TypeVar("_MODEL_T", bound=BaseModel)
+
+
+def strip_code_fence(raw_output: str) -> str:
+    """Remove Markdown code fences and any trailing text after the last JSON brace."""
+    normalized = raw_output.strip()
+    if normalized.startswith("```") and normalized.endswith("```"):
+        lines = normalized.splitlines()
+        normalized = "\n".join(lines[1:-1]).strip()
+    last_brace = normalized.rfind("}")
+    if last_brace != -1:
+        normalized = normalized[: last_brace + 1]
+    return normalized
+
+
+def generate_validated(
+    client: JsonGenerationClient,
+    model: type[_MODEL_T],
+    prompt: str,
+    schema: dict | None,
+    *,
+    parse: Callable[[str], _MODEL_T],
+    repair_prompt: Callable[[str, BaseException], str],
+) -> _MODEL_T:
+    """Call the client once, validate, and repair exactly once on a parse failure.
+
+    ``parse`` raises the caller's domain error type on validation failure and
+    ``repair_prompt`` builds one repair request from the raw output and that error.
+    The retry budget is exactly one repair: if the repaired output also fails to
+    parse, the second ``parse`` call propagates the error (no further retries).
+    """
+    raw_output = client.generate_json(prompt, schema)
+    try:
+        return parse(raw_output)
+    except Exception as exc:
+        return parse(client.generate_json(repair_prompt(raw_output, exc), schema))
 
 
 @observe(name="rcs")

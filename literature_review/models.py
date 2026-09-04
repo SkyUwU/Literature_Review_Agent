@@ -25,9 +25,16 @@ class PlannedQuery(BaseModel):
 
 
 class SearchPlan(BaseModel):
-    """A traceable search strategy, authored by rules or later by an LLM."""
+    """A traceable search strategy, authored by rules or later by an LLM.
 
-    idea: ResearchIdea
+    ``idea`` is optional so a plan can be produced from a bare query string
+    (the LLM and rule-based planners both accept a query-only input). When the
+    plan is authored from a bare query, ``idea`` holds that query string so the
+    input provenance is preserved; a richer ``ResearchIdea`` is retained for
+    future inputs.
+    """
+
+    idea: ResearchIdea | str | None = None
     queries: list[PlannedQuery] = Field(min_length=1, max_length=10)
     perspectives: list[str] = Field(min_length=1)
     generated_by: Literal["rule_based", "llm"]
@@ -268,7 +275,7 @@ class FutureDirection(BaseModel):
 class LiteratureReviewReport(BaseModel):
     """The final, human-readable and agent-readable output of Task 1A."""
 
-    idea: ResearchIdea
+    idea: ResearchIdea | str | None = None
     papers: list[Paper] = Field(min_length=1)
     assessments: list[PaperAssessment] = Field(min_length=1)
     synthesis: str = Field(min_length=20)

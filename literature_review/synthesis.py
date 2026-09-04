@@ -15,7 +15,7 @@ from literature_review.coverage import (
     classify_section,
     detect_limitation_chunks,
 )
-from literature_review.llm_evidence import JsonGenerationClient
+from literature_review.llm_evidence import JsonGenerationClient, generate_validated, strip_code_fence
 from literature_review.models import (
     ChunkReference,
     CoveragePackPolicy,
@@ -292,21 +292,10 @@ def build_deterministic_synthesis(
     )
 
 
-def _strip_code_fence(raw_output: str) -> str:
-    normalized = raw_output.strip()
-    if normalized.startswith("```") and normalized.endswith("```"):
-        lines = normalized.splitlines()
-        normalized = "\n".join(lines[1:-1]).strip()
-    last_brace = normalized.rfind("}")
-    if last_brace != -1:
-        normalized = normalized[: last_brace + 1]
-    return normalized
-
-
 def _parse_llm_model(model: type[_MODEL_T], raw_output: str) -> _MODEL_T:
     """Validate one JSON object while reporting schema failures without echoing model text."""
     try:
-        return model.model_validate_json(_strip_code_fence(raw_output))
+        return model.model_validate_json(strip_code_fence(raw_output))
     except ValueError as error:
         details = "invalid JSON or schema mismatch"
         syntax_invalid = False
@@ -355,12 +344,14 @@ def _build_chunk_repair_prompt(raw_output: str, unknown_ids: list[str], valid_id
 
 def _generate_validated(client: JsonGenerationClient, model: type[_MODEL_T], prompt: str, schema: dict) -> _MODEL_T:
     """Call the client once and retry exactly once on any SynthesisError."""
-    raw_output = client.generate_json(prompt, schema)
-    try:
-        return _parse_llm_model(model, raw_output)
-    except SynthesisError as exc:
-        repair = _build_schema_repair_prompt(raw_output, str(exc))
-        return _parse_llm_model(model, client.generate_json(repair, schema))
+    return generate_validated(
+        client,
+        model,
+        prompt,
+        schema,
+        parse=lambda raw_output: _parse_llm_model(model, raw_output),
+        repair_prompt=_build_schema_repair_prompt,
+    )
 
 
 def _strided_indices(count: int, slots: int) -> list[int]:
