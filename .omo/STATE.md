@@ -1,4 +1,4 @@
-# .omo/STATE.md — 專案現況小抄（最後更新：2026-09-04）
+# .omo/STATE.md — 專案現況小抄（最後更新：2026-09-05）
 
 > 每個 session 開始自動載入（`opencode.json` instructions）。gate 過後由規劃 agent 更新；執行 agent 只讀不改。
 > 可隨時用 `@.omo/STATE.md` 重新載入，避免依賴對話記憶。
@@ -6,18 +6,19 @@
 ## 現況（一句話）
 - **M1（pairwise-retrieval-eval）已完整收尾 ✅**：Todo 1-6 全完成、smoke 通過（embedding better）、commit+push、gitignore 整理、skill 建立。
 - **M2（embedding-retrieval-adoption）已完整收尾 ✅**：Todo 1-4 全完成（換 embedding + coverage References 低權重 + 文件 + 真實 API smoke 驗收通過）、code/docs 已 commit+push。
-- **M3A（LLM planner + query-only SearchPlan）已完整收尾 ✅ 並已 commit**（`2a09f7b` code + `c5414a1` docs，154 tests OK + 真實 smoke 過，`SearchPlan.idea` = `ResearchIdea∣str∣None` 且寫入 query 保留追溯）。目前階段 = M3A 完成，下一步規劃 M3B（抓 PDF）。
+- **M3A（LLM planner + query-only SearchPlan）已完整收尾 ✅ 並已 commit**（`2a09f7b` code + `c5414a1` docs，154 tests OK + 真實 smoke 過，`SearchPlan.idea` = `ResearchIdea∣str∣None` 且寫入 query 保留追溯）。
+- **M3B（PDF 自動下載器）已驗收通過 ✅ 待使用者 commit**：164 tests OK + 真實 OpenAlex smoke 過（OA 覆蓋率 77.3%、真實下載成功）。目前階段 = M3B 完成，下一步規劃 M3C（main.py 串接）。
 
 ## 下一步
-1. **使用者 push**（M3A 已 commit，尚未 push）。
-2. **下一個 milestone**：M3B（抓 PDF：OpenAlex/arXiv/SS OA 全文 PDF，需定資料來源策略，見 architecture-futures.md）。
+1. **使用者 commit/push M3B**（驗收已過，指令見 commit 訊息）。
+2. **下一個 milestone**：M3C = main.py 端到端串接（idea → plan → search → 抓 PDF → pipeline → 報告；參數寫死 + 可互動式問 query；見 M3 討論方向）。
 3. M1 遺留：opencode 尚未重啟（skill 需重啟才生效）；Windows 端尚未 pull 同步。
 4. **skill 待辦**：計畫驗證做成 `review-plan` skill（先有 checklist：`.omo/notes/plan-review-checklist.md`；skill 之後交執行代理建立，重啟生效）。
 
 ## M3 方向（使用者偏好，2026-09-04 定）
 - **先做部件、最後用 main.py 串接**（不是先串骨架）。部件順序：① LLM planner（M3A，進行中）→ ② 抓 PDF → ③ main.py 串接。
 - **M3A = LLM planner ✅（已 commit）**：`SearchPlan.idea` 改 `ResearchIdea∣str∣None`（query-only，寫入 query 保留追溯）、新增 `create_llm_plan(query, client)` 用 LLM 生成 `SearchPlan`（`generated_by="llm"`），共用 `llm_evidence.generate_validated`，開發期 fake client → 最後真實 smoke。`create_rule_based_plan(query)` 保留為 fallback。計畫：`.omo/plans/llm-planner.md`。commit：`2a09f7b`（code）+ `c5414a1`（docs）。
-- **抓 PDF**（M3B 候選）：從 OpenAlex/arXiv/SS 抓 OA 全文 PDF，需定資料來源策略（見 architecture-futures.md）。
+- **抓 PDF（M3B）✅ 已完成**：`Paper.open_access_pdf_url` + OpenAlex `best_oa_location.pdf_url`、`pdf_downloader.py`（`download_pdf` / `download_and_backfill`）、ranking 三成分標準化 0~1 等權（`(3*title+abstract)/(4*|terms|)` + citation + recency）、OA 覆蓋率統計。真實 smoke OA 覆蓋率 77.3%。
 - **main.py 串接**（M3C 候選）：idea → plan → search → 抓 PDF → pipeline → 報告 的完整入口，參數寫死 + 可互動式問 query。
 
 ## M2 成果摘要（2026-09-04 完成）
@@ -38,6 +39,13 @@
 - **功能已驗收通過 ✅**：154 tests OK（`test-suite-m3a-llm-planner.log`）；無 key fake 驗證 + 真實 Gemini smoke（`smoke-m3a-llm-planner.log`）都過，`generated_by=llm`、`idea=None`、無 key 洩漏。
 - **code 實作確認為 query-only**：`models.py` `SearchPlan.idea` 可選（`None`）、`create_llm_plan(query, client)`、`planning.PlanningError`、共用 `llm_evidence.generate_validated` 抽出且 synthesis 已遷移、`create_rule_based_plan(query)` fallback。ResearchIdea 模型保留。
 - **待辦**：commit/push **由使用者做**（計畫檔 Commit strategy 有分兩次指令）。
+
+## M3B（PDF 自動下載器）驗收現況（2026-09-05）
+- **功能已驗收通過 ✅**：164 tests OK（`test-suite-m3b.log`）；無 key fake e2e（`smoke-m3b-fake-e2e.log`）+ 真實 OpenAlex smoke（`smoke-m3b-real-openalex-v4.log`）都過。
+- **code 實作確認**：`models.py` `Paper.open_access_pdf_url`（`HttpUrl | None`）、`search.py` `REQUESTED_FIELDS` 加 `best_oa_location` 且 `paper_from_openalex` 填值、`ranking.py` lexical 標準化 0~1（標題 3x 權重保留）+ 三成分等權相加（總分 0~3）、`pdf_downloader.py` `download_pdf(paper, dest_dir, *, fetcher)`（可注入、dest_dir 由呼叫者決定）與 `download_and_backfill`（遞補 + `DownloadStats` 兩比例 + `shortfall` + `stats_path` JSON）。
+- **真實 smoke 數據**：22 候選 → 17 有 OA 連結（`oa_ratio_candidates=0.773`）→ 成功下載 2 篇（277KB + 5.9MB）、1 篇無 OA 記錄。**結論：OA 覆蓋率 77.3% 不低，暫不需加 arXiv/Unpaywall 備援**（留待日後數據判斷）。
+- **已知非阻塞小瑕疵**：HANDOFF.md 寫「163 tests」但實際 164（文件數字小出入）；真實 run 的 report 尾端中文（unicode 跳脫）附加段落——都記下，之後一併處理。
+- **待辦**：commit/push **由使用者做**（指令見下方 commit 訊息）。
 
 ## 架構已知現況（覆蓋包 coverage pack）
 - 覆蓋包（`max_chunks_per_paper=6` + References 低權重）目前**沒有**作為逐篇筆記輸入；逐篇筆記輸入 = 該論文全部 chunk 用 `llm_input_cap=40` 截斷。覆蓋包只當綜合報告白名單來源，在現行 pipeline 實作下**近乎多餘**。
