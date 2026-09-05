@@ -66,10 +66,10 @@ def rank_papers(papers: list[Paper], query: str) -> list[RankedPaper]:
     for paper in papers:
         title = paper.title.lower()
         abstract = paper.abstract.lower()
+        title_hits = sum(term in title for term in terms)
+        abstract_hits = sum(term in abstract for term in terms)
         matched = sorted(term for term in terms if term in title or term in abstract)
-        title_matches = sum(term in title for term in terms)
-        abstract_matches = sum(term in abstract for term in terms)
-        lexical_score = 3.0 * title_matches + abstract_matches
+        lexical_score = (3 * title_hits + abstract_hits) / (4 * max(len(terms), 1))
         citation_score = min(math.log1p(paper.citation_count or 0) / math.log(1001), 1.0)
         recency_score = min(max((paper.year - 2020) / 10, 0.0), 1.0)
         total_score = lexical_score + citation_score + recency_score
@@ -83,8 +83,8 @@ def rank_papers(papers: list[Paper], query: str) -> list[RankedPaper]:
             score=round(score, 3),
             matched_terms=matched,
             rationale=(
-                f"Matched {len(matched)} query terms; includes citation and recency "
-                "signals in the baseline score."
+                f"Matched {len(matched)} query terms; citation & recency signals "
+                "contribute equal weight in the normalized baseline score."
             ),
         )
         for index, (paper, score, matched) in enumerate(scored, start=1)

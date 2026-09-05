@@ -52,6 +52,9 @@ class Paper(BaseModel):
     url: HttpUrl
     venue: str | None = None
     citation_count: int | None = Field(default=None, ge=0)
+    open_access_pdf_url: HttpUrl | None = Field(
+        default=None, description="OpenAlex best OA location PDF URL, when available."
+    )
 
 
 class SearchRequest(BaseModel):

@@ -26,7 +26,7 @@ OPENALEX_SEARCH_URL = "https://api.openalex.org/works"
 USER_AGENT = "LiteratureReviewAgent/0.1 (academic-project)"
 REQUESTED_FIELDS = (
     "id,title,authorships,publication_year,abstract_inverted_index,"
-    "primary_location,cited_by_count"
+    "primary_location,cited_by_count,best_oa_location"
 )
 
 
@@ -98,6 +98,9 @@ def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
     if not all([paper_id, title, abstract, year]) or not authors:
         return None
 
+    best_oa = record.get("best_oa_location") or {}
+    pdf_url = best_oa.get("pdf_url")
+
     return Paper(
         paper_id=paper_id,
         title=title,
@@ -107,6 +110,7 @@ def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
         url=(record.get("primary_location") or {}).get("landing_page_url") or paper_id,
         venue=((record.get("primary_location") or {}).get("source") or {}).get("display_name"),
         citation_count=record.get("cited_by_count"),
+        open_access_pdf_url=pdf_url,
     )
 
 
