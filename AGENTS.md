@@ -49,6 +49,8 @@ ResearchIdea -> SearchPlan -> OpenAlex retrieval -> metadata filter/rank/select
 
 The pipeline now retrieves evidence with semantic (embedding) ranking by default — `literature_review.embedding_retriever.retrieve_evidence_embedding` replaced the lexical baseline for `pipeline.py`; the lexical `evidence_ranking.retrieve_evidence` is retained as compare/legacy only. The LLM contextual-summary/re-ranking interface and Langfuse observability (tree tracing on every LLM call, flushed before CLI exit) are implemented.
 
+PDF acquisition (M3B): `literature_review.pdf_downloader` fetches open-access PDFs from the OpenAlex `best_oa_location.pdf_url` recorded by `search.py` into `Paper.open_access_pdf_url`. `download_pdf(paper, dest_dir)` writes into a caller-chosen directory (real runs use `data/papers/`, smoke runs use a temp dir) with collision-resistant file names; missing OA links raise `NoOpenAccessError`, network/HTTP failures raise `PdfDownloadError`. `download_and_backfill(ranked_papers, dest_dir, target_n)` keeps the top-N selection: failing papers are replaced by the next ranked candidates, and the pass reports OA coverage ratios (`oa_ratio_candidates`, `oa_ratio_attempted`, `shortfall`) with optional JSON stats output.
+
 The `SearchPlan` contract is now query-only: `SearchPlan.idea` is optional and `planning.create_rule_based_plan(query)` is the deterministic fallback, while `planning.create_llm_plan(query, client)` produces a validated plan (`generated_by="llm"`) using the shared `llm_evidence.generate_validated` call-once-parse-repair helper. See `HANDOFF.md` for the next integration scope and decisions.
 
 ## Terminology

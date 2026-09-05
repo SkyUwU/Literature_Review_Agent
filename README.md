@@ -21,6 +21,8 @@ The evidence layer extracts local PDFs with `literature_review.extraction.extrac
 
 `literature_review.embedding_retriever.retrieve_evidence_embedding()` is the first evidence-selection stage. It uses semantic (embedding) ranking with a local `BAAI/bge-small-en-v1.5` encoder (free, no key needed) to retrieve the top-k chunks across all papers combined. The first run downloads ~130MB of model weights from Hugging Face. The lexical `evidence_ranking.retrieve_evidence()` is retained only as a compare/legacy baseline; it is no longer used by the pipeline. The LLM contextual-summary stage `summarize_and_rerank()` uses the same retrieval response contract.
 
+Automatic PDF acquisition (M3B): `literature_review.pdf_downloader.download_pdf()` fetches an open-access PDF from the OpenAlex `best_oa_location.pdf_url` recorded at search time (`Paper.open_access_pdf_url`). `download_and_backfill()` keeps the top-N selection — papers that fail to download (no OA link or network error) are replaced by the next ranked candidates — and reports OA coverage ratios (`oa_ratio_candidates`, `oa_ratio_attempted`, `shortfall`), optionally as JSON. Real smoke runs always download into a temp directory, never into `data/papers/`.
+
 `literature_review.llm_evidence.summarize_and_rerank()` is the second stage. It calls the LLM once for the corpus-wide top-k chunks across all papers and validates the structured LLM assessments while preserving the trusted paper ID and page range from retrieved chunks. Gemini reads `GEMINI_API_KEY` only from the environment; no key is needed for unit tests.
 
 Run the local extraction and retrieval path without any API key:
