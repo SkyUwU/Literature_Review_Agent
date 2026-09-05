@@ -191,7 +191,7 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=8, help="Number of chunks retrieved per method")
     parser.add_argument(
         "--judge-model",
-        default="gemini-2.5-flash",
+        default="gemini-3.6-flash",
         help="Gemini model used to judge chunk relevance (LLM judge).",
     )
     arguments = parser.parse_args()

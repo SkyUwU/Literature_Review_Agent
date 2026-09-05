@@ -167,7 +167,7 @@ def main() -> None:
     parser.add_argument("--paper-id", help="Stable local identifier; only allowed with a single PDF input")
     parser.add_argument("--top-k", type=int, default=3, help="Number of chunks retrieved corpus-wide across all papers and sent to the LLM")
     parser.add_argument("--dry-run", action="store_true", help="Stop after local chunk retrieval; no key or API call")
-    parser.add_argument("--model", default="gemini-2.5-flash", help="Gemini model for the LLM stage")
+    parser.add_argument("--model", default="gemini-3.6-flash", help="Gemini model for the LLM stage")
     arguments = parser.parse_args()
     chunk_policy = ChunkPolicy()
     retrieval_policy = EvidenceRetrievalPolicy(top_k=arguments.top_k)

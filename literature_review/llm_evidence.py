@@ -36,7 +36,7 @@ class JsonGenerationClient(Protocol):
 class GeminiJsonClient:
     """Google Gemini implementation; the key comes from ``api_key`` or the environment."""
 
-    def __init__(self, model: str = "gemini-2.5-flash", api_key: str | None = None) -> None:
+    def __init__(self, model: str = "gemini-3.6-flash", api_key: str | None = None) -> None:
         load_local_env()
         key = api_key or os.getenv("GEMINI_API_KEY")
         if not key:

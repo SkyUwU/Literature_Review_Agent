@@ -527,7 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--judge-model",
-        default="gemini-2.5-flash",
+        default="gemini-3.6-flash",
         help="Gemini model used to judge pairwise relevance (LLM judge).",
     )
     parser.add_argument(

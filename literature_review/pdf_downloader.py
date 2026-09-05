@@ -88,6 +88,7 @@ class DownloadStats:
     failed_no_oa: int = 0
     failed_network: int = 0
     failed_other: int = 0
+    duplicate_reused: int = 0
     shortfall: int = 0
 
     @property
@@ -114,6 +115,7 @@ class DownloadStats:
             "failed_no_oa": self.failed_no_oa,
             "failed_network": self.failed_network,
             "failed_other": self.failed_other,
+            "duplicate_reused": self.duplicate_reused,
             "shortfall": self.shortfall,
             "oa_ratio_candidates": self.oa_ratio_candidates,
             "oa_ratio_attempted": self.oa_ratio_attempted,
@@ -125,6 +127,7 @@ class DownloadResult:
     """Outcome of a download-and-backfill pass over ranked papers."""
 
     downloaded_paths: list[Path] = field(default_factory=list)
+    downloaded_paper_ids: list[str] = field(default_factory=list)
     failed_paper_ids: list[str] = field(default_factory=list)
     stats: DownloadStats = field(default_factory=DownloadStats)
 
@@ -136,6 +139,7 @@ def download_and_backfill(
     *,
     fetcher: Fetcher = default_fetcher,
     stats_path: Path | None = None,
+    already_downloaded: set[str] | None = None,
 ) -> DownloadResult:
     """Try to download the top ``target_n`` ranked papers, backfilling failures.
 
@@ -143,6 +147,9 @@ def download_and_backfill(
     candidates until ``target_n`` is reached or the candidate list is exhausted.
     ``attempted`` counts only papers that actually carry an OA link and were tried;
     papers without an OA link are counted separately as ``failed_no_oa``.
+    When ``already_downloaded`` is given, papers whose id is already in that set
+    count as satisfied (``duplicate_reused``) without writing a new file and
+    without triggering a backfill; successfully downloaded ids are added back.
     When ``stats_path`` is given, the OA-coverage statistics are written as JSON.
     """
     result = DownloadResult()
@@ -154,8 +161,11 @@ def download_and_backfill(
     )
 
     for ranked in ranked_papers:
-        if len(result.downloaded_paths) >= target_n:
+        if stats.downloaded + stats.duplicate_reused >= target_n:
             break
+        if already_downloaded is not None and ranked.paper.paper_id in already_downloaded:
+            stats.duplicate_reused += 1
+            continue
         if ranked.paper.open_access_pdf_url is None:
             result.failed_paper_ids.append(ranked.paper.paper_id)
             stats.failed_no_oa += 1
@@ -164,7 +174,10 @@ def download_and_backfill(
         try:
             path = download_pdf(ranked.paper, dest_dir, fetcher=fetcher)
             result.downloaded_paths.append(path)
+            result.downloaded_paper_ids.append(ranked.paper.paper_id)
             stats.downloaded += 1
+            if already_downloaded is not None:
+                already_downloaded.add(ranked.paper.paper_id)
         except PdfDownloadError as error:
             result.failed_paper_ids.append(ranked.paper.paper_id)
             stats.failed_network += 1
@@ -172,7 +185,7 @@ def download_and_backfill(
             result.failed_paper_ids.append(ranked.paper.paper_id)
             stats.failed_other += 1
 
-    stats.shortfall = max(0, target_n - stats.downloaded)
+    stats.shortfall = max(0, target_n - stats.downloaded - stats.duplicate_reused)
     if stats_path is not None:
         stats_path = Path(stats_path)
         stats_path.parent.mkdir(parents=True, exist_ok=True)

@@ -439,7 +439,7 @@ class CliReportTests(unittest.TestCase):
     def test_parser_defaults(self) -> None:
         arguments = build_parser().parse_args(["data/papers"])
         self.assertEqual(arguments.top_k, 16)
-        self.assertEqual(arguments.judge_model, "gemini-2.5-flash")
+        self.assertEqual(arguments.judge_model, "gemini-3.6-flash")
         self.assertIsNone(arguments.query)
         self.assertEqual(arguments.inputs, ["data/papers"])
 

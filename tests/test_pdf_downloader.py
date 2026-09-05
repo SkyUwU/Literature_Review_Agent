@@ -146,6 +146,72 @@ class BackfillTests(unittest.TestCase):
             self.assertEqual(payload["downloaded"], 1)
             self.assertEqual(payload["oa_ratio_candidates"], 1.0)
 
+    def test_duplicate_already_downloaded_counts_as_reused(self) -> None:
+        with TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            papers = [
+                make_paper(f"W{i}", f"https://example.org/{i}.pdf")
+                for i in range(1, 4)
+            ]
+            ranked = [rank(paper, index) for index, paper in enumerate(papers, start=1)]
+            already_downloaded = {"W1"}
+
+            result = download_and_backfill(
+                ranked,
+                dest,
+                target_n=2,
+                fetcher=lambda url: b"%PDF-1.4 fake",
+                already_downloaded=already_downloaded,
+            )
+
+            self.assertEqual(result.stats.downloaded, 1)
+            self.assertEqual(result.stats.duplicate_reused, 1)
+            self.assertEqual(result.stats.shortfall, 0)
+            self.assertEqual(result.downloaded_paper_ids, ["W2"])
+            self.assertEqual(len(result.downloaded_paths), 1)
+            self.assertFalse((dest / "W1.pdf").exists())
+            self.assertEqual(already_downloaded, {"W1", "W2"})
+
+    def test_all_target_duplicates_stops_early_without_new_files(self) -> None:
+        with TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            papers = [
+                make_paper(f"W{i}", f"https://example.org/{i}.pdf")
+                for i in range(1, 4)
+            ]
+            ranked = [rank(paper, index) for index, paper in enumerate(papers, start=1)]
+            already_downloaded = {"W1", "W2", "W3"}
+
+            result = download_and_backfill(
+                ranked,
+                dest,
+                target_n=2,
+                fetcher=lambda url: b"%PDF-1.4 fake",
+                already_downloaded=already_downloaded,
+            )
+
+            self.assertEqual(result.stats.downloaded, 0)
+            self.assertEqual(result.stats.duplicate_reused, 2)
+            self.assertEqual(result.stats.shortfall, 0)
+            self.assertEqual(result.downloaded_paper_ids, [])
+            self.assertEqual(list(dest.iterdir()), [])
+
+    def test_backfill_failure_still_backfills_with_pairing(self) -> None:
+        with TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            papers = [
+                make_paper("W1"),
+                make_paper("W2", "https://example.org/2.pdf"),
+            ]
+            ranked = [rank(paper, index) for index, paper in enumerate(papers, start=1)]
+
+            result = download_and_backfill(ranked, dest, target_n=1, fetcher=lambda url: b"%PDF-1.4 fake")
+
+            self.assertEqual(result.stats.failed_no_oa, 1)
+            self.assertEqual(result.stats.downloaded, 1)
+            self.assertEqual(result.downloaded_paper_ids, ["W2"])
+            self.assertEqual(len(result.downloaded_paths), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
