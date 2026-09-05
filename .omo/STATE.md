@@ -7,11 +7,13 @@
 - **M1（pairwise-retrieval-eval）已完整收尾 ✅**：Todo 1-6 全完成、smoke 通過（embedding better）、commit+push、gitignore 整理、skill 建立。
 - **M2（embedding-retrieval-adoption）已完整收尾 ✅**：Todo 1-4 全完成（換 embedding + coverage References 低權重 + 文件 + 真實 API smoke 驗收通過）、code/docs 已 commit+push。
 - **M3A（LLM planner + query-only SearchPlan）已完整收尾 ✅ 並已 commit**（`2a09f7b` code + `c5414a1` docs，154 tests OK + 真實 smoke 過，`SearchPlan.idea` = `ResearchIdea∣str∣None` 且寫入 query 保留追溯）。
-- **M3B（PDF 自動下載器）已驗收通過 ✅ 待使用者 commit**：164 tests OK + 真實 OpenAlex smoke 過（OA 覆蓋率 77.3%、真實下載成功）。目前階段 = M3B 完成，下一步規劃 M3C（main.py 串接）。
+- **M3B（PDF 自動下載器）已驗收通過 ✅ 待使用者 commit**：164 tests OK + 真實 OpenAlex smoke 過（OA 覆蓋率 77.3%、真實下載成功）。
+- **M3C（main.py 端到端串接 + Amendment 1）已驗收通過 ✅ 待使用者 commit**：183 tests OK；真實完整 run 過（LLM plan key1 3 queries、11 PDF、key2 綜合報告、11 inline citations、AIza 0 命中）。**LLM planner 為正式/預設**（`use_llm_plan=True`、key1）；rule-based 僅備案（`--rule-based` 逃生門 / LLM 失敗 fallback / `--dry-run` 強制）。環境修正：`gemini-2.5-flash` 已下架 → 預設 model 全部改 `gemini-3.6-flash`。
 
 ## 下一步
-1. **使用者 commit/push M3B**（驗收已過，指令見 commit 訊息）。
-2. **下一個 milestone**：M3C = main.py 端到端串接（idea → plan → search → 抓 PDF → pipeline → 報告；參數寫死 + 可互動式問 query；見 M3 討論方向）。
+1. **使用者 commit/push（M3B + M3C 一次收）**（驗收已過，指令見 commit 訊息）。
+2. **待討論（使用者 2026-09-05 提出）**：`data/papers/` 論文累積策略——每次 run 清空 / 互動詢問 / 維持現況（另有 `/tmp/m3c-*` 殘留清理）。
+3. **下一個 milestone 候選**：Unpaywall 補查（「M3 方向」段落有背景）或 prompt 品質整理（報告尾端中文瑕疵）。
 3. M1 遺留：opencode 尚未重啟（skill 需重啟才生效）；Windows 端尚未 pull 同步。
 4. **skill 待辦**：計畫驗證做成 `review-plan` skill（先有 checklist：`.omo/notes/plan-review-checklist.md`；skill 之後交執行代理建立，重啟生效）。
 
@@ -20,6 +22,7 @@
 - **M3A = LLM planner ✅（已 commit）**：`SearchPlan.idea` 改 `ResearchIdea∣str∣None`（query-only，寫入 query 保留追溯）、新增 `create_llm_plan(query, client)` 用 LLM 生成 `SearchPlan`（`generated_by="llm"`），共用 `llm_evidence.generate_validated`，開發期 fake client → 最後真實 smoke。`create_rule_based_plan(query)` 保留為 fallback。計畫：`.omo/plans/llm-planner.md`。commit：`2a09f7b`（code）+ `c5414a1`（docs）。
 - **抓 PDF（M3B）✅ 已完成**：`Paper.open_access_pdf_url` + OpenAlex `best_oa_location.pdf_url`、`pdf_downloader.py`（`download_pdf` / `download_and_backfill`）、ranking 三成分標準化 0~1 等權（`(3*title+abstract)/(4*|terms|)` + citation + recency）、OA 覆蓋率統計。真實 smoke OA 覆蓋率 77.3%。
 - **main.py 串接**（M3C 候選）：idea → plan → search → 抓 PDF → pipeline → 報告 的完整入口，參數寫死 + 可互動式問 query。
+- **Unpaywall 補查（M3C 候選，2026-09-05 使用者定）**：對 `failed_no_oa` 的論文用 DOI 打 Unpaywall 補查一次（免費無 key）。先只做 Unpaywall（不做 arXiv），smoke 統計補到幾篇，數據決定是否還需要 arXiv 補查。**背景**：OpenAlex 的 OA 資料來源之一就是 Unpaywall，預期補到位比例偏低；執行代理 Q2 也證實 OpenAlex 給的 OA 連結很多本來就是 arXiv —— arXiv 補查邊際效益更低。
 
 ## M2 成果摘要（2026-09-04 完成）
 - Todo 1：pipeline 換成 embedding 檢索（`retrieve_evidence_embedding`，可注入 encoder 方案 B）。144 tests OK（`test-suite-m2-todo1.log`）。
@@ -47,6 +50,13 @@
 - **已知非阻塞小瑕疵**：HANDOFF.md 寫「163 tests」但實際 164（文件數字小出入）；真實 run 的 report 尾端中文（unicode 跳脫）附加段落——都記下，之後一併處理。
 - **待辦**：commit/push **由使用者做**（指令見下方 commit 訊息）。
 
+## M3C（main.py 端到端串接）驗收現況（2026-09-05）
+- **功能已驗收通過 ✅**：183 tests OK（`test-suite-m3c-amendment1.log`）；fake e2e（`smoke-m3c-fake-e2e-amendment1.log`）、無 key 真實 dry-run（`smoke-m3c-real-dryrun-amendment1.log`）、**真實完整 run**（`smoke-m3c-real-full.log`，291s）全過。
+- **真實完整 run 證據**：`plan.generated_by="llm"`（key1 產 3 queries）、真 OpenAlex 11 PDF 到 temp、`failed_extractions=[W4205941964]`（HTML 偽 PDF 容錯跳過）、報告含 2 篇 include/consider 論文、2 條附 `supporting_chunk_ids` 的 future directions、**11 個 inline citation markers**、Langfuse flush、AIza 0 命中、`data/papers/` 未碰。
+- **Amendment 1 實作確認**：`use_llm_plan=True` 預設（key1）；`--rule-based` 逃生門；dry-run 強制 rule-based 零 key；key1 缺 → 警告 + fallback 不 exit / key2 缺 → exit 1（報告無備案）。跨文件口徑 grep（`llm-plan`/`rule-based by default`）零命中。
+- **環境修正（外部 API 下架）**：`gemini-2.5-flash` 404 → 全專案預設 model 改 `gemini-3.6-flash`（llm_evidence/pipeline/pairwise_eval/retrieval_eval + 測試 assert）。
+- **待辦**：commit/push **由使用者做**（指令見 commit 訊息）。
+
 ## 架構已知現況（覆蓋包 coverage pack）
 - 覆蓋包（`max_chunks_per_paper=6` + References 低權重）目前**沒有**作為逐篇筆記輸入；逐篇筆記輸入 = 該論文全部 chunk 用 `llm_input_cap=40` 截斷。覆蓋包只當綜合報告白名單來源，在現行 pipeline 實作下**近乎多餘**。
 - **使用者裁示：視為已知、先不處理；之後討論架構時不把覆蓋包當作 pipeline 一環**。詳見 `.omo/notes/architecture-futures.md`「覆蓋包 coverage pack 現況」。
@@ -59,9 +69,9 @@
 - 無阻塞。M2 完成。
 
 ## 大架構完成度（AGENTS.md line 43-47）
-- 第 1-4 段（ResearchIdea → SearchPlan → OpenAlex → filter/rank/select）：**SearchPlan 是 rule-based**（`planning.create_rule_based_plan()`，不需 key）；LLM planner 未做（AGENTS.md：「future LLM planner」）。
+- 第 1-4 段（ResearchIdea → SearchPlan → OpenAlex → filter/rank/select）：**SearchPlan 產生：LLM 為正式/預設**（`planning.create_llm_plan`，M3C 起完整 run 預設走 key1）；rule-based 為**備案**（`create_rule_based_plan`：`--dry-run` 強制使用 / LLM 失敗時 fallback）。⚠️ 2026-09-05 修正紀錄：曾誤寫「預設 rule-based」，與 9/2 roadmap「M3 = LLM 取代 rule-based」方向相反，已於 M3C 計畫 Amendment 1 修正。
 - 第 5-10 段（PDF extraction → chunk → embedding RCS → assessment → notes → synthesis）：**全完成**。
-- **主要缺口**：SearchPlan 目前只是「契約定義」，**未端到端串接**成「idea → plan → search → assess → 選 PDF → synthesis」的完整入口。目前 `search.py`（metadata 閱讀集）與 `pipeline.py`（PDF 證據）是分開的兩條路。
+- **主要缺口（M3C 已關閉）**：完整入口已由 `main.py` 串接（query → SearchPlan{LLM 預設} → 每 query 各自 search/rank/download（共享去重）→ 抽全文 → 綜合報告）。**剩餘候選**：Unpaywall 補查、prompt 品質整理（報告尾端中文瑕疵）、`data/papers/` 累積策略。
 
 ## M3 討論方向（候選，未定案）
 - **search plan 端到端串接 / LLM planner**：把 `create_rule_based_plan()` 產生的 SearchPlan 接成完整入口（idea → 報告）。是否改用 LLM 產生 plan（會消耗 key），決定「search plan 是否配獨立 key」。這是大架構剩餘重點之一。
