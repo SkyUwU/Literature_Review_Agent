@@ -90,9 +90,8 @@ def make_assessment(paper_id: str, relevance_score: int) -> PaperAssessment:
                 page_start=2,
                 page_end=2,
                 summary=f"Trusted fixture summary for one chunk of {paper_id} with sufficient length.",
-                relevance_score=5,
-                evidence_quality_score=4,
-                recommendation="include",
+                relevance_score=8,
+                evidence_quality_score=6,
             )
         ],
     )
@@ -110,7 +109,6 @@ def make_evidence_assessment_response(
             summary=citation.summary,
             relevance_score=citation.relevance_score,
             evidence_quality_score=citation.evidence_quality_score,
-            recommendation=citation.recommendation,
             rationale="Fixture rationale long enough to satisfy the schema requirements.",
         )
         for assessment in assessments
@@ -346,8 +344,8 @@ class DeterministicDirectionTests(unittest.TestCase):
     def test_rejects_synthesis_without_usable_assessments(self) -> None:
         excluded = PaperAssessment(
             paper_id="p1",
-            relevance_score=5,
-            evidence_quality_score=5,
+            relevance_score=2,
+            evidence_quality_score=2,
             recommendation="exclude",
             rationale="This paper was excluded by the aggregation policy thresholds.",
         )

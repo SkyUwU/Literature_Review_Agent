@@ -1,4 +1,4 @@
-# .omo/STATE.md — 專案現況小抄（最後更新：2026-09-05）
+# .omo/STATE.md — 專案現況小抄（最後更新：2026-09-06）
 
 > 每個 session 開始自動載入（`opencode.json` instructions）。gate 過後由規劃 agent 更新；執行 agent 只讀不改。
 > 可隨時用 `@.omo/STATE.md` 重新載入，避免依賴對話記憶。
@@ -9,16 +9,19 @@
 - **M3A（LLM planner + query-only SearchPlan）已完整收尾 ✅ 並已 commit**（`2a09f7b` code + `c5414a1` docs，154 tests OK + 真實 smoke 過，`SearchPlan.idea` = `ResearchIdea∣str∣None` 且寫入 query 保留追溯）。
 - **M3B（PDF 自動下載器）已驗收通過 ✅ 待使用者 commit**：164 tests OK + 真實 OpenAlex smoke 過（OA 覆蓋率 77.3%、真實下載成功）。
 - **M3C（main.py 端到端串接 + Amendment 1）已驗收通過 ✅ 待使用者 commit**：183 tests OK；真實完整 run 過（LLM plan key1 3 queries、11 PDF、key2 綜合報告、11 inline citations、AIza 0 命中）。**LLM planner 為正式/預設**（`use_llm_plan=True`、key1）；rule-based 僅備案（`--rule-based` 逃生門 / LLM 失敗 fallback / `--dry-run` 強制）。環境修正：`gemini-2.5-flash` 已下架 → 預設 model 全部改 `gemini-3.6-flash`。
+- **M4（C1=RCS 評分層改版）執行中 🔄（Todo 1-7 ✅，Todo 8 待辦）**：196 tests OK；1-10 分數制（chunk/論文層 `le=10`）、`PaperAssessment` 兩分數 int→float、chunk 層 `recommendation` 從契約移除（models/synthesis 區塊 A）、聚合 `round(...,1)` 不 floor、prior 5.5、門檻 8/6/6、metadata 初評對齊 1-10 並標 deprecated、prompt 加 10/5/1 操作型錨點 + 先 rationale。**剩 Todo 8：改後真實 run + 改前/改後對比 + 門檻校準建議**。
 
 ## 下一步
-1. **使用者 commit/push（M3B + M3C 一次收）**（驗收已過，指令見 commit 訊息）。
-2. **待討論（使用者 2026-09-05 提出）**：`data/papers/` 論文累積策略——每次 run 清空 / 互動詢問 / 維持現況（另有 `/tmp/m3c-*` 殘留清理）。
-3. **下一個 milestone 候選**：詳見下方「優化候選（2026-09-05）」——prompt 品質整理（報告連貫性 + 尾端中文 + 筆記覆蓋）優先。
+1. **M4（C1=RCS 評分層改版）執行中（Todo 1-8 已完成 ✅、剩閾值校準決策）**：Todo 8 真實 run + 對比完成（`.omo/evidence/m4-before-after-compare.md`）——鑑別度提升（2 格 → 4 個小數值），但**改後 0 usable（全 exclude）**：1-10 制 reranker chunk relevance 給分保守（raw≈2-4）→ 門檻 8/6 等效換算失真。執行代理給校準建議（A：rel 6→5/8→7 → 1 consider；C：rel 6→4.5+qual 6→5.5 → 4/4 consider，建議 C）。**決策擱置中**：使用者定序「檢索層改進優先，閾值殿後」——等候選 K 實作重跑後，看新分數分布再一起決定閾值（避免先降後改回）。
+2. **候選 K = 下個里程碑候選（檢索層/選擇層改進，使用者 2026-09-07 指示優先、但「等她說要安排計畫才寫計畫」）**：① 論文層 ranking 的 lexical_score 換成「query 與 title+abstract 的 embedding cosine」（共用 bge-small-en-v1.5 + `QUERY_PREFIX` + `Encoder` 注入；保留 citation+recency 等權三成分）——回應「關鍵詞比對把不錯論文隔絕在外」的瓶頸；② `LIMIT` 50→100（OpenAlex per-page 上限 200）、`TOTAL_TARGET` 15→20-25（下載/RCS 成本上升）、`TOP_K_CHUNKS` 8→16（M1 對比過 16 更穩；context 1M 無壓力）——回應「文本數量過少、可評比論文少」；③ 驗收 = 重跑同 query 對比，看分數分布是否上移；**不足再校準閾值**（接 M4 校準決策）。另注意：top-N 截斷才是「排後面=選不到」的殺手；`filter_papers` 無關鍵詞過濾（只 year/citation/去重），關鍵詞只影響排名；`search.py:98` 無 abstract 論文被丟棄也是候選集瓶頸（是否放寬待討論）。
+3. **M4 之後 = C2（報告生成設計）**：claim 標註方案（A1 ③④/雙 Pydantic）、A3 轉折詞、A4 主題式、A5 材料清單移出、E/Q2 輸入瘦身——詳細決策已記於下方候選 A1-A5/A7/E（含 2026-09-05 定案），**動工前先與使用者討論**（A7 ⚠️）。另有 C3 筆記品質（A6）、C4 小項 B/C/D、C5 驗收循環。
+4. **使用者 commit/push（M3B + M3C 一次收；M4 code 驗收後另收）**（驗收已過，指令見 commit 訊息）。
+5. **待討論（使用者 2026-09-05 提出）**：`data/papers/` 論文累積策略——每次 run 清空 / 互動詢問 / 維持現況（另有 `/tmp/m3c-*` 殘留清理）。
 
 ## 優化候選（2026-09-05 使用者提出，未動工）
 - **A. prompt 品質整理（最先進）**：報告連貫性四大改法（已評估**全部與現有驗證契約相容**——synthesize_report 只查「≥1 inline marker」與「無未知 chunk_id」，不管句數/標註位置/段落結構）：
   1. 單句多標註：2-3 chunks 支持同一點 → 組複合句、句尾 `[id1][id2]`。（**2026-09-05 使用者主張升級為「引用完整性」**：報告 LLM 看不到 claim 的 chunk 原文、只依據 claim text 生成——「用了某 claim 的事實就應標駐該 claim 全部引用 chunks」；現況只標單一 marker＝缺陷。取捨：多 claim 合成句的全標噪音、語意歸屬判定、部分採用時的全標過度——M4 動工前確認精準標 vs 完整標。）**③ 2026-09-05 使用者再提「claim 標註方案」**：報告 LLM 只看得懂 claim（語意單位），chunk 對它是 opaque id——句子結尾標 `[claim-N]`，claim→chunks 由程式機械展開（變體 A：正文保留 `[claim-N]` + 附 claim 索引；變體 B：程式展開替換回 `[c3][c7][c12]`，對外維持現有 chunk marker 契約、驗證不重寫——建議 B）。優點：句子↔claim 歸屬是 LLM 擅長的事、完整性變機械保證、正文不噪音；代價：報告 marker 內部契約變更（prompt/模型/驗證/測試）。**④ 使用者 2026-09-05 定案「雙 Pydantic 分層」**：第 1 層 LLM 契約（`SynthesisReport`：report 含 `[claim-N]`、future_directions）只做「寫報告+標 claim 代號」；第 2 層程式契約（`SynthesisResult`：與第 1 層類似 + 新欄位 `claim_chunks`＝各 claim 代號→引用 chunks 對照，future_directions 由 claim 展開），程式把第 1 層機械展開產生第 2 層。特性：LLM 任務最小化、完整性機械保證（claim→chunks 在筆記階段已驗證）、兩層隔離（改對外格式不動 LLM 契約）、驗證分層。**2026-09-05 使用者再定案**：第 2 層 report **只保留 claim 標註版、不做 chunk 展開版**（需要時再議，不做冗餘）；future_directions 同以 claim 為輸入（`supporting_claim_ids` 取代 `supporting_chunk_ids`），與 report **共用同一張 `claim_chunks` 對照表**（全域唯一）。
-  2. 句中子句標註：marker 可放子句/逗號後。（**2026-09-05 使用者確認**：與 A1 同機制——多 claim 並排各自標＝子句級（A2）；多 claim 疊加支持同一點＝句尾聚合（A1）。展開行為相同，僅標註位置不同，M4 時確認粒度。）
+  2. 句中子句標註：marker 可放子句/逗號後（示意：`成本低[claim-1]，而基準表現更好[claim-3]`）。（**2026-09-05 使用者確認**：A1 與 A2 機制相同＝都是「一句話標多個 claim」，差別只在 marker 放哪：A1「句尾聚合」＝多個 marker 集中放句尾（多 claim 疊加支持同一點）；A2「子句級」＝marker 分散放各子句後（多 claim 並排各自支持不同子句）。兩者展開行為相同。M4 確認粒度：預設 A1 句尾聚合，需要更精細的句子↔claim 歸屬時用 A2。）
   3. 強制邏輯轉折詞：However / In addition / Specifically / Consequently 等，措辭要「適量自然、避免機械重複」。
   4. 主題式合成：報告歸納為 2-3 主題段落（背景與範疇 → 現有工具與機制 → 瓶頸與未來挑戰），不要照清單宣科。
   5. **材料來源清單移出 prose**：prompt 那句「Close the report with 材料來源清單」移除，改由 pipeline 層程式組裝——一次收掉報告尾端中文瑕疵。
@@ -28,7 +31,13 @@
 - **B. PDF 檔頭驗證（M3B 殘留）**：`download_pdf` 下載後檢查 magic bytes `%PDF-`，非 PDF 視同失敗 → 自動遞補（避免 HTML 偽 PDF 佔名額，如真實 run 的 W4205941964）。
 - **C. 完整報告存檔**：`main.py` 支援把完整報告輸出成 JSON 檔（真實 run 只留了 report_shape，完整 prose 沒留底）。
 - **D. Unpaywall 補查**：背景見「M3 方向」段落。
-- **E. 報告輸入瘦身（Q2，2026-08-30 已決策、未實作）**：報告 prompt 現況送兩區塊——A「逐 chunk 證據摘要」（`EvidenceSummary`，RCS 產物，每篇配一份全文摘要的常數倍數）+ B「逐篇筆記」（claims）。**方向已定：拿掉 A、輸入只剩最瘦的 B（逐篇筆記）**，源於 `corpus-single-rerank-call.md`（Q2 另案，:11/:17/:32/:112）。未實作原因：當時決策條件是「先看 corpus-wide RCS 的實測 A 筆數再決定」。⚠️ 動工前須與使用者確認（她對報告生成設計有主導權，且 2026-09-05 明示實行前先討論）。
+- **E. 報告輸入瘦身（Q2，2026-08-30 已決策、**未實作**、⚠️ 現況 code 仍送區塊 A 給報告 LLM）**：報告 prompt 現況送兩區塊——A「逐 chunk 證據摘要」（`EvidenceSummary`，RCS 產物，每篇配一份全文摘要的常數倍數）+ B「逐篇筆記」（claims）。**方向已定：拿掉 A、輸入只剩最瘦的 B（逐篇筆記）**，源於 `corpus-single-rerank-call.md`（Q2 另案，:11/:17/:32/:112）。未實作原因：當時決策條件是「先看 corpus-wide RCS 的實測 A 筆數再決定」。⚠️ 動工前須與使用者確認（她對報告生成設計有主導權，且 2026-09-05 明示實行前先討論）。
+- **F. RCS 評分缺失操作型定義（2026-09-05 討論產出、✅ M4 已實作）**：原 `build_evidence_prompt`（llm_evidence.py:94-101）只要求 `relevance_score`/`evidence_quality_score` 與 recommendation，**完全沒定義「什麼情況給高分」**（對照 metadata 層 assessment.py:23-32 有明確規則）→ 分數標準漂移。M4 已加操作型錨點（1-10 制：10=直接回答 query 核心 vs 1=邊緣提及；quality＝內容密度+具體性，**理論/框架論文無數字不扣分**），並依使用者裁示「錨點有提就好、精簡 1-2 句」。
+- **H. RCS 分數制 1-10 改版（2026-09-05 使用者參考 paperqa2 建議提出、✅ M4 已實作）**：提高鑑別度——舊 5 分制整數＋幾 chunks＋收縮平均後論文分數常擠在 3-4，include/consider 的 4/3 閾值差異太小。M4 已實作：`LlmEvidenceAssessment`/`PaperAssessment` 兩分數範圍 `le=10`、prompt/測試/閾值同步（include 8/6、consider 6）、prior_score **5.5**（float）、聚合分數保留小數（round 1 位不 floor）、`PaperAssessment` 兩分數欄位 int→float。**門檻先調後驗（使用者裁示）**：先按建議值 implement，M4 實測看 include/consider 分布再調整——校準迴圈接 A8（改前/改後對比，Todo 8）。
+- **I. RCS 評分順序：先 rationale 後 score（2026-09-05 使用者參考 paperqa2 建議提出、✅ M4 已實作）**：LLM 自迴歸逐 token 生成，先給 score 再寫 rationale＝「先猜答案、再編理由」→ 分數準確率降低。M4 prompt/schema 明示「先寫 rationale（理由），再給出基於該理由的分數」，避免「先猜答案、再編理由」。
+- **G. RCS 層 LLM recommendation 是決策雜訊（2026-09-05 使用者發現、✅ M4 已實作）**：include/consider/exclude 完全由程式用分數+閾值判定（pipeline.py:130、synthesis.py:131 用 paper 層），LLM 的 chunk 層 `recommendation` **零決策作用**。M4 已**移除欄位**（models 契約 + synthesis 區塊 A），高分卻 exclude 的矛盾不再誤導報告 LLM。
+- **J. 論文「使用價值」第三維度評估（2026-09-06 使用者提出、列入之後討論）**：現況兩維——relevance＝主題契合、evidence_quality＝內容可信/具體——回答「論文在談論 idea 嗎、說得有據嗎」，但**缺「對 idea 的使用價值」**：高度相關但無推進（如僅漂亮綜述、無方法/數據可複用）與能提供可複用方法/可對比數據/填補空缺的論文，現況分數無法區分。**2026-09-06 使用者定案**：成為第三種分數 `utility_score`（1-10；chunk 層 LLM 給分 → 收縮平均 → 論文層 float，與現況兩分數同管道、同閾值機制），**三維都納入 include/consider 判定**；若因此篩選過度嚴格（include/consider 過少），**再調整各維度閾值**（先調後驗，同 M4 校準迴圈）。各維度閾值具體數值動工時再討論。動工時機：M4 Todo 8 校準後或 C2/C3 規劃時，**動工前先與使用者討論**（prompt 需加 utility 的 10/5/1 錨點）。另注意：M4 改前/改後對比（Todo 8）可先人工抽查 include 論文是否出現「相關但無用」者，作為加第三維度的實證。
+- **K. 檢索層/選擇層改進（2026-09-07 使用者定案方向、列為下個里程碑候選、等她下令才寫計畫）**：見「下一步」第 2 項完整內容。重點：(1) ranking `lexical_score` 換論文摘要 embedding cosine（同 bge-small-en-v1.5+`QUERY_PREFIX`+`Encoder` 注入，純本地、無 LLM、可測；保留 citation+recency 等權三成分）——回應「關鍵詞比對把不錯論文隔絕在外」；(2) `LIMIT` 50→100、`TOTAL_TARGET` 15→20-25、`TOP_K_CHUNKS` 8→16——回應「文本數量過少、可評比論文少」；(3) top-N 截斷 = 「排後面=選不到」的真正殺手；(4) 候選集另兩個瓶頸：`search.py:98` 無 abstract 論文被丟棄、OpenAlex 搜尋本身字面匹配（術語變體論文進不來）；(5) 驗收 = 重跑同 query 對比分數分布上移？**不足再校準閾值**（接 M4 校準決策，避免先降後改回）。
 3. M1 遺留：opencode 尚未重啟（skill 需重啟才生效）；Windows 端尚未 pull 同步。
 4. **skill 待辦**：計畫驗證做成 `review-plan` skill（先有 checklist：`.omo/notes/plan-review-checklist.md`；skill 之後交執行代理建立，重啟生效）。
 
@@ -53,6 +62,7 @@
 - **以後這類「要記錄的輸出/祥測 smoke 結果 log」：由執行代理跑並存檔到 `.omo/evidence/`**，規劃 agent 只負責驗收（讀 log、核對），不自已嘗試寫非 .omo/*.md 檔案。
 - **git commit/push 一律由使用者（本人）親自做**：執行代理只改 code、跑測試、存 log、回報，**不執行任何 git commit**。規劃 agent 也不 commit。此慣例在計畫檔 Commit strategy 已標明，之後每個里程碑沿用。
 - **commit 指令只列「會被追蹤且該進 git」的檔案**（2026-09-05 使用者提醒）：`.omo/notes/`、`.omo/drafts/`、`.omo/evidence/` 在 .gitignore（內部工作產物，不進 repo）；使用者 `git add` 時被忽略屬正常，**不要用 `-f` 強加**。決策紀錄以 `.omo/plans/` + `.omo/STATE.md` 進 git。
+- **route B 再確認（2026-09-06 使用者重申）**：執行一律由使用者「把執行指令包貼給執行代理」發動，**不用 start-work / 不 spawn 子代理**（規劃 agent 也不得自行觸發執行或叫子代理審查）；執行代理跑完回報 → 規劃 agent 驗收。M4 執行指令包已於對話中交付（貼給執行代理即可）。
 
 ## M3A（LLM planner）驗收現況（2026-09-04）
 - **功能已驗收通過 ✅**：154 tests OK（`test-suite-m3a-llm-planner.log`）；無 key fake 驗證 + 真實 Gemini smoke（`smoke-m3a-llm-planner.log`）都過，`generated_by=llm`、`idea=None`、無 key 洩漏。

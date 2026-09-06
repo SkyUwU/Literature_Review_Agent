@@ -20,9 +20,8 @@ class FakeClient:
                     {
                         "chunk_id": "paper-1-p1-1-c1",
                         "summary": "This chunk provides evidence relevant to the literature review agent query.",
-                        "relevance_score": 5,
-                        "evidence_quality_score": 3,
-                        "recommendation": "include",
+                        "relevance_score": 10,
+                        "evidence_quality_score": 10,
                         "rationale": "The chunk directly discusses the requested literature review agent topic.",
                     }
                 ]
@@ -161,9 +160,8 @@ def assessment_payload(chunk_id: str) -> dict[str, object]:
     return {
         "chunk_id": chunk_id,
         "summary": f"The chunk {chunk_id} provides relevant evidence about review agents.",
-        "relevance_score": 5,
-        "evidence_quality_score": 3,
-        "recommendation": "include",
+        "relevance_score": 10,
+        "evidence_quality_score": 10,
         "rationale": "The chunk directly discusses the requested literature review agent topic.",
     }
 

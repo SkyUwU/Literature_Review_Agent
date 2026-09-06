@@ -65,17 +65,15 @@ class LlmEvidenceTests(unittest.TestCase):
                     {
                         "chunk_id": "chunk-2",
                         "summary": "The chunk reports an evaluation result relevant to evidence ranking.",
-                        "relevance_score": 4,
-                        "evidence_quality_score": 4,
-                        "recommendation": "include",
+                        "relevance_score": 9,
+                        "evidence_quality_score": 8,
                         "rationale": "It directly reports an evaluation result for the requested topic.",
                     },
                     {
                         "chunk_id": "chunk-1",
                         "summary": "The chunk describes a retrieval method relevant to evidence ranking.",
-                        "relevance_score": 5,
-                        "evidence_quality_score": 3,
-                        "recommendation": "include",
+                        "relevance_score": 9,
+                        "evidence_quality_score": 9,
                         "rationale": "It describes a method that directly addresses the requested topic.",
                     },
                 ]
@@ -85,6 +83,10 @@ class LlmEvidenceTests(unittest.TestCase):
         result = summarize_and_rerank(retrieval_response(), client)
 
         self.assertIn("Research query", client.prompt)
+        self.assertIn("(1-10)", client.prompt)
+        self.assertIn("rationale first", client.prompt)
+        self.assertIn("do NOT penalize", client.prompt)
+        self.assertNotIn("recommendation", client.prompt)
         self.assertEqual([item.chunk_id for item in result.summaries], ["chunk-1", "chunk-2"])
         self.assertEqual(result.summaries[0].page_end, 3)
 
@@ -95,9 +97,8 @@ class LlmEvidenceTests(unittest.TestCase):
                     {
                         "chunk_id": "unknown",
                         "summary": "An apparently valid summary that cannot be matched to a source chunk.",
-                        "relevance_score": 3,
-                        "evidence_quality_score": 3,
-                        "recommendation": "consider",
+                        "relevance_score": 8,
+                        "evidence_quality_score": 7,
                         "rationale": "The alleged source identity cannot be verified against retrieved evidence.",
                     }
                 ]
@@ -111,7 +112,7 @@ class LlmEvidenceTests(unittest.TestCase):
         result = validate_evidence_assessments(
             "```json\n"
             '{"assessments": [{"chunk_id": "chunk-1", "summary": "This summary is long enough to satisfy the validation requirement.", '
-            '"relevance_score": 3, "evidence_quality_score": 3, "recommendation": "consider", '
+            '"relevance_score": 8, "evidence_quality_score": 7, '
             '"rationale": "This rationale is long enough to satisfy the validation requirement."}]}\n'
             "```"
         )
@@ -129,17 +130,15 @@ class LlmEvidenceTests(unittest.TestCase):
                     {
                         "chunk_id": "chunk-1",
                         "summary": "This valid repaired summary is sufficiently long for Pydantic validation.",
-                        "relevance_score": 4,
-                        "evidence_quality_score": 3,
-                        "recommendation": "consider",
+                        "relevance_score": 9,
+                        "evidence_quality_score": 8,
                         "rationale": "This valid repaired rationale is sufficiently long for Pydantic validation.",
                     },
                     {
                         "chunk_id": "chunk-2",
                         "summary": "This second valid summary is sufficiently long for Pydantic validation.",
-                        "relevance_score": 3,
-                        "evidence_quality_score": 3,
-                        "recommendation": "consider",
+                        "relevance_score": 9,
+                        "evidence_quality_score": 7,
                         "rationale": "This second valid rationale is sufficiently long for Pydantic validation.",
                     },
                 ]

@@ -28,7 +28,6 @@ def assessment(chunk_id: str, relevance: int) -> dict[str, object]:
         "summary": f"Chunk {chunk_id} provides relevant evidence for the review query.",
         "relevance_score": relevance,
         "evidence_quality_score": 3,
-        "recommendation": "include",
         "rationale": "The chunk directly discusses the requested literature review agent topic.",
     }
 

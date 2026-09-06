@@ -4,6 +4,7 @@ from pydantic import ValidationError
 
 from literature_review.demo import build_demo_report
 from literature_review.models import (
+    AssessmentPolicy,
     ChunkReference,
     CoveragePackPolicy,
     EvidenceAggregationPolicy,
@@ -14,6 +15,7 @@ from literature_review.models import (
     EvidenceRerankResponse,
     EvidenceSummary,
     FutureDirection,
+    LlmEvidenceAssessment,
     LlmNoteClaim,
     LlmPaperSummaryNote,
     LlmSynthesisBatch,
@@ -33,12 +35,45 @@ class ModelTests(unittest.TestCase):
         report = build_demo_report()
         self.assertEqual(report.assessments[0].recommendation, "include")
 
-    def test_score_must_be_between_one_and_five(self) -> None:
+    def test_score_must_be_between_one_and_ten(self) -> None:
         with self.assertRaises(ValidationError):
             PaperAssessment(
                 paper_id="example",
-                relevance_score=6,
+                relevance_score=11,
                 evidence_quality_score=3,
+                recommendation="include",
+                rationale="This rationale is intentionally long enough to validate.",
+            )
+
+    def test_float_paper_scores_are_accepted(self) -> None:
+        assessment = PaperAssessment(
+            paper_id="example",
+            relevance_score=7.5,
+            evidence_quality_score=6.0,
+            recommendation="include",
+            rationale="This rationale is intentionally long enough to validate.",
+        )
+
+        self.assertEqual(assessment.relevance_score, 7.5)
+        self.assertEqual(assessment.evidence_quality_score, 6.0)
+
+    def test_chunk_assessment_score_above_ten_rejected(self) -> None:
+        with self.assertRaises(ValidationError):
+            LlmEvidenceAssessment(
+                chunk_id="c1",
+                summary="This summary is long enough to pass validation.",
+                relevance_score=11,
+                evidence_quality_score=10,
+                rationale="This rationale is intentionally long enough to validate.",
+            )
+
+    def test_chunk_assessment_rejects_recommendation_field(self) -> None:
+        with self.assertRaises(ValidationError):
+            LlmEvidenceAssessment(
+                chunk_id="c1",
+                summary="This summary is long enough to pass validation.",
+                relevance_score=8,
+                evidence_quality_score=7,
                 recommendation="include",
                 rationale="This rationale is intentionally long enough to validate.",
             )
@@ -110,9 +145,8 @@ def evidence_assessment_response() -> EvidenceAssessmentResponse:
                 EvidenceSummary(
                     chunk_id=chunk.chunk_id,
                     summary="The chunk reports a method relevant to evidence ranking.",
-                    relevance_score=4,
-                    evidence_quality_score=4,
-                    recommendation="include",
+                    relevance_score=8,
+                    evidence_quality_score=8,
                     rationale="It directly reports a method relevant to the topic.",
                     paper_id=chunk.paper_id,
                     page_start=chunk.page_start,
@@ -125,8 +159,8 @@ def evidence_assessment_response() -> EvidenceAssessmentResponse:
         assessments=[
             PaperAssessment(
                 paper_id="p1",
-                relevance_score=5,
-                evidence_quality_score=4,
+                relevance_score=8,
+                evidence_quality_score=7,
                 recommendation="include",
                 rationale="This rationale is intentionally long enough to validate.",
             )
@@ -225,8 +259,18 @@ class SynthesisModelTests(unittest.TestCase):
     def test_evidence_aggregation_policy_expanded(self) -> None:
         policy = EvidenceAggregationPolicy()
 
-        self.assertEqual(policy.prior_score, 3)
+        self.assertEqual(policy.include_relevance_score, 8)
+        self.assertEqual(policy.include_evidence_quality_score, 6)
+        self.assertEqual(policy.consider_relevance_score, 6)
+        self.assertEqual(policy.prior_score, 5.5)
         self.assertEqual(policy.shrinkage_strength, 4)
+
+    def test_assessment_policy_new_defaults(self) -> None:
+        policy = AssessmentPolicy()
+
+        self.assertEqual(policy.include_relevance_score, 8)
+        self.assertEqual(policy.include_evidence_quality_score, 6)
+        self.assertEqual(policy.consider_relevance_score, 6)
 
     def test_llm_note_claim_validation_error(self) -> None:
         with self.assertRaises(ValidationError):

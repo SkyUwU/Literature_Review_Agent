@@ -139,6 +139,18 @@ M3C wires every milestone into one interactive entry: `literature_review.main` a
 - Known limitations (deliberate, out of scope): no multi-query merging, no OpenAlex pagination (`LIMIT=50` < the 200 ceiling), no DOI-based dedup, no Unpaywall/arXiv backfill (post-M3C), and the pipeline still cannot select `--api-key-suffix` for synthesis (key2 is the dedicated synthesis key).
 - Smoke: fake e2e (no key) in `.omo/evidence/smoke-m3c-fake-e2e.log`; the real smoke plan (real OpenAlex + real Gemini, temp dest dir only) awaits user confirmation before consuming keys.
 
+## M4 — RCS 評分層改版：1-10 分數制 + float 聚合 + 去 chunk recommendation（2026-09-06）
+
+M4 改版 LLM 評分層（C1），把 RCS 的舊 5 分制升級為 1-10 分制並加上操作型錨點，刪除零決策作用的 chunk 層 `recommendation`，聚合分數保留小數以恢復鑑別度：
+
+- `literature_review/models.py`：`LlmEvidenceAssessment`/`EvidenceCitation` 兩分數範圍 `le=10`、新增 `model_config = ConfigDict(extra="forbid")`、chunk 層 `recommendation` 欄位**移除**；`PaperAssessment` 兩分數 int→float（`le=10`），論文層 `recommendation` **保留**（:230）；`AssessmentPolicy`/`EvidenceAggregationPolicy` 門檻 4/3/3 → **8/6/6**、`prior_score: float = 5.5`。
+- `literature_review/assessment.py`：`_shrunk_mean` `round((n*mean + m*prior)/(n+m), 1)`（去 floor、保留小數、n=0 拋 ValueError）；聚合組裝移除 chunk 層 recommendation；metadata 初評 `relevance_score`/`evidence_quality_score` 對齊 1-10（`min(10, max(1, ceil(rank_score*10/3)))`；quality = base 4 + venue/citation 門檻）並連同 `assess_selected_papers` docstring 標 **Deprecated**（僅 `search.py --assess` 使用）。
+- `literature_review/llm_evidence.py`：`build_evidence_prompt` 改 1-10 制、加 10/5/1 操作型錨點、明示「先寫 rationale 再給分數」、`do NOT penalize theory/framework papers`（無數字不扣分）、移除 recommendation 指示。
+- `literature_review/synthesis.py`：報告 prompt 區塊 A summaries dict 移除 `recommendation`；論文層 recommendation 判定（:131 usable / :604 exclude）保留。
+- `literature_review/demo.py`：範例 `PaperAssessment` 分數 8/6（對應新閾值）。
+- 測試更新：`test_models`（1-10/float/拒 chunk recommendation）、`test_assessment`（聚合邊界、metadata 0-3 fixture + 新公式斷言、移除 LEGACY_POLICY）、`test_llm_evidence`（新 prompt 斷言）、`test_synthesis`/`test_pipeline`/`test_main`/`test_retrieval_eval`（fake JSON 去 chunk 層 recommendation、分數升到 10/10 使聚合後仍 usable）。Suite count after this milestone: **196 tests**。
+- 驗收：改前真實 run baseline（`.omo/evidence/m4-baseline-before.log` + `m4-baseline-before-dist.json`，舊制下 4 篇全擠 3/4 分）已留檔；改後真實 run + 改前/改後對比 + 門檻校準建議接續在 Todo 8。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.

@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
 class ResearchIdea(BaseModel):
@@ -177,11 +177,12 @@ class EvidenceRetrievalResponse(BaseModel):
 class LlmEvidenceAssessment(BaseModel):
     """Structured assessment requested from an LLM for one retrieved chunk."""
 
+    model_config = ConfigDict(extra="forbid")
+
     chunk_id: str
     summary: str = Field(min_length=20)
-    relevance_score: int = Field(ge=1, le=5)
-    evidence_quality_score: int = Field(ge=1, le=5)
-    recommendation: Literal["include", "consider", "exclude", "insufficient_evidence"]
+    relevance_score: int = Field(ge=1, le=10)
+    evidence_quality_score: int = Field(ge=1, le=10)
     rationale: str = Field(min_length=20)
 
 
@@ -210,21 +211,22 @@ class EvidenceRerankResponse(BaseModel):
 class EvidenceCitation(BaseModel):
     """Trusted provenance and LLM assessment for one chunk used in a paper assessment."""
 
+    model_config = ConfigDict(extra="forbid")
+
     chunk_id: str
     page_start: int = Field(ge=1)
     page_end: int = Field(ge=1)
     summary: str = Field(min_length=20)
-    relevance_score: int = Field(ge=1, le=5)
-    evidence_quality_score: int = Field(ge=1, le=5)
-    recommendation: Literal["include", "consider", "exclude", "insufficient_evidence"]
+    relevance_score: int = Field(ge=1, le=10)
+    evidence_quality_score: int = Field(ge=1, le=10)
 
 
 class PaperAssessment(BaseModel):
     """Why a paper is or is not useful for the current idea."""
 
     paper_id: str
-    relevance_score: int = Field(ge=1, le=5)
-    evidence_quality_score: int = Field(ge=1, le=5)
+    relevance_score: float = Field(ge=1, le=10)
+    evidence_quality_score: float = Field(ge=1, le=10)
     recommendation: Literal["include", "consider", "exclude"]
     rationale: str = Field(min_length=20)
     evidence: list[EvidenceCitation] = Field(default_factory=list)
@@ -233,18 +235,18 @@ class PaperAssessment(BaseModel):
 class AssessmentPolicy(BaseModel):
     """Explainable thresholds for a metadata-only paper assessment."""
 
-    include_relevance_score: int = Field(default=4, ge=1, le=5)
-    include_evidence_quality_score: int = Field(default=3, ge=1, le=5)
-    consider_relevance_score: int = Field(default=3, ge=1, le=5)
+    include_relevance_score: int = Field(default=8, ge=1, le=10)
+    include_evidence_quality_score: int = Field(default=6, ge=1, le=10)
+    consider_relevance_score: int = Field(default=6, ge=1, le=10)
 
 
 class EvidenceAggregationPolicy(BaseModel):
     """Transparent thresholds for aggregating supplied chunk assessments per paper."""
 
-    include_relevance_score: int = Field(default=4, ge=1, le=5)
-    include_evidence_quality_score: int = Field(default=3, ge=1, le=5)
-    consider_relevance_score: int = Field(default=3, ge=1, le=5)
-    prior_score: int = Field(default=3, ge=1, le=5)
+    include_relevance_score: int = Field(default=8, ge=1, le=10)
+    include_evidence_quality_score: int = Field(default=6, ge=1, le=10)
+    consider_relevance_score: int = Field(default=6, ge=1, le=10)
+    prior_score: float = Field(default=5.5, ge=1, le=10)
     shrinkage_strength: int = Field(default=4, ge=0)
 
 

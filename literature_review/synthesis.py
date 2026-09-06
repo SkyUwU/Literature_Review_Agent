@@ -504,7 +504,6 @@ def build_synthesis_prompt(
             "summary": summary.summary,
             "relevance_score": summary.relevance_score,
             "evidence_quality_score": summary.evidence_quality_score,
-            "recommendation": summary.recommendation,
         }
         for summary in evidence_assessment_response.evidence_rerank_response.summaries
         if summary.paper_id in usable_ids
