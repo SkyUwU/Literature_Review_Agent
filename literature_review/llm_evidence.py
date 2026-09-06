@@ -95,9 +95,14 @@ def build_evidence_prompt(response: EvidenceRetrievalResponse) -> str:
         "Assess each supplied evidence chunk only against the research query. "
         "Do not use outside knowledge and do not invent claims. Return exactly one JSON object, "
         "without Markdown code fences or any surrounding explanation. "
-        "The object must contain an 'assessments' array. Each item must include chunk_id, summary, relevance_score "
-        "(1-5), evidence_quality_score (1-5), recommendation "
-        "(include, consider, exclude, or insufficient_evidence), and rationale. "
+        "The object must contain an 'assessments' array. Each item must include chunk_id, summary, "
+        "relevance_score (1-10), evidence_quality_score (1-10), and rationale. "
+        "Write the rationale first as the reason, then assign scores consistent with it. "
+        "Scoring guide: relevance_score 10 = the chunk directly answers the query's core question; "
+        "5 = related but only touches the topic; 1 = only a passing mention. "
+        "evidence_quality_score 10 = concrete methods, numbers, or conclusions directly backing the claim; "
+        "5 = specific but ordinary detail; 1 = vague with little information; "
+        "do NOT penalize theory or framework papers just because they contain no numbers. "
         f"Research query: {response.query}\nEvidence chunks: {json.dumps(chunks, ensure_ascii=False)}"
     )
 

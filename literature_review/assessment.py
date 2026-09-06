@@ -16,27 +16,38 @@ from literature_review.models import (
 
 
 def relevance_score(rank_score: float) -> int:
-    """Map the existing baseline rank score to a bounded, readable scale."""
-    return min(5, max(1, math.ceil(rank_score / 3)))
+    """Map a baseline rank score (0-3) to a bounded 1-10 scale.
+
+    Deprecated: the main pipeline no longer uses this metadata rule; it survives
+    only for the search.py --assess CLI and will be removed in a cleanup milestone.
+    """
+    return min(10, max(1, math.ceil(rank_score * 10 / 3)))
 
 
 def evidence_quality_score(citation_count: int | None, venue: str | None) -> int:
-    """Score available metadata, not the scientific quality of a paper."""
-    score = 2  # The selection pipeline already requires an abstract and authors.
+    """Score available metadata, not the scientific quality of a paper.
+
+    Deprecated: same note as relevance_score.
+    """
+    score = 4  # The selection pipeline already requires an abstract and authors.
     if venue:
-        score += 1
+        score += 2
     if (citation_count or 0) >= 10:
-        score += 1
+        score += 2
     if (citation_count or 0) >= 100:
-        score += 1
-    return min(score, 5)
+        score += 2
+    return min(score, 10)
 
 
 def assess_selected_papers(
     selected_set: SelectedPaperSet,
     policy: AssessmentPolicy,
 ) -> AssessmentResponse:
-    """Recommend reading priority using only retrieved metadata and abstracts."""
+    """Recommend reading priority using only retrieved metadata and abstracts.
+
+    Deprecated: the main pipeline assesses papers from bounded chunk evidence;
+    this metadata rule stays only for the search.py --assess CLI.
+    """
     assessments: list[PaperAssessment] = []
     for ranked_paper in selected_set.selected_papers:
         paper = ranked_paper.paper
@@ -75,17 +86,19 @@ def assess_selected_papers(
     )
 
 
-def _shrunk_mean(scores: list[int], policy: EvidenceAggregationPolicy) -> int:
+def _shrunk_mean(scores: list[int], policy: EvidenceAggregationPolicy) -> float:
     """Blend the sample mean toward the prior score when few chunks support a paper.
 
-    Formula: floor((n*mean + m*prior)/(n+m) + 0.5)
+    Formula: round((n*mean + m*prior)/(n+m), 1)
     where n=len(scores), m=policy.shrinkage_strength, prior=policy.prior_score.
     """
     n = len(scores)
+    if n == 0:
+        raise ValueError("_shrunk_mean requires at least one score")
     m = policy.shrinkage_strength
     prior = policy.prior_score
     mean = sum(scores) / n
-    return math.floor((n * mean + m * prior) / (n + m) + 0.5)
+    return round((n * mean + m * prior) / (n + m), 1)
 
 
 def aggregate_evidence_assessments(
@@ -125,7 +138,6 @@ def aggregate_evidence_assessments(
                 summary=summary.summary,
                 relevance_score=summary.relevance_score,
                 evidence_quality_score=summary.evidence_quality_score,
-                recommendation=summary.recommendation,
             )
             for summary in summaries
         ]

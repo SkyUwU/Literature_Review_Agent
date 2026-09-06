@@ -33,8 +33,8 @@ def build_demo_report() -> LiteratureReviewReport:
     )
     assessment = PaperAssessment(
         paper_id=paper.paper_id,
-        relevance_score=5,
-        evidence_quality_score=3,
+        relevance_score=8,
+        evidence_quality_score=6,
         recommendation="include",
         rationale=(
             "The paper directly concerns automated literature review and can help "
