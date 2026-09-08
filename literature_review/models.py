@@ -164,6 +164,7 @@ class EvidenceRetrievalPolicy(BaseModel):
     """Bounded, low-cost retrieval settings before LLM contextual summarization."""
 
     top_k: int = Field(default=10, ge=1, le=100)
+    max_chunks_per_paper: int | None = Field(default=None, ge=1, le=50)
 
 
 class EvidenceRetrievalResponse(BaseModel):
@@ -247,7 +248,7 @@ class EvidenceAggregationPolicy(BaseModel):
     include_evidence_quality_score: int = Field(default=6, ge=1, le=10)
     consider_relevance_score: int = Field(default=6, ge=1, le=10)
     prior_score: float = Field(default=5.5, ge=1, le=10)
-    shrinkage_strength: int = Field(default=4, ge=0)
+    shrinkage_strength: int = Field(default=3, ge=0)
 
 
 class AssessmentResponse(BaseModel):

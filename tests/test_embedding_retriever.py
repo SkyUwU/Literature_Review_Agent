@@ -1,13 +1,25 @@
 import unittest
+from collections import Counter
 
-from literature_review.embedding_retriever import QUERY_PREFIX, retrieve_evidence_embedding
+from literature_review.embedding_retriever import QUERY_PREFIX, retrieve_evidence_embedding, _score_ranked
 from literature_review.models import EvidenceChunk, EvidenceRetrievalPolicy, EvidenceRetrievalResponse
+from literature_review.assessment import aggregate_evidence_assessments
 
 
 def chunk(chunk_id: str, text: str) -> EvidenceChunk:
     return EvidenceChunk(
         chunk_id=chunk_id,
         paper_id="paper-1",
+        page_start=1,
+        page_end=1,
+        text=text,
+    )
+
+
+def chunk_for(paper_id: str, chunk_id: str, text: str) -> EvidenceChunk:
+    return EvidenceChunk(
+        chunk_id=f"{paper_id}-{chunk_id}",
+        paper_id=paper_id,
         page_start=1,
         page_end=1,
         text=text,
@@ -28,6 +40,13 @@ class RecordingEncoder:
     def __call__(self, texts: list[str]) -> list[list[float]]:
         self._inputs.extend(texts)
         return [vector_for(text) for text in texts]
+
+
+class ConstantEncoder:
+    """Fake encoder returning an identical vector for every input (ties sorted by id)."""
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0, 0.0] for _ in texts]
 
 
 class EmbeddingRetrieverTests(unittest.TestCase):
@@ -69,6 +88,109 @@ class EmbeddingRetrieverTests(unittest.TestCase):
             encoder=encoder,
         )
         self.assertEqual(response.ranked_chunks, [])
+
+
+def rerank_scores(response: EvidenceRetrievalResponse, texts_by_chunk: dict[str, list[int]]) -> object:
+    from literature_review.models import EvidenceRerankResponse, EvidenceSummary
+
+    summaries = []
+    for item in response.ranked_chunks:
+        rel, qual = texts_by_chunk[item.chunk.chunk_id]
+        summaries.append(
+            EvidenceSummary(
+                chunk_id=item.chunk.chunk_id,
+                paper_id=item.chunk.paper_id,
+                page_start=item.chunk.page_start,
+                page_end=item.chunk.page_end,
+                summary="This is a valid evidence summary with enough text to validate.",
+                relevance_score=rel,
+                evidence_quality_score=qual,
+                rationale="Rationale with enough text to validate the evidence summary.",
+            )
+        )
+    return EvidenceRerankResponse(retrieval_response=response, summaries=summaries)
+
+
+class PerPaperCapTests(unittest.TestCase):
+    def test_no_cap_keeps_legacy_top_k_behavior(self) -> None:
+        chunks = [
+            chunk_for("p-a", f"c{n}", f"evidence text number {n}") for n in range(1, 9)
+        ]
+        response = retrieve_evidence_embedding(
+            chunks, "allocation", EvidenceRetrievalPolicy(top_k=3, max_chunks_per_paper=None),
+            encoder=ConstantEncoder(),
+        )
+        self.assertEqual(len(response.ranked_chunks), 3)
+        self.assertTrue(all(r.chunk.paper_id == "p-a" for r in response.ranked_chunks))
+
+    def test_cap_limits_per_paper_and_backfills_to_next(self) -> None:
+        chunks = [
+            chunk_for("p-a", "c1", "generic evidence chunk text number one"),
+            chunk_for("p-a", "c2", "generic evidence chunk text number two"),
+            chunk_for("p-a", "c3", "generic evidence chunk text number three"),
+            chunk_for("p-b", "c1", "generic evidence chunk text number four"),
+            chunk_for("p-b", "c2", "generic evidence chunk text number five"),
+        ]
+        response = retrieve_evidence_embedding(
+            chunks, "allocation", EvidenceRetrievalPolicy(top_k=4, max_chunks_per_paper=2),
+            encoder=ConstantEncoder(),
+        )
+        counts = Counter(r.chunk.paper_id for r in response.ranked_chunks)
+        self.assertEqual(counts["p-a"], 2)
+        self.assertEqual(counts["p-b"], 2)
+        self.assertEqual(len(response.ranked_chunks), 4)
+
+    def test_cap_undershoots_top_k_collects_all_without_error(self) -> None:
+        chunks = [
+            chunk_for("p-a", f"c{n}", f"evidence text number {n}") for n in range(1, 4)
+        ] + [
+            chunk_for("p-b", f"c{n}", f"evidence text number {n}") for n in range(1, 4)
+        ]
+        response = retrieve_evidence_embedding(
+            chunks, "allocation", EvidenceRetrievalPolicy(top_k=10, max_chunks_per_paper=6),
+            encoder=ConstantEncoder(),
+        )
+        self.assertEqual(len(response.ranked_chunks), 6)
+        self.assertEqual(Counter(r.chunk.paper_id for r in response.ranked_chunks)["p-a"], 3)
+
+    def test_cap_six_top_k_32_spreads_budget_across_many_papers(self) -> None:
+        papers = [f"p-{n}" for n in range(5)]
+        chunks = [
+            chunk_for(p, f"c{i}", f"generic evidence text for paper {p} number {i}")
+            for p in papers
+            for i in range(8)
+        ]
+        response = retrieve_evidence_embedding(
+            chunks, "allocation", EvidenceRetrievalPolicy(top_k=32, max_chunks_per_paper=6),
+            encoder=ConstantEncoder(),
+        )
+        counts = Counter(r.chunk.paper_id for r in response.ranked_chunks)
+        self.assertEqual(len(response.ranked_chunks), 30)
+        self.assertTrue(all(count <= 6 for count in counts.values()))
+        self.assertGreaterEqual(len(counts), 5)
+        self.assertTrue(all(p in counts for p in papers))
+
+
+class ShrinkageStrengthTests(unittest.TestCase):
+    def test_default_shrinkage_strength_is_three(self) -> None:
+        from literature_review.models import EvidenceAggregationPolicy
+
+        self.assertEqual(EvidenceAggregationPolicy().shrinkage_strength, 3)
+
+def test_shrunk_mean_with_strength_three(self) -> None:
+    from literature_review.models import EvidenceAggregationPolicy
+
+    # (10 + 3*5.5) / 4 = 6.625 -> 6.6 (shrinkage m=3 pulls a single 10 toward prior 5.5)
+    response = _score_ranked(
+        [chunk_for("p-a", "c1", "generic evidence text number one")],
+        [[1.0, 0.0, 0.0]],
+        [1.0, 0.0, 0.0],
+        "allocation",
+        EvidenceRetrievalPolicy(top_k=1, max_chunks_per_paper=1),
+    )
+    reranked = rerank_scores(response, {"p-a-c1": [10, 10]})
+    result = aggregate_evidence_assessments(reranked, EvidenceAggregationPolicy())
+    self.assertEqual(result.assessments[0].relevance_score, 6.6)
 
 
 if __name__ == "__main__":

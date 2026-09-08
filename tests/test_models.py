@@ -263,7 +263,7 @@ class SynthesisModelTests(unittest.TestCase):
         self.assertEqual(policy.include_evidence_quality_score, 6)
         self.assertEqual(policy.consider_relevance_score, 6)
         self.assertEqual(policy.prior_score, 5.5)
-        self.assertEqual(policy.shrinkage_strength, 4)
+        self.assertEqual(policy.shrinkage_strength, 3)
 
     def test_assessment_policy_new_defaults(self) -> None:
         policy = AssessmentPolicy()

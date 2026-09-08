@@ -190,8 +190,8 @@ class AssessmentTests(unittest.TestCase):
 
         assessment = result.assessments[0]
         self.assertEqual(assessment.paper_id, "paper-1")
-        self.assertEqual(assessment.relevance_score, 6.8)
-        self.assertEqual(assessment.evidence_quality_score, 6.2)
+        self.assertEqual(assessment.relevance_score, 7.1)
+        self.assertEqual(assessment.evidence_quality_score, 6.3)
         self.assertEqual(assessment.recommendation, "consider")
         self.assertEqual([item.chunk_id for item in assessment.evidence], [chunk_one.chunk_id, chunk_two.chunk_id])
         self.assertEqual((assessment.evidence[0].page_start, assessment.evidence[0].page_end), (2, 3))
@@ -205,8 +205,8 @@ class ShrunkMeanAggregationTests(unittest.TestCase):
             _rerank_response_with_scores([(10, 10)]), EvidenceAggregationPolicy()
         )
 
-        self.assertEqual(result.assessments[0].relevance_score, 6.4)
-        self.assertEqual(result.assessments[0].evidence_quality_score, 6.4)
+        self.assertEqual(result.assessments[0].relevance_score, 6.6)
+        self.assertEqual(result.assessments[0].evidence_quality_score, 6.6)
         self.assertEqual(result.assessments[0].recommendation, "consider")
 
     def test_shrunk_mean_many_chunks(self) -> None:
@@ -214,8 +214,8 @@ class ShrunkMeanAggregationTests(unittest.TestCase):
 
         result = aggregate_evidence_assessments(_rerank_response_with_scores(scores), EvidenceAggregationPolicy())
 
-        self.assertEqual(result.assessments[0].relevance_score, 8.5)
-        self.assertEqual(result.assessments[0].evidence_quality_score, 7.2)
+        self.assertEqual(result.assessments[0].relevance_score, 8.8)
+        self.assertEqual(result.assessments[0].evidence_quality_score, 7.3)
         self.assertEqual(result.assessments[0].recommendation, "include")
 
     def test_shrunk_mean_zero_strength_behaves_like_rounded_mean(self) -> None:
@@ -231,15 +231,15 @@ class ShrunkMeanAggregationTests(unittest.TestCase):
             _rerank_response_with_scores([(9, 8)] * 10), EvidenceAggregationPolicy()
         )
 
-        self.assertEqual(result.assessments[0].relevance_score, 8.0)
+        self.assertEqual(result.assessments[0].relevance_score, 8.2)
         self.assertEqual(result.assessments[0].recommendation, "include")
 
     def test_include_threshold_below_8_0_falls_to_consider(self) -> None:
         result = aggregate_evidence_assessments(
-            _rerank_response_with_scores([(9, 8)] * 9), EvidenceAggregationPolicy()
+            _rerank_response_with_scores([(9, 8)] * 6), EvidenceAggregationPolicy()
         )
 
-        self.assertEqual(result.assessments[0].relevance_score, 7.9)
+        self.assertEqual(result.assessments[0].relevance_score, 7.8)
         self.assertEqual(result.assessments[0].recommendation, "consider")
 
     def test_consider_threshold_at_6_0(self) -> None:
@@ -247,7 +247,7 @@ class ShrunkMeanAggregationTests(unittest.TestCase):
             _rerank_response_with_scores([(7, 7)] * 2), EvidenceAggregationPolicy()
         )
 
-        self.assertEqual(result.assessments[0].relevance_score, 6.0)
+        self.assertEqual(result.assessments[0].relevance_score, 6.1)
         self.assertEqual(result.assessments[0].recommendation, "consider")
 
     def test_consider_threshold_below_6_0_excludes(self) -> None:

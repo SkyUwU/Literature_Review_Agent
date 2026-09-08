@@ -171,6 +171,16 @@ K2 是 K 的後繼小調（純參數 + 驗收 run）：把 RCS 評分券的跨�
 - 測試數：**204 tests OK**。證據 log：`.omo/evidence/k2-task-1-k2-topk-32.log`。
 - 驗收（Todo 3 真實 run 已完成 ✅）：同 query「literature review agent」完整 run（LLM plan + 真實 OpenAlex + 18 PDFs + embedding 論文排名 + RCS + synthesis）對比 k-after-dist.json——**進評分論文數 5→4（不升反降，假設未成立）**、usable 維持 1（W7140287209 The AI Scientist consider，rel 6.2 / qual 6.8，6 chunks；K 為 6.2/6.6、4 chunks）、其餘 3 exclude（W4401667275 rel 5.5/qual 5.4 17 chunks、W4393065402 4.4/5.7 3 chunks、新進 W4391006361 3.0/5.6 6 chunks；K 獨有的 W4402901320/W4416209823 被擠出）。分布 rel 3.0/6.2/median 4.95、qual 5.4/6.8/median 5.65。synthesis 產出 1 source、**14 inline citations（6 unique）**、2 future directions、`generated_by=llm`、AIza 0 命中；**報告尾端中文瑕疵仍在（材料來源清單/涵蓋 Chunk ID 附錄）**——已知 A5 待辦。**結論：涵蓋改善未成立**（top-32 名額被 W4401667275 單篇吃 17/32，分配仍集中）；依結論規則「仍 1 usable → 附閾值建議 C（consider rel 6→4.5 + qual 卡 5.5）」供使用者決策、不實作。證據：`.omo/evidence/k2-after-real.log` + `k2-after-dist.json` + `k2-vs-k-compare.md`。執行偏離比照 K 先例：① `--env-file .env`；② 下載落點 data/papers → 18 個 `W*.pdf` 移至 `/tmp/k2-after-downloads/` 還原 8 檔；③ 本 run 無 failed_extractions。
 
+## K3 — per-paper cap 遞補 + shrinkage_strength 4→3（2026-09-08）
+
+K3 回應 K2 教訓（跨論文 top-32 被 W4401667275 單篇吃 17/32）與歸因勘誤（跨 run 對比必須固定下載集）：cross-paper top-k 加 **per-paper quota（遞補式）**，單篇最多 6 chunks，名額遞補給後面的論文；`shrinkage_strength` 4→3（少 chunks 論文分數少被 prior 5.5 壓低）。
+
+- `literature_review/models.py`：`EvidenceRetrievalPolicy.max_chunks_per_paper`（`int | None = Field(default=None, ge=1, le=50)`，None=舊行為完全保留）；`EvidenceAggregationPolicy.shrinkage_strength` default 4→3。
+- `literature_review/embedding_retriever.py`：`_score_ranked` 加遞補分支（cap=None 維持原 path 直接取前 top_k；cap=N 時單篇超過跳過、名額遞補、依序 rank 1..N）。
+- `literature_review/main.py`：`retrieval_policy=EvidenceRetrievalPolicy(top_k=TOP_K_CHUNKS, max_chunks_per_paper=6)`。
+- 測試：test_models.py shrinkage 斷言 4→3、test_assessment.py 6 個聚合數值斷言同步（shrinkage 3：6.8→7.1、6.4→6.6、8.5→8.8、8.0→8.2、6.0→6.1；`below_8_0_falls_to_consider` 輸入 9×9→9×6 維持語意）、test_embedding_retriever.py +5（cap None 等價、遞補、cap 後不足 top_k 全收、cap6/top32 分散、shrinkage 3 聚合）。**209 tests OK**。log：`.omo/evidence/k3-task-1-models.log` + `k3-task-2-backfill.log`。
+- 驗收（Todo 3 固定集 A/B + Todo 4 真實 run ✅）：**固定集**（K2 的 18 PDF → `/tmp/k3-fixture/`）retrieval 層——A（cap=None）完全重現 K2 分配（17/6/6/3、4 篇論文）證明 fixture 有效；**B（cap=6）進評分論文 4→9**（W4401671778 3、W4323848232 2、W4407173730/W4362515116/W4402909345 各 1 新進），單篇壟斷（17/32）消除。**真實 run sanity**：進評分 **9**、1 consider（W4401667275 6.3/6.5——K2 時代為 exclude 5.5/5.4，cap 聚焦 + shrink 3 使分數上移）、8 exclude、報告 1 source + 2 future directions、`generated_by=llm`、AIza 0、無 failed_extractions；**首次 run 隨機 LLM miss 失敗**（chunk 完整性檢查無 retry），重試即成功，15 個首輪 PDF 在 `/tmp/k3-failed-run/`。**結論：cap 遞補目標達成**（涵蓋 4→9、壟斷消除）；真實 run 下載集浮動（W7140287209 缺席）故 usable 換人，retrieval 結論以固定集為準。證據：`.omo/evidence/k3-retrieval-compare.md` + `k3-after-real.log` + `k3-after-dist.json`。執行偏離比照先例：`--env-file .env`、下載落點 data/papers → 18 個 `W*.pdf` 移至 `/tmp/k3-after-downloads/` 還原 8 檔。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.

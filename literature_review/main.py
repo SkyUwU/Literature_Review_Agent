@@ -158,7 +158,7 @@ def run_end_to_end(
         documents,
         query,
         client_synth,
-        retrieval_policy=EvidenceRetrievalPolicy(top_k=TOP_K_CHUNKS),
+        retrieval_policy=EvidenceRetrievalPolicy(top_k=TOP_K_CHUNKS, max_chunks_per_paper=6),
     )
     return {
         "plan": plan,

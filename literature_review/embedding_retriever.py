@@ -70,14 +70,28 @@ def _score_ranked(
 ) -> EvidenceRetrievalResponse:
     """Score ``chunks`` against ``query_vector`` by cosine and cap at ``policy.top_k``.
 
-    ``chunk_vectors`` must be the embeddings of ``chunks`` in the same order
-    (computed once via ``encode_chunks``).
+    When ``policy.max_chunks_per_paper`` is set, each paper contributes at most that
+    many chunks and freed slots backfill to later chunks from other papers; when it is
+    ``None`` the behavior is the plain top-k cap (legacy path, unchanged).
     """
     scored: list[tuple[EvidenceChunk, float]] = []
     for chunk, vector in zip(chunks, chunk_vectors, strict=True):
         scored.append((chunk, _cosine(query_vector, vector)))
 
     scored.sort(key=lambda item: (-item[1], item[0].paper_id, item[0].chunk_id))
+    if policy.max_chunks_per_paper is None:
+        selected = scored[: policy.top_k]
+    else:
+        selected = []
+        per_paper: dict[str, int] = {}
+        cap = policy.max_chunks_per_paper
+        for chunk, score in scored:
+            if per_paper.get(chunk.paper_id, 0) >= cap:
+                continue
+            selected.append((chunk, score))
+            per_paper[chunk.paper_id] = per_paper.get(chunk.paper_id, 0) + 1
+            if len(selected) == policy.top_k:
+                break
     return EvidenceRetrievalResponse(
         query=query,
         policy=policy,
@@ -92,7 +106,7 @@ def _score_ranked(
                     "query is prefixed with the official BGE retrieval prefix."
                 ),
             )
-            for index, (chunk, score) in enumerate(scored[: policy.top_k], start=1)
+            for index, (chunk, score) in enumerate(selected, start=1)
         ],
     )
 
