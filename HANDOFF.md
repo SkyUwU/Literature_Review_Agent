@@ -181,6 +181,15 @@ K3 回應 K2 教訓（跨論文 top-32 被 W4401667275 單篇吃 17/32）與歸�
 - 測試：test_models.py shrinkage 斷言 4→3、test_assessment.py 6 個聚合數值斷言同步（shrinkage 3：6.8→7.1、6.4→6.6、8.5→8.8、8.0→8.2、6.0→6.1；`below_8_0_falls_to_consider` 輸入 9×9→9×6 維持語意）、test_embedding_retriever.py +5（cap None 等價、遞補、cap 後不足 top_k 全收、cap6/top32 分散、shrinkage 3 聚合）。**209 tests OK**。log：`.omo/evidence/k3-task-1-models.log` + `k3-task-2-backfill.log`。
 - 驗收（Todo 3 固定集 A/B + Todo 4 真實 run ✅）：**固定集**（K2 的 18 PDF → `/tmp/k3-fixture/`）retrieval 層——A（cap=None）完全重現 K2 分配（17/6/6/3、4 篇論文）證明 fixture 有效；**B（cap=6）進評分論文 4→9**（W4401671778 3、W4323848232 2、W4407173730/W4362515116/W4402909345 各 1 新進），單篇壟斷（17/32）消除。**真實 run sanity**：進評分 **9**、1 consider（W4401667275 6.3/6.5——K2 時代為 exclude 5.5/5.4，cap 聚焦 + shrink 3 使分數上移）、8 exclude、報告 1 source + 2 future directions、`generated_by=llm`、AIza 0、無 failed_extractions；**首次 run 隨機 LLM miss 失敗**（chunk 完整性檢查無 retry），重試即成功，15 個首輪 PDF 在 `/tmp/k3-failed-run/`。**結論：cap 遞補目標達成**（涵蓋 4→9、壟斷消除）；真實 run 下載集浮動（W7140287209 缺席）故 usable 換人，retrieval 結論以固定集為準。證據：`.omo/evidence/k3-retrieval-compare.md` + `k3-after-real.log` + `k3-after-dist.json`。執行偏離比照先例：`--env-file .env`、下載落點 data/papers → 18 個 `W*.pdf` 移至 `/tmp/k3-after-downloads/` 還原 8 檔。
 
+## K3b — shrinkage_strength 3 → 1（2026-09-08，離線重算驗證）
+
+K3 驗收後使用者裁示 m=1（cap=6 已限制 n≤6，收縮平均與實測平均差異過大；m 3→1 只保留「單一/極少 chunks 不獨裁」的最小干預）。純聚合參數 + 離線驗證，不重跑 LLM。
+
+- `literature_review/models.py`：`EvidenceAggregationPolicy.shrinkage_strength` default 3→**1**（公式 `(n*mean + 1*5.5)/(n+1)`，prior=5.5）。
+- 測試同步（test_models.py 斷言 3→1；test_assessment.py 6 個聚合斷言以 m=1 手算更新：7.8/6.8、7.8/7.8、9.5/7.7、8.7、7.6、6.5；兩處語意衝突調整輸入——`below_8_0`(9,8)×6→(8,8)×6 維持 consider、`below_6_0`(6,6)×12→(5,5)×12 維持 exclude、traceability chunk_two rel 9→8 維持 consider；test_embedding_retriever.py 測試名/斷言 m=3→1、7.8）。**209 tests OK**。log：`.omo/evidence/k3b-task-1-shrinkage1.log`。
+- 離線重算（Todo 2）：從 `k3-after-real.log` 區塊 A 抽 9 篇論文 32 chunks 的 chunk-level scores，`_shrunk_mean(m=3)` 重算對比 `k3-after-dist.json` **9/9 完全一致**（確定性還原成功）→ m=1 重算：**usable 維持 1**（W4401667275 6.3→6.5/6.5→6.8 consider 不變）、**recommendation 零變化**（8 exclude 全數維持）；分數變化符合公式（mean>5.5 微升、mean<5.5 下降，非計畫預期之「普遍微升」——此 run 9 篇中 8 篇 rel mean<5.5）。依 Success criteria：usable 仍 1 → 維持「閾值後議」。產物：`.omo/evidence/k3b-offline-m1.md` + `.json`。
+- 收尾（Todo 3）：209 tests 複跑 OK；data/papers 零變更（8 檔）；不 commit。git status 額外 M：`.omo/STATE.md` + `AGENTS.md`（K3 驗收後規劃更新遺留，TOP_K_CHUNKS 16→32 文件同步——非 K3b 造成）。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.

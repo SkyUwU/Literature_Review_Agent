@@ -172,15 +172,15 @@ class PerPaperCapTests(unittest.TestCase):
 
 
 class ShrinkageStrengthTests(unittest.TestCase):
-    def test_default_shrinkage_strength_is_three(self) -> None:
+    def test_default_shrinkage_strength_is_one(self) -> None:
         from literature_review.models import EvidenceAggregationPolicy
 
-        self.assertEqual(EvidenceAggregationPolicy().shrinkage_strength, 3)
+        self.assertEqual(EvidenceAggregationPolicy().shrinkage_strength, 1)
 
-def test_shrunk_mean_with_strength_three(self) -> None:
+def test_shrunk_mean_with_strength_one(self) -> None:
     from literature_review.models import EvidenceAggregationPolicy
 
-    # (10 + 3*5.5) / 4 = 6.625 -> 6.6 (shrinkage m=3 pulls a single 10 toward prior 5.5)
+    # (10 + 1*5.5) / 2 = 7.75 -> 7.8 (shrinkage m=1 pulls a single 10 slightly toward prior 5.5)
     response = _score_ranked(
         [chunk_for("p-a", "c1", "generic evidence text number one")],
         [[1.0, 0.0, 0.0]],
@@ -190,7 +190,7 @@ def test_shrunk_mean_with_strength_three(self) -> None:
     )
     reranked = rerank_scores(response, {"p-a-c1": [10, 10]})
     result = aggregate_evidence_assessments(reranked, EvidenceAggregationPolicy())
-    self.assertEqual(result.assessments[0].relevance_score, 6.6)
+    self.assertEqual(result.assessments[0].relevance_score, 7.8)
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ uv run python -m literature_review.pairwise_eval data/papers --top-k 16 --judge-
 uv run python -m literature_review.main --dry-run
 uv run python -m literature_review.main --rule-based
 ```
-`literature_review.main` is the end-to-end entry (M3C): it interactively asks one query, plans with the LLM planner by default (`--rule-based` forces the deterministic fallback; `--dry-run` always uses it, so a dry run needs no key), searches/ranks/downloads each planned query independently, then extracts and synthesizes the report. `--dry-run` stops after downloads (no key). Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `TOP_K_CHUNKS=16`; `target_n = ceil(20 / query_count)`); planning uses `GEMINI_API_KEY`, the synthesis stage uses `GEMINI_API_KEY_2`.
+`literature_review.main` is the end-to-end entry (M3C): it interactively asks one query, plans with the LLM planner by default (`--rule-based` forces the deterministic fallback; `--dry-run` always uses it, so a dry run needs no key), searches/ranks/downloads each planned query independently, then extracts and synthesizes the report. `--dry-run` stops after downloads (no key). Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `TOP_K_CHUNKS=32`; `target_n = ceil(20 / query_count)`); planning uses `GEMINI_API_KEY`, the synthesis stage uses `GEMINI_API_KEY_2`.
 
 Langfuse observability: confirm the self-hosted server is up with `curl http://localhost:3000/api/public/health` before a full run; traces appear in the dashboard at `http://localhost:3000`.
 
