@@ -6,7 +6,7 @@ searched, ranked, and downloaded independently (no cross-query merging). A share
 already in the set counts as satisfied without writing a new file and without
 triggering a backfill. Real runs rank papers by bge-small-en-v1.5 embedding
 similarity to title+abstract (plus citation/recency) with hard-coded limits
-``LIMIT=100`` / ``TOTAL_TARGET=20`` / ``TOP_K_CHUNKS=16``. The LLM planner is the
+``LIMIT=100`` / ``TOTAL_TARGET=20`` / ``TOP_K_CHUNKS=32``. The LLM planner is the
 default (``GEMINI_API_KEY``); ``--rule-based`` is the escape hatch, and
 ``--dry-run`` always forces the deterministic rule-based plan with lexical
 ranking (no embedding model), so a dry run stops after downloads with no text
@@ -40,7 +40,7 @@ from literature_review.ranking import FilterPolicy, filter_and_rank
 LIMIT = 100
 MIN_YEAR = 2021
 TOTAL_TARGET = 20
-TOP_K_CHUNKS = 16
+TOP_K_CHUNKS = 32
 DEST_DIR = Path("data/papers")
 
 
