@@ -7,6 +7,8 @@ from literature_review.planning import (
     build_llm_plan_prompt,
     create_llm_plan,
     create_rule_based_plan,
+    max_query_overlap,
+    query_overlap,
 )
 
 
@@ -53,7 +55,77 @@ def valid_plan() -> dict[str, object]:
     }
 
 
+class QueryOverlapTests(unittest.TestCase):
+    def test_overlap_flags_near_duplicate_keyword_reuse(self) -> None:
+        self.assertEqual(query_overlap("literature review agent AI", "AI literature review agent tools"), 0.8)
+
+    def test_overlap_allows_synonym_rewriting(self) -> None:
+        self.assertLess(query_overlap("literature review agent", "systematic review automation"), 0.5)
+
+    def test_overlap_identical_queries_is_one(self) -> None:
+        self.assertEqual(query_overlap("literature review agent", "literature review agent"), 1.0)
+
+    def test_overlap_disjoint_queries_is_zero(self) -> None:
+        self.assertEqual(query_overlap("chromosome sequencing", "neural text generation"), 0.0)
+
+    def test_overlap_ignores_case_and_punctuation(self) -> None:
+        self.assertEqual(query_overlap("Literature Review, Agent!", "literature review agent"), 1.0)
+
+    def test_max_overlap_picks_highest_pair(self) -> None:
+        queries = ["literature review agent AI", "AI literature review agent tools", "chromosome sequencing"]
+        self.assertEqual(max_query_overlap(queries), 0.8)
+
+
+def overlapping_plan() -> dict[str, object]:
+    return {
+        "queries": [
+            {"query": "literature review agent AI", "purpose": "Find core papers on AI literature review agents."},
+            {"query": "AI literature review agent tools", "purpose": "Find tooling papers for AI literature review agents."},
+        ],
+        "perspectives": ["core topic"],
+        "rationale": "Cover the core topic from two overlapping angles.",
+        "generated_by": "llm",
+    }
+
+
+class LlmPlanOverlapRepairTests(unittest.TestCase):
+    def test_overlapping_plan_repairs_once_to_distinct_facets(self) -> None:
+        repaired = dict(valid_plan())
+        repaired["queries"] = [
+            {"query": "AI systematic review automation", "purpose": "Find automation papers for systematic reviews."},
+            {"query": "LLM research assistant agents", "purpose": "Find LLM research assistant agent papers."},
+        ]
+        client = FakePlanClient([json.dumps(overlapping_plan()), json.dumps(repaired)])
+
+        plan = create_llm_plan("literature review agent", client)
+
+        self.assertLessEqual(max_query_overlap([q.query for q in plan.queries]), 0.5)
+        self.assertEqual(len(client.prompts), 2)
+
+    def test_overlap_repair_failure_keeps_first_plan(self) -> None:
+        still_overlapping = dict(overlapping_plan())
+        still_overlapping["queries"] = [
+            {"query": "literature review agent tools", "purpose": "Find tooling papers for literature review agents."},
+            {"query": "AI literature review agent", "purpose": "Find AI literature review agent papers."},
+        ]
+        client = FakePlanClient([json.dumps(overlapping_plan()), json.dumps(still_overlapping)])
+
+        plan = create_llm_plan("literature review agent", client)
+
+        self.assertEqual(len(client.prompts), 2)
+        self.assertEqual(plan.queries[0].query, "literature review agent AI")
+
+
 class LlmPlanTests(unittest.TestCase):
+    def test_llm_prompt_requires_distinct_facets_and_varied_terms(self) -> None:
+        prompt = build_llm_plan_prompt("literature review agent")
+
+        self.assertIn("Each sub-query must target a distinct facet", prompt)
+        self.assertIn("avoid near-duplicate queries", prompt)
+        self.assertIn("do not reuse the same head terms", prompt)
+        self.assertIn("synonyms, hyponyms, and alternative phrasings", prompt)
+        self.assertIn("Stay on-topic", prompt)
+
     def test_t_llm_1_valid_plan_returned(self) -> None:
         client = FakePlanClient([json.dumps(valid_plan())])
 

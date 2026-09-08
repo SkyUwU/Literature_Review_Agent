@@ -190,6 +190,18 @@ K3 驗收後使用者裁示 m=1（cap=6 已限制 n≤6，收縮平均與實測�
 - 離線重算（Todo 2）：從 `k3-after-real.log` 區塊 A 抽 9 篇論文 32 chunks 的 chunk-level scores，`_shrunk_mean(m=3)` 重算對比 `k3-after-dist.json` **9/9 完全一致**（確定性還原成功）→ m=1 重算：**usable 維持 1**（W4401667275 6.3→6.5/6.5→6.8 consider 不變）、**recommendation 零變化**（8 exclude 全數維持）；分數變化符合公式（mean>5.5 微升、mean<5.5 下降，非計畫預期之「普遍微升」——此 run 9 篇中 8 篇 rel mean<5.5）。依 Success criteria：usable 仍 1 → 維持「閾值後議」。產物：`.omo/evidence/k3b-offline-m1.md` + `.json`。
 - 收尾（Todo 3）：209 tests 複跑 OK；data/papers 零變更（8 檔）；不 commit。git status 額外 M：`.omo/STATE.md` + `AGENTS.md`（K3 驗收後規劃更新遺留，TOP_K_CHUNKS 16→32 文件同步——非 K3b 造成）。
 
+## M5a — planner prompt 多面向 + query 重合度驗證 + purpose log（2026-09-08）
+
+M5a 回應 K/K2/K3「三輪皆 1 usable」的診斷（2026-09-08 定案：**天花板約束非閾值約束**，候選池組成才是杠杆）：`build_llm_plan_prompt` 原本只要求 1-5 條 query + purpose + perspectives，無「面向互補/詞彙多樣」指示 → LLM 子查詢語意高度重疊 → OpenAlex（字面匹配）撈回同一批論文 → 池子窄。解法 = 面向多樣 + 關鍵詞多樣（同義詞/上下位/不同表述），並補上 log 記錄與重合度驗證。
+
+- `literature_review/planning.py`：
+  - `build_llm_plan_prompt` 加 4 項指示（英文精簡）：each query targets a distinct facet（avoid near-duplicate queries）；do not reuse the same head terms（prefer synonyms, hyponyms, alternative phrasings）；purpose 說明該面向資訊需求；stay on-topic（防過度發散）。
+  - 新純函式 `query_overlap(a, b) -> float`（lowercase + 去非字母數字 token 後的 Jaccard ∩/∪，設計意圖=檢查「關鍵詞重疊」、刻意**不用 embedding**——OpenAlex 認字面、同義詞改寫正是想要的行為，不得被 flag）與 `max_query_overlap(queries)`；`QUERY_OVERLAP_THRESHOLD = 0.5`。
+  - `create_llm_plan` 包一層**外層 retry**（不碰共用 `generate_validated`）：plan 出來任兩兩 overlap > 0.5 → 一次 diversification repair 呼叫（列出原 queries + 重寫要求）；修復後仍超標 → **接受第一版 + logger.warning 紀綠**（重疊=品質問題非可用性問題，不降級 rule-based、不採重寫版）；rule-based fallback 不套驗證。
+- `literature_review/main.py`：`_print_plan(plan)`——`run_end_to_end` 選定 plan 後打印每條 query + purpose 清單與 perspectives（修 M3C「log 只記 query 字串、追溯不到面向」缺口）。
+- 測試（`tests/test_planning.py`）：prompt 新指示斷言 1、overlap 單元測試 6（已知病例「literature review agent AI」vs「AI literature review agent tools」=0.8 須 flag；理想改寫「literature review agent」vs「systematic review automation」<0.5 不 flag；identical=1.0、disjoint=0.0、大小寫標點、max 取最高對）、fake-client repair 測試 2（修復成功=2 次呼叫且結果 ≤0.5；修復仍超標=保留第一版）。**218 tests OK**（209 既有 + 9 新）。log：`.omo/evidence/m5a-todo12.log`（Todo 1+2）、`m5a-todo3.log`（Todo 3）、`m5a-final-suite.log`。
+- 驗收（Todo 4，🔄 部分：planning 層 ✅、下游被外部配額阻塞）：Langfuse health 200 ✅；同 query「literature review agent」完整 run 三次，**三次都在 RCS 被 Gemini free-tier 429 中斷**（`generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash`；使用者確認 2026-09-08 用量超限）——**但 planning 每次都成功並留下多面向證據**：子查詢字面重合度 M4 baseline（舊 prompt）`max=0.444` vs M5a run1 `0.077` / run2 `0.059` / run3 `0.133`，皆遠低於 0.5 且面向互異（架構/檢索/評測/人機協作等）。產物：`.omo/evidence/m5a-queries-overlap.json` + `m5a-after-quota-fail.log` + `m5a-after-quota-fail2.log` + `m5a-after.log`（run3 止於 plan）。**殘餘（待配額恢復續跑）**：進評分池組成（K3 對比=9 篇）、usable 數、天花板 rel——需一次完整 run，續跑指令比照先例 `printf 'literature review agent\n' | uv run --env-file .env python -m literature_review.main`，跑完把新 `W*.pdf` 移出還原 `data/papers/`。執行偏離比照先例：`--env-file .env`；下載落點為 main.py 硬編碼 `data/papers`（三次失敗 run 累積 24 個 `W*.pdf` 已移至 `/tmp/m5a-downloads/`、還原原 21 檔）。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.

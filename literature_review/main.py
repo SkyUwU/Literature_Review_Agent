@@ -66,6 +66,19 @@ def _make_plan(
     return create_rule_based_plan(query)
 
 
+def _print_plan(plan: object) -> None:
+    """Print the selected search plan with every query's purpose and the perspectives.
+
+    The plan printed here includes the facets each planned query targets, so a
+    real run's stdout log stays traceable to the search angles (M5a Todo 3).
+    """
+    print(
+        f"Search plan (generated_by={plan.generated_by}): "
+        + "; ".join(f"{item.query} | purpose: {item.purpose}" for item in plan.queries)
+        + f" | perspectives: {', '.join(plan.perspectives)}"
+    )
+
+
 def run_end_to_end(
     query: str,
     *,
@@ -97,6 +110,7 @@ def run_end_to_end(
     touch the real network or an API key.
     """
     plan = _make_plan(query, use_llm_plan=use_llm_plan, client_plan=client_plan)
+    _print_plan(plan)
     target_n = math.ceil(TOTAL_TARGET / len(plan.queries))
     already_downloaded: set[str] = set()
     downloads: list[dict[str, str]] = []
