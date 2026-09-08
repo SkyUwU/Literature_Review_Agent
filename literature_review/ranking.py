@@ -3,6 +3,7 @@
 import math
 import re
 
+from literature_review.embedding_retriever import Encoder, encode_query
 from literature_review.models import (
     FilterPolicy,
     Paper,
@@ -91,11 +92,68 @@ def rank_papers(papers: list[Paper], query: str) -> list[RankedPaper]:
     ]
 
 
-def filter_and_rank(response: SearchResponse, policy: FilterPolicy) -> RankedSearchResponse:
-    """Apply a policy and rank the surviving papers for one search query."""
+def rank_papers_embedding(
+    papers: list[Paper], query: str, encoder: Encoder
+) -> list[RankedPaper]:
+    """Rank papers by embedding cosine similarity plus citation and recency.
+
+    The query is prefixed with the official BGE retrieval prefix (via
+    ``encode_query``); each paper's title and abstract are joined into a single
+    text and encoded in one batch. Cosine similarity is clipped at zero so an
+    unrelated paper is never dragged below its citation/recency contribution.
+    """
+    query_vector = encode_query(query, encoder)
+    texts = [f"{paper.title}\n{paper.abstract}" for paper in papers]
+    vectors = encoder(texts)
+    if len(vectors) != len(papers):
+        raise ValueError(
+            f"encoder returned {len(vectors)} vectors; expected {len(papers)}"
+        )
+
+    scored: list[tuple[Paper, float]] = []
+    for paper, vector in zip(papers, vectors, strict=True):
+        similarity = max(
+            sum(q * v for q, v in zip(query_vector, vector, strict=False)), 0.0
+        )
+        citation_score = min(math.log1p(paper.citation_count or 0) / math.log(1001), 1.0)
+        recency_score = min(max((paper.year - 2020) / 10, 0.0), 1.0)
+        total_score = similarity + citation_score + recency_score
+        scored.append((paper, total_score))
+
+    scored.sort(key=lambda item: (-item[1], -(item[0].citation_count or 0), -item[0].year))
+    return [
+        RankedPaper(
+            paper=paper,
+            rank=index,
+            score=round(score, 3),
+            matched_terms=[],
+            rationale=(
+                "Semantic ranking using bge-small-en-v1.5 embeddings of the query "
+                "vs. title+abstract; citation & recency contribute equal weight."
+            ),
+        )
+        for index, (paper, score) in enumerate(scored, start=1)
+    ]
+
+
+def filter_and_rank(
+    response: SearchResponse,
+    policy: FilterPolicy,
+    *,
+    encoder: Encoder | None = None,
+) -> RankedSearchResponse:
+    """Apply a policy and rank the surviving papers for one search query.
+
+    With ``encoder`` set, the semantic embedding ranking is used; without one,
+    the deterministic lexical baseline is used exactly as before.
+    """
     papers = filter_papers(response.papers, policy)
+    if encoder is not None:
+        ranked = rank_papers_embedding(papers, response.request.query, encoder)
+    else:
+        ranked = rank_papers(papers, response.request.query)
     return RankedSearchResponse(
         search_response=response,
         filter_policy=policy,
-        ranked_papers=rank_papers(papers, response.request.query),
+        ranked_papers=ranked,
     )

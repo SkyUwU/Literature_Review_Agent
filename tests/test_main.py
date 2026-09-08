@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 import literature_review.main as main_module
+from literature_review.embedding_retriever import QUERY_PREFIX
 from literature_review.main import TOTAL_TARGET, run_end_to_end
 from literature_review.models import SynthesisResponse
 from literature_review.pdf_downloader import PdfDownloadError
@@ -90,6 +91,16 @@ class RaisePlanClient:
 
     def generate_json(self, _prompt: str, schema: dict | None = None) -> str:
         raise RuntimeError("llm plan unavailable")
+
+
+class SpecialAlignedEncoder:
+    """Fake encoder aligning the BGE-prefixed query with the W-special paper."""
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        return [
+            [1.0, 0.0] if text.startswith(QUERY_PREFIX) or "W-special" in text else [0.0, 1.0]
+            for text in texts
+        ]
 
 
 def assessment_payload(chunk_id: str) -> dict[str, object]:
@@ -309,7 +320,9 @@ class MainEntryTests(unittest.TestCase):
     # -- scenario 5: target_n follows ceil(TOTAL_TARGET / query count) ------
 
     def test_target_n_follows_ceil_formula(self) -> None:
-        for query_count, papers_per_query in ((5, 3), (3, 5)):
+        # Pairs must both divide TOTAL_TARGET and supply >= target_n candidates
+        # per query so downloads can actually reach TOTAL_TARGET.
+        for query_count, papers_per_query in ((4, 5), (5, 4)):
             expected = math.ceil(TOTAL_TARGET / query_count)
             payloads = [
                 results_payload(
@@ -350,6 +363,88 @@ class MainEntryTests(unittest.TestCase):
         self.assertEqual(result["plan"].generated_by, "rule_based")
         self.assertEqual(len(result["plan"].queries), 4)
         self.assertEqual(result["downloads"], [])
+
+    # -- K milestone: injected encoder is honored (and skipped in dry-run) ---
+
+    def test_dry_run_ignores_injected_encoder(self) -> None:
+        payloads = [
+            results_payload(record_for("W1")),
+            results_payload(record_for("W2")),
+        ]
+
+        class RaiseOnCallEncoder:
+            """Sentinel encoder that fails loudly if the dry-run path calls it."""
+
+            def __call__(self, texts: list[str]) -> list[list[float]]:
+                raise AssertionError("encoder must not be called in dry-run mode")
+
+        result = run_end_to_end(
+            "literature review agent",
+            dest_dir=self.dest,
+            client_plan=FakePlanClient(2),
+            use_llm_plan=True,
+            dry_run=True,
+            json_fetcher=FakeJsonFetcher(payloads),
+            pdf_fetcher=pdf_bytes,
+            encoder=RaiseOnCallEncoder(),
+        )
+
+        self.assertIs(result["dry_run"], True)
+        self.assertNotIn("report", result)
+
+    def test_embedding_encoder_selects_otherwise_ranked_out_paper(self) -> None:
+        # Six candidates per query: five ordinary papers plus W-special last.
+        # Lexical ranking ties on every query term (same title pattern, same
+        # abstract, same citations and year), so the stable sort keeps input
+        # order and W-special is cut from the top-5 selection. The injected
+        # encoder keys on the BGE query prefix (query call) and on "W-special"
+        # in paper text, lifting W-special to rank 1. The embedding run must be
+        # a real run because dry-run deliberately ignores the injected encoder.
+        special = record_for("W-special")
+        records = [record_for(f"W{index}") for index in range(1, 6)] + [special]
+        payloads = [results_payload(*records) for _ in range(4)]
+
+        with mock.patch("literature_review.extraction.PdfReader", FakePdfReader):
+            with mock.patch(
+                "literature_review.embedding_retriever.default_encoder",
+                return_value=FakeEncoder(),
+            ):
+                embedding = run_end_to_end(
+                    "literature review agent",
+                    dest_dir=self.dest,
+                    client_plan=FakePlanClient(4),
+                    client_synth=SynthesisFakeClient(
+                        ("W1", "W2", "W3", "W4", "W5", "W-special")
+                    ),
+                    use_llm_plan=True,
+                    dry_run=False,
+                    json_fetcher=FakeJsonFetcher(list(payloads)),
+                    pdf_fetcher=pdf_bytes,
+                    encoder=SpecialAlignedEncoder(),
+                )
+        lexical = run_end_to_end(
+            "literature review agent",
+            dest_dir=self.dest,
+            client_plan=FakePlanClient(4),
+            use_llm_plan=True,
+            dry_run=True,
+            json_fetcher=FakeJsonFetcher(list(payloads)),
+            pdf_fetcher=pdf_bytes,
+        )
+
+        embedding_ids = {entry["paper_id"] for entry in embedding["downloads"]}
+        lexical_ids = {entry["paper_id"] for entry in lexical["downloads"]}
+        self.assertIn("W-special", embedding_ids)
+        self.assertNotIn("W-special", lexical_ids)
+        self.assertEqual(len(embedding_ids), 5)
+        self.assertEqual(len(lexical_ids), 5)
+
+        embedding_ids = {entry["paper_id"] for entry in embedding["downloads"]}
+        lexical_ids = {entry["paper_id"] for entry in lexical["downloads"]}
+        self.assertIn("W-special", embedding_ids)
+        self.assertNotIn("W-special", lexical_ids)
+        self.assertEqual(len(embedding_ids), 5)
+        self.assertEqual(len(lexical_ids), 5)
 
     # -- failure path: every bad PDF aborts cleanly --------------------------
 

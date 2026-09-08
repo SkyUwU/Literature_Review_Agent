@@ -151,6 +151,17 @@ M4 改版 LLM 評分層（C1），把 RCS 的舊 5 分制升級為 1-10 分制�
 - 測試更新：`test_models`（1-10/float/拒 chunk recommendation）、`test_assessment`（聚合邊界、metadata 0-3 fixture + 新公式斷言、移除 LEGACY_POLICY）、`test_llm_evidence`（新 prompt 斷言）、`test_synthesis`/`test_pipeline`/`test_main`/`test_retrieval_eval`（fake JSON 去 chunk 層 recommendation、分數升到 10/10 使聚合後仍 usable）。Suite count after this milestone: **196 tests**。
 - 驗收：改前真實 run baseline（`.omo/evidence/m4-baseline-before.log` + `m4-baseline-before-dist.json`，舊制下 4 篇全擠 3/4 分）已留檔；改後真實 run + 改前/改後對比 + 門檻校準建議接續在 Todo 8。
 
+## K — paper-level semantic ranking + scaled parameters (2026-09-08)
+
+K 把論文層排名從 lexical 換成語意 embedding（bge-small-en-v1.5），並放大規模常數，回應「關鍵詞比對把不錯論文隔絕在外」與「可評比論文太少」兩個瓶頸：
+
+- `literature_review/ranking.py`：新增 `rank_papers_embedding(papers, query, encoder)` —— `encode_query`（BGE prefix）產出 query 向量，論文側 `title\nabstract` 一批編碼，cosine 相似度 clip 於 0，與 citation、recency 三成分等權相加（總分 0..3，排序鍵同 lexical）；`filter_and_rank(response, policy, *, encoder=None)` 分支——有 encoder → embedding 排名，無 → 維持 lexical 原行為。lexical `rank_papers` 保留（dry-run / `search.py --rank` 用）。
+- `literature_review/main.py`：`LIMIT` 50→100、`TOTAL_TARGET` 15→20、`TOP_K_CHUNKS` 8→16（`MIN_YEAR=2021` 不變）；`run_end_to_end(..., encoder: Encoder | None = None)` 新參數，`effective_encoder` dry-run 恆 `None`（dry-run 不建/不碰模型，維持零 key 語義)、否則預設 `embedding_retriever.default_encoder()`（以模組屬性呼叫，確保測試 patch 生效，**偏離計畫字面的 direct import**）；迴圈內 `filter_and_rank(..., encoder=effective_encoder)`。
+- `tests/test_ranking.py`：+6 tests（cosine 排序、三成分補償、負相似 clip、向量數不符 ValueError、有/無 encoder 路徑分支），`test_ranking` 10 tests OK。
+- `tests/test_main.py`：`test_target_n_follows_ceil_formula` pairs 改 `((4,5),(5,4))`（舊 pairs 在 TOTAL_TARGET=20 下候選數不足、`len(downloads)==20` 會破——**計畫假設「值改不破」有誤，已修正**）；+2 tests（dry-run 忽略 injected encoder sentinel；`QUERY_PREFIX`/`W-special` fake encoder 把原 lexical 落選論文抬到 rank 1 進入下載集——embedding run 須為 real run，因 dry-run 拒用 encoder）。
+- 測試數：**204 tests OK**（196 既有 + 6 test_ranking + 2 test_main）。證據 log：`.omo/evidence/k-task-1-k-retrieval-improvements.log`、`k-task-2-k-retrieval-improvements.log`。
+- 驗收（Todo 4 真實 run 已完成 ✅，Wave 2）：同 query「literature review agent」完整 run（LLM plan + 真實 OpenAlex + 19 PDFs + embedding 論文排名 + RCS + synthesis）對比 M4-after——**分數分布頂端明顯上移且有 usable**：5 篇聚合中 1 consider（W7140287209 The AI Scientist，rel 6.2 / qual 6.6，4 chunks）、4 exclude（M4-after 為 4/4 全 exclude、0 usable → synthesis 無法執行）；本次 synthesis 正常產出（report 含 12 inline citations / 4 unique chunk ids、2 future directions、`generated_by=llm`、AIza 命中 0）。結果也是 embedding 換血證據：The AI Scientist 標題/摘要無「literature review agent」字面組合，lexical 排名排不上、embedding cosine 才帶入。證據：`.omo/evidence/k-after-real.log` + `k-after-dist.json` + `k-before-after-compare.md`。執行偏離：① fresh shell 需 `uv run --env-file .env`（plain `uv run` 讀不到 key，首跑因缺 key fallback + exit 1）；② 下載落點為 main.py 硬編碼 `DEST_DIR=data/papers`（計畫要求 temp，但 CLI 無法覆寫）→ 已把 19 個 `W*.pdf` 移至 `/tmp/k-after-downloads/`、`data/papers/` 還原為原始 8 檔；③ failed_extractions=W4387533377（JPEG 偽 PDF：`invalid pdf header: b'\xff\xd8\xff\xe0\x00'`，容錯跳過）；④ elapsed/plan 數未含於 log（main.py 非 dry-run 只印 report JSON），可查 Langfuse dashboard。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.

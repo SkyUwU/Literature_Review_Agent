@@ -4,9 +4,12 @@ One interactive query produces a :class:`SearchPlan`; every planned query is the
 searched, ranked, and downloaded independently (no cross-query merging). A shared
 ``already_downloaded`` set deduplicates across queries: a paper whose id is
 already in the set counts as satisfied without writing a new file and without
-triggering a backfill. The LLM planner is the default (``GEMINI_API_KEY``);
-``--rule-based`` is the escape hatch, and ``--dry-run`` always forces the
-deterministic rule-based plan, so a dry run stops after downloads with no text
+triggering a backfill. Real runs rank papers by bge-small-en-v1.5 embedding
+similarity to title+abstract (plus citation/recency) with hard-coded limits
+``LIMIT=100`` / ``TOTAL_TARGET=20`` / ``TOP_K_CHUNKS=16``. The LLM planner is the
+default (``GEMINI_API_KEY``); ``--rule-based`` is the escape hatch, and
+``--dry-run`` always forces the deterministic rule-based plan with lexical
+ranking (no embedding model), so a dry run stops after downloads with no text
 extraction, embedding encoder, LLM, or API key touched.
 """
 
@@ -20,6 +23,8 @@ import sys
 from pathlib import Path
 
 from literature_review import pipeline, search
+from literature_review import embedding_retriever
+from literature_review.embedding_retriever import Encoder
 from literature_review.extraction import extract_pdf_text
 from literature_review.llm_evidence import GeminiJsonClient, JsonGenerationClient, LlmEvidenceError
 from literature_review.models import (
@@ -32,10 +37,10 @@ from literature_review.planning import create_llm_plan, create_rule_based_plan
 from literature_review.synthesis import SynthesisError
 from literature_review.ranking import FilterPolicy, filter_and_rank
 
-LIMIT = 50
+LIMIT = 100
 MIN_YEAR = 2021
-TOTAL_TARGET = 15
-TOP_K_CHUNKS = 8
+TOTAL_TARGET = 20
+TOP_K_CHUNKS = 16
 DEST_DIR = Path("data/papers")
 
 
@@ -71,6 +76,7 @@ def run_end_to_end(
     dry_run: bool = False,
     json_fetcher: search.JsonFetcher = search.fetch_json,
     pdf_fetcher: Fetcher | None = None,
+    encoder: Encoder | None = None,
 ) -> dict[str, object]:
     """Run one full literature-review cycle for a bare query.
 
@@ -80,9 +86,13 @@ def run_end_to_end(
 
     ``dry_run=True`` stops after the per-query download stage: the returned dict
     contains ``plan``, ``downloads`` (paper id + local path pairs), and
-    ``stats_per_query``, and no LLM client is required or called.
+    ``stats_per_query``, and no LLM client is required or called. Papers are
+    ranked with the lexical baseline in a dry run (``encoder`` is ignored, so no
+    embedding model is ever built).
     ``dry_run=False`` additionally extracts the PDFs and produces a synthesis
     report through ``run_synthesis_pipeline``; that path needs ``client_synth``.
+    ``encoder`` selects the semantic embedding ranking for real runs; when omitted
+    the default local encoder is built once and shared across planned queries.
     All external I/O (OpenAlex JSON, PDF bytes, LLM) is injectable so tests never
     touch the real network or an API key.
     """
@@ -92,11 +102,18 @@ def run_end_to_end(
     downloads: list[dict[str, str]] = []
     stats_per_query: list[dict[str, object]] = []
     fetcher = pdf_fetcher if pdf_fetcher is not None else default_fetcher
+    effective_encoder = (
+        None
+        if dry_run
+        else (encoder if encoder is not None else embedding_retriever.default_encoder())
+    )
 
     for planned in plan.queries:
         request = SearchRequest(query=planned.query, limit=LIMIT, year_from=MIN_YEAR)
         response = search.search_papers(request, json_fetcher=json_fetcher)
-        ranked = filter_and_rank(response, FilterPolicy(min_year=MIN_YEAR))
+        ranked = filter_and_rank(
+            response, FilterPolicy(min_year=MIN_YEAR), encoder=effective_encoder
+        )
         result = download_and_backfill(
             ranked.ranked_papers,
             dest_dir,

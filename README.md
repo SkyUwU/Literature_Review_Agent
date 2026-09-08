@@ -45,7 +45,7 @@ uv run python -m literature_review.pipeline data/papers "literature review agent
 
 ## Run the full pipeline (M3C)
 
-One interactive query produces a complete literature-review report: plan -> search/rank -> download open-access PDFs -> extract evidence -> LLM synthesis. Parameters are hard-coded (`LIMIT=50`, `MIN_YEAR=2021`, `TOTAL_TARGET=15`, `TOP_K_CHUNKS=8`; `target_n = ceil(15 / query_count)`). With no key, dry-run stops after downloads:
+One interactive query produces a complete literature-review report: plan -> search/rank -> download open-access PDFs -> extract evidence -> LLM synthesis. Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `TOP_K_CHUNKS=16`; `target_n = ceil(20 / query_count)`). Paper ranking uses bge-small-en-v1.5 semantic similarity between the query and each paper's title+abstract (plus citation and recency, equal weight); `--dry-run` skips the embedding model and keeps the lexical baseline. With no key, dry-run stops after downloads:
 
 ```powershell
 uv run python -m literature_review.main --dry-run
