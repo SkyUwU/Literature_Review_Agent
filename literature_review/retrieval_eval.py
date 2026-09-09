@@ -72,7 +72,11 @@ def _judge_group(
         generated = validate_evidence_assessments(
             client.generate_json(build_json_repair_prompt(raw), None)
         )
-    return {assessment.chunk_id: assessment.relevance_score for assessment in generated.assessments}
+    index_map = {str(index): chunk.chunk_id for index, chunk in enumerate(chunks, start=1)}
+    return {
+        index_map.get(assessment.chunk_id, assessment.chunk_id): assessment.relevance_score
+        for assessment in generated.assessments
+    }
 
 
 def compare_retrieval(
