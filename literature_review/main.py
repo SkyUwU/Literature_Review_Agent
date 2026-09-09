@@ -115,6 +115,7 @@ def run_end_to_end(
     _print_plan(plan)
     target_n = math.ceil(TOTAL_TARGET / len(plan.queries))
     already_downloaded: set[str] = set()
+    paper_meta: dict[str, tuple[int | None, str | None]] = {}
     downloads: list[dict[str, str]] = []
     stats_per_query: list[dict[str, object]] = []
     fetcher = pdf_fetcher if pdf_fetcher is not None else default_fetcher
@@ -129,6 +130,12 @@ def run_end_to_end(
         response = search.search_papers(request, json_fetcher=json_fetcher)
         ranked = filter_and_rank(
             response, FilterPolicy(min_year=MIN_YEAR), encoder=effective_encoder
+        )
+        paper_meta.update(
+            {
+                item.paper.paper_id: (item.paper.citation_count, item.paper.venue)
+                for item in ranked.ranked_papers
+            }
         )
         result = download_and_backfill(
             ranked.ranked_papers,
@@ -176,6 +183,7 @@ def run_end_to_end(
         client_synth,
         client_rcs=client_rcs,
         retrieval_policy=EvidenceRetrievalPolicy(top_k=TOP_K_CHUNKS, max_chunks_per_paper=6),
+        paper_meta=paper_meta,
     )
     return {
         "plan": plan,

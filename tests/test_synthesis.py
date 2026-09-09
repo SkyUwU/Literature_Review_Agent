@@ -109,7 +109,8 @@ def make_evidence_assessment_response(
             summary=citation.summary,
             relevance_score=citation.relevance_score,
             evidence_quality_score=citation.evidence_quality_score,
-            rationale="Fixture rationale long enough to satisfy the schema requirements.",
+            rationale_relevance="Fixture relevance rationale long enough to satisfy the schema.",
+            rationale_quality="Fixture quality rationale long enough to satisfy the schema.",
         )
         for assessment in assessments
         for citation in assessment.evidence

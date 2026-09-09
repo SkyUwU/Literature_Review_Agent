@@ -109,7 +109,8 @@ def assessment_payload(chunk_id: str) -> dict[str, object]:
         "summary": f"The chunk {chunk_id} provides relevant evidence about review agents.",
         "relevance_score": 10,
         "evidence_quality_score": 10,
-        "rationale": "The chunk directly discusses the requested literature review agent topic.",
+        "rationale_relevance": "The chunk directly discusses the requested literature review agent topic.",
+        "rationale_quality": "The chunk supplies concrete evidence with sufficient detail.",
     }
 
 
@@ -149,13 +150,15 @@ class SynthesisFakeClient:
                 if f"Paper ID: {paper_id}\n" in prompt:
                     return json.dumps(note_payload(paper_id))
         if prompt.startswith("Write a fluent literature-review"):
+            real_chunk_ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
+            self.cited_chunk_ids.extend(real_chunk_ids)
             report = (
                 "# Evidence-cited synthesis\n"
                 + "".join(
                     f"The reviewed study {paper} supplies retrieved evidence for its claims "
                     f"in [{chunk_id}].\n"
                     for paper, chunk_id in zip(
-                        self.paper_ids, self.cited_chunk_ids, strict=False
+                        self.paper_ids, real_chunk_ids, strict=False
                     )
                 )
                 + "\n## 材料來源清單\n- cited chunk identifiers appear inline above\n"
@@ -163,9 +166,8 @@ class SynthesisFakeClient:
             return json.dumps(
                 {"report": report, "future_directions": [direction_payload(self.paper_ids[-1])]}
             )
-        chunk_ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
-        self.cited_chunk_ids.extend(chunk_ids)
-        return json.dumps({"assessments": [assessment_payload(chunk_id) for chunk_id in chunk_ids]})
+        indexes = re.findall(r"## Chunk (\d+)", prompt)
+        return json.dumps({"assessments": [assessment_payload(index) for index in indexes]})
 
 
 PAGE_TEXT = " ".join(["literature", "review", "agent", "evidence", "selection"] * 12)

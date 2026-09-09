@@ -82,9 +82,17 @@ def load_local_env(path: str | Path = ".env") -> None:
             os.environ[key] = value.strip().strip('"').strip("'")
 
 
-def build_evidence_prompt(response: EvidenceRetrievalResponse, chunk_ids: list[str] | None = None) -> str:
-    """Ask the model for grounded summaries without allowing it to alter provenance.
+def build_evidence_prompt(
+    response: EvidenceRetrievalResponse,
+    chunk_ids: list[str] | None = None,
+    paper_meta: dict[str, tuple[int | None, str | None]] | None = None,
+) -> str:
+    """Ask the model for grounded summaries without letting it alter provenance.
 
+    Each chunk is presented as ``## Chunk N`` with a metadata line (citation
+    count and venue from ``paper_meta``, ``n/a`` when unknown) followed by the
+    raw text only: no chunk_id, paper_id, or page numbers are sent, so the
+    model cannot copy or corrupt trusted identifiers (M5b RCS-input slimming).
     ``chunk_ids`` optionally narrows the prompt to a subset of the retrieved
     chunks (used by the batched RCS loop); ``None`` keeps the full corpus-wide
     prompt (the original single-call behavior).
@@ -93,44 +101,52 @@ def build_evidence_prompt(response: EvidenceRetrievalResponse, chunk_ids: list[s
     if chunk_ids is not None:
         wanted = set(chunk_ids)
         selected = [item for item in response.ranked_chunks if item.chunk.chunk_id in wanted]
-    chunks = [
-        {
-            "chunk_id": item.chunk.chunk_id,
-            "paper_id": item.chunk.paper_id,
-            "page_start": item.chunk.page_start,
-            "page_end": item.chunk.page_end,
-            "text": item.chunk.text,
-        }
-        for item in selected
-    ]
+    blocks = []
+    for index, item in enumerate(selected, start=1):
+        citation, venue = (paper_meta or {}).get(item.chunk.paper_id, (None, None))
+        citation_text = str(citation) if citation is not None else "n/a"
+        venue_text = venue if venue else "n/a"
+        blocks.append(
+            f"## Chunk {index}\n"
+            f"Citations: {citation_text} | Venue: {venue_text}\n"
+            f"{item.chunk.text}"
+        )
     return (
         "Assess each supplied evidence chunk only against the research query. "
         "Do not use outside knowledge and do not invent claims. Return exactly one JSON object, "
         "without Markdown code fences or any surrounding explanation. "
-        "The object must contain an 'assessments' array. Each item must include chunk_id, summary, "
-        "relevance_score (1-10), evidence_quality_score (1-10), and rationale. "
-        "Write the rationale first as the reason, then assign scores consistent with it. "
-        "Scoring guide: relevance_score 10 = the chunk directly answers the query's core question; "
-        "5 = related but only touches the topic; 1 = only a passing mention. "
-        "evidence_quality_score 10 = concrete methods, numbers, or conclusions directly backing the claim; "
-        "5 = specific but ordinary detail; 1 = vague with little information; "
-        "do NOT penalize theory or framework papers just because they contain no numbers. "
-        f"Research query: {response.query}\nEvidence chunks: {json.dumps(chunks, ensure_ascii=False)}"
+        "The object must contain an 'assessments' array. Each item must include chunk_id "
+        "(the chunk number), summary, rationale_relevance, rationale_quality, "
+        "relevance_score (1-10), and evidence_quality_score (1-10). "
+        "Write the rationale first, then assign scores consistent with it. "
+        "Scoring guide. relevance_score: 9-10 the chunk directly answers the query's core question "
+        "(extremely rare; 9 = directly strong but not the very core); "
+        "7-8 directly relevant and substantively discusses a core facet; "
+        "5-6 related background that does not directly answer the core; "
+        "3-4 indirectly related (adjacent topic or overlapping terms but different core); "
+        "1-2 only a passing mention or marginal overlap. "
+        "evidence_quality_score: 9-10 concrete methods, numbers, or conclusions directly backing the claim; "
+        "7-8 has data or a clear method; "
+        "5-6 clear argument but generic detail; "
+        "3-4 vague with few details; "
+        "1-2 almost no information (fragmented text). "
+        "Do NOT penalize theory or framework papers just because they contain no numbers. "
+        f"Research query: {response.query}\nEvidence chunks:\n" + "\n\n".join(blocks)
     )
 
 
 def build_json_repair_prompt(raw_output: str, expected_chunk_ids: list[str] | None = None) -> str:
     """Request one bounded repair attempt when structured output was malformed.
 
-    When ``expected_chunk_ids`` is supplied (a batch's full chunk set), the
-    repair prompt additionally demands exactly one assessment for every listed
-    chunk_id, so a model that silently dropped chunks gets one chance to
-    complete the batch (Todo 3: single-repair budget per batch).
+    When ``expected_chunk_ids`` is supplied (a batch's full chunk-index set),
+    the repair prompt additionally demands exactly one assessment for every
+    listed index, so a model that silently dropped or renamed chunks gets one
+    chance to complete the batch (M5b: single-repair budget per batch).
     """
     coverage_clause = ""
     if expected_chunk_ids is not None:
         coverage_clause = (
-            " The repaired response must assess exactly these chunk_ids, each once: "
+            " The repaired response must assess exactly these chunk indexes, each once: "
             f"{json.dumps(expected_chunk_ids)}."
         )
     return (
@@ -198,19 +214,37 @@ def generate_validated(
         return parse(client.generate_json(repair_prompt(raw_output, exc), schema))
 
 
-@observe(name="rcs")
+def _resolve_indexes(
+    batch: LlmEvidenceAssessmentBatch,
+    index_map: dict[str, str],
+) -> list[LlmEvidenceAssessment]:
+    resolved = []
+    for assessment in batch.assessments:
+        real_id = index_map.get(assessment.chunk_id)
+        if real_id is None:
+            raise LlmEvidenceError(
+                f"LLM output referenced an unknown chunk index {assessment.chunk_id!r}."
+            )
+        resolved.append(assessment.model_copy(update={"chunk_id": real_id}))
+    return resolved
+
+
+@observe(name="rcs", capture_input=False, capture_output=False)
 def summarize_and_rerank(
     response: EvidenceRetrievalResponse,
     client: JsonGenerationClient,
     *,
     batch_size: int = RCS_BATCH_SIZE,
+    paper_meta: dict[str, tuple[int | None, str | None]] | None = None,
 ) -> EvidenceRerankResponse:
     """Validate LLM assessments per bounded batch and enrich them only with trusted provenance.
 
     The corpus-wide chunk set is split into batches of at most ``batch_size``
     chunks; each batch is an independent call with at most one repair attempt.
-    The per-batch repair prompt also names the expected chunk_ids, so a model
-    that silently drops chunks gets one chance to complete the batch. The merged
+    Chunks are presented to the model by index only (``## Chunk N``), so the
+    model can never copy or corrupt a real chunk id; the per-batch repair
+    prompt names the expected chunk indexes, giving a model that silently
+    dropped or renamed chunks one chance to complete the batch. The merged
     result keeps the existing every-chunk-exactly-once invariant.
     """
     ranked_chunks = response.ranked_chunks
@@ -220,26 +254,53 @@ def summarize_and_rerank(
 
     for start in range(0, len(ranked_chunks), batch_size):
         batch_ids = [item.chunk.chunk_id for item in ranked_chunks[start : start + batch_size]]
-        raw_output = client.generate_json(build_evidence_prompt(response, chunk_ids=batch_ids), schema)
+        index_map = {str(index): chunk_id for index, chunk_id in enumerate(batch_ids, start=1)}
+        raw_output = client.generate_json(
+            build_evidence_prompt(response, chunk_ids=batch_ids, paper_meta=paper_meta), schema
+        )
         try:
             generated = validate_evidence_assessments(raw_output)
+            resolved = _resolve_indexes(generated, index_map)
         except LlmEvidenceError:
             # Local models (Ollama) may return valid JSON with the wrong shape
-            # (e.g. a missing/renamed 'assessments' key); give each batch one
-            # bounded repair, exactly like the syntactic-failure repair below.
+            # (e.g. a missing/renamed 'assessments' key) or an unknown chunk
+            # index; give each batch one bounded repair that names the exact
+            # expected chunk indexes so an index drift (M5b B=1 probe: qwen
+            # echoed '2'/'A1'/'C1' for a single-chunk batch) can be repaired,
+            # exactly like the completeness repair below.
             generated = validate_evidence_assessments(
-                client.generate_json(build_json_repair_prompt(raw_output), schema)
+                client.generate_json(
+                    build_json_repair_prompt(raw_output, expected_chunk_ids=list(index_map)),
+                    schema,
+                )
             )
-        returned_ids = [item.chunk_id for item in generated.assessments]
+            resolved = _resolve_indexes(generated, index_map)
+        returned_ids = [item.chunk_id for item in resolved]
         complete = len(returned_ids) == len(set(returned_ids)) and set(returned_ids) == set(batch_ids)
         if not complete:
             generated = validate_evidence_assessments(
-                client.generate_json(build_json_repair_prompt(raw_output, expected_chunk_ids=batch_ids), schema)
+                client.generate_json(
+                    build_json_repair_prompt(raw_output, expected_chunk_ids=list(index_map)),
+                    schema,
+                )
             )
-            returned_ids = [item.chunk_id for item in generated.assessments]
+            resolved = _resolve_indexes(generated, index_map)
+            returned_ids = [item.chunk_id for item in resolved]
             if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != set(batch_ids):
                 raise LlmEvidenceError("LLM output must assess every retrieved chunk exactly once.")
-        all_assessments.extend(generated.assessments)
+        all_assessments.extend(resolved)
+
+    try:
+        from langfuse import langfuse_context
+
+        langfuse_context.update_current_observation(
+            input={
+                "query": response.query,
+                "chunk_ids": [item.chunk.chunk_id for item in ranked_chunks],
+            }
+        )
+    except Exception:
+        pass  # Observability must never break the RCS stage.
 
     summaries = [
         EvidenceSummary(

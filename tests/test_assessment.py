@@ -90,7 +90,8 @@ def _rerank_response_with_scores(scores: list[tuple[int, int]]) -> EvidenceReran
             summary="The method description directly supports the evidence ranking research question.",
             relevance_score=relevance,
             evidence_quality_score=quality,
-            rationale="It supplies method description evidence grounded in the requested topic.",
+            rationale_relevance="It supplies method description evidence grounded in the requested topic.",
+            rationale_quality="The chunk offers concrete method details with sufficient specificity.",
         )
         for chunk, (relevance, quality) in zip(chunks, scores, strict=True)
     ]
@@ -170,7 +171,8 @@ class AssessmentTests(unittest.TestCase):
                     summary="The method description directly supports the evidence ranking research question.",
                     relevance_score=10,
                     evidence_quality_score=8,
-                    rationale="It supplies a method description grounded in the requested evidence.",
+                    rationale_relevance="It supplies a method description grounded in the requested evidence.",
+                    rationale_quality="The chunk offers concrete method details with sufficient specificity.",
                 ),
                 EvidenceSummary(
                     chunk_id=chunk_two.chunk_id,
@@ -180,7 +182,8 @@ class AssessmentTests(unittest.TestCase):
                     summary="The findings provide supporting evaluation evidence for the proposed ranking method.",
                     relevance_score=8,
                     evidence_quality_score=7,
-                    rationale="It supplies evaluation findings that support the requested ranking topic.",
+                    rationale_relevance="It supplies evaluation findings that support the requested ranking topic.",
+                    rationale_quality="The chunk reports specific evaluation results with measurable detail.",
                 ),
             ],
             limitations=["LLM summaries are limited to supplied chunks."],

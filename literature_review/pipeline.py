@@ -30,6 +30,15 @@ from literature_review.models import (
 from literature_review.synthesis import SynthesisError, build_coverage_packs, summarize_paper_notes, synthesize_report
 
 
+def _rcs_batch_size() -> int:
+    raw = os.getenv("RCS_BATCH_SIZE", "4")
+    try:
+        value = int(raw)
+    except ValueError:
+        return 4
+    return value if value >= 1 else 4
+
+
 def run_evidence_pipeline(
     document: FullTextDocument,
     query: str,
@@ -49,7 +58,7 @@ def run_evidence_pipeline(
     if not chunks:
         raise ValueError("The extracted document did not produce usable evidence chunks.")
     retrieved = retrieve_evidence_embedding(chunks, query, retrieval_policy, encoder)
-    return summarize_and_rerank(retrieved, client)
+    return summarize_and_rerank(retrieved, client, batch_size=_rcs_batch_size())
 
 
 def retrieve_from_pdf(
@@ -112,6 +121,7 @@ def run_synthesis_pipeline(
     client: JsonGenerationClient,
     *,
     client_rcs: JsonGenerationClient | None = None,
+    paper_meta: dict[str, tuple[int | None, str | None]] | None = None,
     chunk_policy: ChunkPolicy = ChunkPolicy(),
     retrieval_policy: EvidenceRetrievalPolicy = EvidenceRetrievalPolicy(),
     coverage_policy: CoveragePackPolicy = CoveragePackPolicy(),
@@ -124,12 +134,17 @@ def run_synthesis_pipeline(
     ``client_rcs`` is optional and, when supplied, is used only for the RCS stage
     (``summarize_and_rerank``); when omitted, ``client`` also serves RCS (the
     existing single-client behavior / fallback escape hatch).
+    ``paper_meta`` carries each paper's ``(citation_count, venue)`` pair into the
+    RCS prompt as reference signals (M5b); unknown papers get ``n/a`` values.
     """
     prepared = _prepare_documents(documents, chunk_policy)
     all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
     rcs_client = client_rcs or client
     rerank_response = summarize_and_rerank(
-        retrieve_evidence_embedding(all_chunks, query, retrieval_policy, encoder), rcs_client
+        retrieve_evidence_embedding(all_chunks, query, retrieval_policy, encoder),
+        rcs_client,
+        batch_size=_rcs_batch_size(),
+        paper_meta=paper_meta,
     )
     assessment_response = aggregate_evidence_assessments(rerank_response, aggregation_policy)
     usable_ids = {

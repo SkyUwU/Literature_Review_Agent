@@ -18,11 +18,12 @@ class FakeClient:
             {
                 "assessments": [
                     {
-                        "chunk_id": "paper-1-p1-1-c1",
+                        "chunk_id": "1",
                         "summary": "This chunk provides evidence relevant to the literature review agent query.",
                         "relevance_score": 10,
                         "evidence_quality_score": 10,
-                        "rationale": "The chunk directly discusses the requested literature review agent topic.",
+                        "rationale_relevance": "The chunk directly discusses the requested literature review agent topic.",
+                        "rationale_quality": "The chunk supplies concrete evidence with sufficient detail.",
                     }
                 ]
             }
@@ -162,7 +163,8 @@ def assessment_payload(chunk_id: str) -> dict[str, object]:
         "summary": f"The chunk {chunk_id} provides relevant evidence about review agents.",
         "relevance_score": 10,
         "evidence_quality_score": 10,
-        "rationale": "The chunk directly discusses the requested literature review agent topic.",
+        "rationale_relevance": "The chunk directly discusses the requested literature review agent topic.",
+        "rationale_quality": "The chunk supplies concrete evidence with sufficient detail.",
     }
 
 
@@ -192,21 +194,20 @@ class SynthesisFakeClient:
                 if f"Paper ID: {paper_id}\n" in prompt:
                     return json.dumps(note_payload(paper_id))
         if prompt.startswith("Write a fluent literature-review"):
+            real_chunk_ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
+            self.cited_chunk_ids.extend(real_chunk_ids)
             report = (
                 "# Evidence-cited synthesis\n"
                 + "".join(
-                    f"The reviewed study {paper} supplies retrieved evidence for its claims "
+                    f"The reviewed study supplies retrieved evidence for its claims "
                     f"in [{chunk_id}].\n"
-                    for paper, chunk_id in zip(
-                        ("paper-1", "paper-2"), self.cited_chunk_ids, strict=False
-                    )
+                    for chunk_id in real_chunk_ids
                 )
                 + "\n## 材料來源清單\n- cited chunk identifiers appear inline above\n"
             )
             return json.dumps({"report": report, "future_directions": [DIRECTION_PAYLOAD]})
-        chunk_ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
-        self.cited_chunk_ids.extend(chunk_ids)
-        return json.dumps({"assessments": [assessment_payload(chunk_id) for chunk_id in chunk_ids]})
+        indexes = re.findall(r"## Chunk (\d+)", prompt)
+        return json.dumps({"assessments": [assessment_payload(index) for index in indexes]})
 
 
 class PaperDropFakeClient(SynthesisFakeClient):
@@ -217,14 +218,13 @@ class PaperDropFakeClient(SynthesisFakeClient):
         if prompt.startswith("Summarize this single paper") and "Paper ID: paper-1\n" in prompt:
             return json.dumps(note_payload("paper-1"))
         if prompt.startswith("Write a fluent literature-review"):
+            real_chunk_ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
             report = (
                 "# Evidence-cited synthesis\n"
                 + "".join(
-                    f"The reviewed study {paper} supplies retrieved evidence for its claims "
+                    f"The reviewed study supplies retrieved evidence for its claims "
                     f"in [{chunk_id}].\n"
-                    for paper, chunk_id in zip(
-                        ("paper-1",), self.cited_chunk_ids, strict=False
-                    )
+                    for chunk_id in real_chunk_ids
                 )
                 + "\n## 材料來源清單\n- cited chunk identifiers appear inline above\n"
             )
@@ -316,7 +316,7 @@ class SynthesisPipelineTests(unittest.TestCase):
         self.assertEqual([note.paper_id for note in result.paper_summaries], ["paper-2"])
         self.assertEqual([source.paper_id for source in result.paper_sources], ["paper-2"])
 
-    def test_synthesis_pipeline_single_rcs_call(self) -> None:
+    def test_synthesis_pipeline_rcs_single_batch_by_default(self) -> None:
         client = SynthesisFakeClient()
         result = run_synthesis_pipeline(
             [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)],
@@ -328,7 +328,7 @@ class SynthesisPipelineTests(unittest.TestCase):
         rcs_calls = sum(
             1 for prompt in client.prompts if prompt.startswith("Assess each supplied evidence chunk")
         )
-        self.assertEqual(rcs_calls, 1)
+        self.assertEqual(rcs_calls, 1)  # RCS_BATCH_SIZE defaults to 4; 2 chunks fit one batch
         self.assertEqual(len(result.paper_summaries), 2)
 
     def test_synthesis_pipeline_paper_dropped_out_of_corpus_top_k(self) -> None:

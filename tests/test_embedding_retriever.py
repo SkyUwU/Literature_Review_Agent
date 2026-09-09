@@ -105,7 +105,8 @@ def rerank_scores(response: EvidenceRetrievalResponse, texts_by_chunk: dict[str,
                 summary="This is a valid evidence summary with enough text to validate.",
                 relevance_score=rel,
                 evidence_quality_score=qual,
-                rationale="Rationale with enough text to validate the evidence summary.",
+                rationale_relevance="Relevance rationale with enough text to validate the evidence summary.",
+                rationale_quality="Quality rationale with enough text to validate the evidence summary.",
             )
         )
     return EvidenceRerankResponse(retrieval_response=response, summaries=summaries)

@@ -64,7 +64,8 @@ class ModelTests(unittest.TestCase):
                 summary="This summary is long enough to pass validation.",
                 relevance_score=11,
                 evidence_quality_score=10,
-                rationale="This rationale is intentionally long enough to validate.",
+                rationale_relevance="This rationale is intentionally long enough to validate.",
+                rationale_quality="This rationale is intentionally long enough to validate.",
             )
 
     def test_chunk_assessment_rejects_recommendation_field(self) -> None:
@@ -75,8 +76,23 @@ class ModelTests(unittest.TestCase):
                 relevance_score=8,
                 evidence_quality_score=7,
                 recommendation="include",
-                rationale="This rationale is intentionally long enough to validate.",
+                rationale_relevance="This rationale is intentionally long enough to validate.",
+                rationale_quality="This rationale is intentionally long enough to validate.",
             )
+
+    def test_chunk_assessment_field_order_matches_prompt_contract(self) -> None:
+        properties = list(LlmEvidenceAssessment.model_json_schema()["properties"])
+        self.assertEqual(
+            properties,
+            [
+                "chunk_id",
+                "summary",
+                "rationale_relevance",
+                "rationale_quality",
+                "relevance_score",
+                "evidence_quality_score",
+            ],
+        )
 
     def test_search_limit_must_be_positive(self) -> None:
         with self.assertRaises(ValidationError):
@@ -147,7 +163,8 @@ def evidence_assessment_response() -> EvidenceAssessmentResponse:
                     summary="The chunk reports a method relevant to evidence ranking.",
                     relevance_score=8,
                     evidence_quality_score=8,
-                    rationale="It directly reports a method relevant to the topic.",
+                    rationale_relevance="It directly reports a method relevant to the topic.",
+                    rationale_quality="The method description is specific and directly supports the claim.",
                     paper_id=chunk.paper_id,
                     page_start=chunk.page_start,
                     page_end=chunk.page_end,

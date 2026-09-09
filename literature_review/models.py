@@ -176,15 +176,22 @@ class EvidenceRetrievalResponse(BaseModel):
 
 
 class LlmEvidenceAssessment(BaseModel):
-    """Structured assessment requested from an LLM for one retrieved chunk."""
+    """Structured assessment requested from an LLM for one retrieved chunk.
+
+    Field order matters: an autoregressive model emits fields in schema order,
+    so ``summary`` and both rationales come *before* the scores. This forces
+    the model to restate the chunk and write its reasoning before assigning
+    numbers (three-layer structure: restate -> relation -> score, M5b).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     chunk_id: str
     summary: str = Field(min_length=20)
+    rationale_relevance: str = Field(min_length=20)
+    rationale_quality: str = Field(min_length=20)
     relevance_score: int = Field(ge=1, le=10)
     evidence_quality_score: int = Field(ge=1, le=10)
-    rationale: str = Field(min_length=20)
 
 
 class LlmEvidenceAssessmentBatch(BaseModel):

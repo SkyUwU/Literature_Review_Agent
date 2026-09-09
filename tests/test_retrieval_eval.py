@@ -28,12 +28,13 @@ def assessment(chunk_id: str, relevance: int) -> dict[str, object]:
         "summary": f"Chunk {chunk_id} provides relevant evidence for the review query.",
         "relevance_score": relevance,
         "evidence_quality_score": 3,
-        "rationale": "The chunk directly discusses the requested literature review agent topic.",
+        "rationale_relevance": "The chunk directly discusses the requested literature review agent topic.",
+        "rationale_quality": "The chunk supplies concrete evidence with sufficient detail.",
     }
 
 
 class ScoredFakeClient:
-    """Fake LLM judge: returns a fixed relevance score per chunk id seen in a prompt."""
+    """Fake LLM judge: returns a fixed relevance score per chunk index seen in a prompt."""
 
     def __init__(self, scores: dict[str, int]) -> None:
         self._scores = scores
@@ -41,9 +42,9 @@ class ScoredFakeClient:
 
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.calls.append(prompt)
-        ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
+        indexes = re.findall(r"## Chunk (\d+)", prompt)
         return json.dumps(
-            {"assessments": [assessment(chunk_id, self._scores.get(chunk_id, 3)) for chunk_id in ids]}
+            {"assessments": [assessment(index, self._scores.get(index, 3)) for index in indexes]}
         )
 
 
@@ -88,7 +89,7 @@ class CompareRetrievalTests(unittest.TestCase):
 
         # Count total chunk assessments across all calls equals number of unique scored chunks.
         total_assessed = sum(
-            len(re.findall(r'"chunk_id": "([^"]+)"', prompt)) for prompt in client.calls
+            len(re.findall(r"## Chunk (\d+)", prompt)) for prompt in client.calls
         )
         self.assertEqual(total_assessed, len(report["overlap"]) + len(report["only_lexical"]) + len(report["only_embedding"]))
 
