@@ -111,17 +111,25 @@ def run_synthesis_pipeline(
     query: str,
     client: JsonGenerationClient,
     *,
+    client_rcs: JsonGenerationClient | None = None,
     chunk_policy: ChunkPolicy = ChunkPolicy(),
     retrieval_policy: EvidenceRetrievalPolicy = EvidenceRetrievalPolicy(),
     coverage_policy: CoveragePackPolicy = CoveragePackPolicy(),
     aggregation_policy: EvidenceAggregationPolicy = EvidenceAggregationPolicy(),
     encoder: Encoder | None = None,
 ) -> SynthesisResponse:
-    """Run retrieval, LLM re-ranking, aggregation, notes, and cited synthesis."""
+    """Run retrieval, LLM re-ranking, aggregation, notes, and cited synthesis.
+
+    ``client`` serves per-paper notes and synthesis (Gemini key2 in real runs).
+    ``client_rcs`` is optional and, when supplied, is used only for the RCS stage
+    (``summarize_and_rerank``); when omitted, ``client`` also serves RCS (the
+    existing single-client behavior / fallback escape hatch).
+    """
     prepared = _prepare_documents(documents, chunk_policy)
     all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
+    rcs_client = client_rcs or client
     rerank_response = summarize_and_rerank(
-        retrieve_evidence_embedding(all_chunks, query, retrieval_policy, encoder), client
+        retrieve_evidence_embedding(all_chunks, query, retrieval_policy, encoder), rcs_client
     )
     assessment_response = aggregate_evidence_assessments(rerank_response, aggregation_policy)
     usable_ids = {

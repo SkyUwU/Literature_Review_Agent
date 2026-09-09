@@ -30,31 +30,84 @@ class RetryClient:
         return self.responses.pop(0)
 
 
-def retrieval_response() -> EvidenceRetrievalResponse:
+def retrieval_response(chunk_count: int = 2) -> EvidenceRetrievalResponse:
     chunks = [
         EvidenceChunk(
-            chunk_id="chunk-1",
-            paper_id="paper-1",
-            page_start=2,
-            page_end=3,
-            text="This evidence chunk describes a retrieval method in sufficient detail for testing.",
-        ),
-        EvidenceChunk(
-            chunk_id="chunk-2",
-            paper_id="paper-2",
-            page_start=5,
-            page_end=5,
-            text="This evidence chunk describes evaluation results in sufficient detail for testing.",
-        ),
+            chunk_id=f"chunk-{index}",
+            paper_id=f"paper-{index}",
+            page_start=index + 1,
+            page_end=index + 2,
+            text=(
+                f"Evidence chunk {index} describes content in sufficient detail for testing."
+            ),
+        )
+        for index in range(1, chunk_count + 1)
     ]
     return EvidenceRetrievalResponse(
         query="How should literature review evidence be ranked?",
-        policy=EvidenceRetrievalPolicy(top_k=2),
+        policy=EvidenceRetrievalPolicy(top_k=chunk_count),
         ranked_chunks=[
-            RankedEvidenceChunk(chunk=chunks[0], rank=1, score=3, matched_terms=["evidence"], rationale="test"),
-            RankedEvidenceChunk(chunk=chunks[1], rank=2, score=2, matched_terms=["review"], rationale="test"),
+            RankedEvidenceChunk(chunk=chunk, rank=rank, score=3, matched_terms=["evidence"], rationale="test")
+            for rank, chunk in enumerate(chunks, start=1)
         ],
     )
+
+
+def _prompt_chunk_ids(prompt: str) -> list[str] | None:
+    """Extract the chunk_ids named inside a built evidence prompt.
+
+    Returns ``None`` for repair prompts, which have no inline chunk list.
+    """
+    marker = "Evidence chunks: "
+    if marker not in prompt:
+        return None
+    payload = prompt.split(marker, maxsplit=1)[1]
+    chunks = json.loads(payload)
+    return [item["chunk_id"] for item in chunks]
+
+
+def assessment_payload(chunk_id: str) -> dict[str, object]:
+    return {
+        "chunk_id": chunk_id,
+        "summary": f"Summary for {chunk_id} with sufficient detail for validation.",
+        "relevance_score": 8,
+        "evidence_quality_score": 7,
+        "rationale": f"Rationale for {chunk_id} with sufficient detail for validation.",
+    }
+
+
+class SubsetFakeClient:
+    """Assess exactly the chunk_ids present in each request prompt (batched RCS).
+
+    ``drop_on_first`` omits chunks only on the very first call (a repair call
+    then completes them); ``drop_always`` omits them on every call, so the
+    repair also fails and ``summarize_and_rerank`` raises.
+    """
+
+    def __init__(
+        self,
+        *,
+        drop_on_first: set[str] | None = None,
+        drop_always: set[str] | None = None,
+    ) -> None:
+        self.prompts: list[str] = []
+        self.drop_on_first = set(drop_on_first or set())
+        self.drop_always = set(drop_always or set())
+        self._call_count = 0
+        self._last_batch_ids: list[str] = []
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        self.prompts.append(prompt)
+        self._call_count += 1
+        chunk_ids = _prompt_chunk_ids(prompt)
+        if chunk_ids is None:
+            chunk_ids = self._last_batch_ids
+        else:
+            self._last_batch_ids = chunk_ids
+        first_call = self._call_count == 1
+        drop = self.drop_always | (self.drop_on_first if first_call else set())
+        selected = [chunk_id for chunk_id in chunk_ids if chunk_id not in drop]
+        return json.dumps({"assessments": [assessment_payload(chunk_id) for chunk_id in selected]})
 
 
 class LlmEvidenceTests(unittest.TestCase):
@@ -150,6 +203,43 @@ class LlmEvidenceTests(unittest.TestCase):
         self.assertEqual(len(client.prompts), 2)
         self.assertIn("malformed JSON", client.prompts[1])
         self.assertEqual(len(result.summaries), 2)
+
+    def test_batches_non_multiple_chunk_sets_into_bounded_calls(self) -> None:
+        client = SubsetFakeClient()
+        result = summarize_and_rerank(retrieval_response(9), client)
+
+        self.assertEqual(len(client.prompts), 3)  # ceil(9 / 4) = 3 calls
+        self.assertEqual(len(_prompt_chunk_ids(client.prompts[0])), 4)  # first call holds a full batch
+        self.assertEqual(len(_prompt_chunk_ids(client.prompts[1])), 4)  # second call holds a full batch
+        self.assertEqual(len(_prompt_chunk_ids(client.prompts[2])), 1)  # last call holds the remainder
+        self.assertEqual(len(result.summaries), 9)
+        self.assertEqual(
+            {item.chunk_id for item in result.summaries},
+            {f"chunk-{index}" for index in range(1, 10)},
+        )
+
+    def test_batch_boundary_exact_multiple_single_batch(self) -> None:
+        client = SubsetFakeClient()
+        result = summarize_and_rerank(retrieval_response(4), client)
+
+        self.assertEqual(len(client.prompts), 1)  # 4 chunks fit in exactly one batch
+        self.assertEqual(len(result.summaries), 4)
+
+    def test_missing_chunk_is_repaired_once_then_completes(self) -> None:
+        client = SubsetFakeClient(drop_on_first={"chunk-1"})
+        result = summarize_and_rerank(retrieval_response(4), client)
+
+        self.assertEqual(len(client.prompts), 2)  # original batch + one repair
+        self.assertIn("each once", client.prompts[1])  # repair prompt names the expected chunk_ids
+        self.assertEqual(len(result.summaries), 4)  # repaired batch completes the set
+
+    def test_missing_chunk_still_missing_after_repair_raises(self) -> None:
+        client = SubsetFakeClient(drop_always={"chunk-1"})
+
+        with self.assertRaises(LlmEvidenceError):
+            summarize_and_rerank(retrieval_response(4), client)
+
+        self.assertEqual(len(client.prompts), 2)  # no further retries after one repair
 
 
 if __name__ == "__main__":

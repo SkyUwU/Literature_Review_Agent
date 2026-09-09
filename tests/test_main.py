@@ -497,46 +497,74 @@ class MainEntryTests(unittest.TestCase):
         self.assertEqual(result["plan"].generated_by, "llm")
 
     def test_build_clients_default_full_run_builds_plan_client(self) -> None:
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000"}, clear=False):
+        with mock.patch.dict(
+            os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False
+        ):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                client_plan, client_synth = main_module._build_clients(
+                client_plan, client_synth, client_rcs = main_module._build_clients(
                     argparse.Namespace(rule_based=False, dry_run=False)
                 )
         self.assertEqual(client_cls.call_count, 2)
         self.assertIsNotNone(client_plan)
         self.assertIsNotNone(client_synth)
+        self.assertIsNone(client_rcs)  # OLLAMA_BASE_URL 未設定 → No fallback client
 
     def test_build_clients_rule_based_skips_plan_client(self) -> None:
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000"}, clear=False):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                client_plan, client_synth = main_module._build_clients(
+                client_plan, client_synth, client_rcs = main_module._build_clients(
                     argparse.Namespace(rule_based=True, dry_run=False)
                 )
         self.assertEqual(client_cls.call_count, 1)
         self.assertIsNone(client_plan)
         self.assertIsNotNone(client_synth)
+        self.assertIsNone(client_rcs)
 
     def test_build_clients_missing_key1_falls_back_without_exit(self) -> None:
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "AIza000"}, clear=False):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                client_plan, client_synth = main_module._build_clients(
+                client_plan, client_synth, client_rcs = main_module._build_clients(
                     argparse.Namespace(rule_based=False, dry_run=False)
                 )
         self.assertIsNone(client_plan)
         self.assertIsNotNone(client_synth)
+        self.assertIsNone(client_rcs)
 
     def test_build_clients_dry_run_bypasses_all_keys(self) -> None:
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": ""}, clear=False):
-            client_plan, client_synth = main_module._build_clients(
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "", "OLLAMA_BASE_URL": ""}, clear=False):
+            client_plan, client_synth, client_rcs = main_module._build_clients(
                 argparse.Namespace(rule_based=False, dry_run=True)
             )
         self.assertIsNone(client_plan)
         self.assertIsNone(client_synth)
+        self.assertIsNone(client_rcs)
+
+    def test_build_clients_ollama_configured_builds_rcs_client(self) -> None:
+        """OLLAMA_BASE_URL 設定存在 → 第三 client 用 Ollama(RCS)，Gemini 仍只建 plan + synth 兩個。"""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GEMINI_API_KEY": "AIza000",
+                "GEMINI_API_KEY_2": "AIza000",
+                "OLLAMA_BASE_URL": "http://ollama:11434/v1",
+            },
+            clear=False,
+        ):
+            with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
+                with mock.patch("literature_review.main.OllamaJsonClient") as ollama_cls:
+                    client_plan, client_synth, client_rcs = main_module._build_clients(
+                        argparse.Namespace(rule_based=False, dry_run=False)
+                    )
+        self.assertEqual(client_cls.call_count, 2)
+        self.assertEqual(ollama_cls.call_count, 1)
+        self.assertIsNotNone(client_plan)
+        self.assertIsNotNone(client_synth)
+        self.assertIsNotNone(client_rcs)
 
     def test_main_dry_run_forces_rule_based(self) -> None:
         plan = create_rule_based_plan("literature review agent")
         fake_result = {"plan": plan, "downloads": [], "stats_per_query": [], "dry_run": True}
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": ""}, clear=False):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "", "OLLAMA_BASE_URL": ""}, clear=False):
             with mock.patch("builtins.input", return_value="literature review agent"):
                 with mock.patch.object(sys, "argv", ["literature_review.main", "--dry-run"]):
                     with mock.patch("literature_review.main.run_end_to_end", return_value=fake_result) as m_run:
@@ -549,7 +577,7 @@ class MainEntryTests(unittest.TestCase):
     def test_main_rule_based_flag_forces_rule_based(self) -> None:
         plan = create_rule_based_plan("literature review agent")
         fake_result = {"plan": plan, "downloads": [], "stats_per_query": [], "dry_run": True}
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": ""}, clear=False):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "", "OLLAMA_BASE_URL": ""}, clear=False):
             with mock.patch("builtins.input", return_value="literature review agent"):
                 with mock.patch.object(sys, "argv", ["literature_review.main", "--rule-based", "--dry-run"]):
                     with mock.patch("literature_review.main.run_end_to_end", return_value=fake_result) as m_run:

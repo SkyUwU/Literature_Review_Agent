@@ -12,10 +12,13 @@ from literature_review.models import (
     EvidenceRerankResponse,
     EvidenceRetrievalResponse,
     EvidenceSummary,
+    LlmEvidenceAssessment,
     LlmEvidenceAssessmentBatch,
 )
 
 from langfuse import observe
+
+RCS_BATCH_SIZE = 4
 
 
 class LlmEvidenceError(RuntimeError):
@@ -79,8 +82,17 @@ def load_local_env(path: str | Path = ".env") -> None:
             os.environ[key] = value.strip().strip('"').strip("'")
 
 
-def build_evidence_prompt(response: EvidenceRetrievalResponse) -> str:
-    """Ask the model for grounded summaries without allowing it to alter provenance."""
+def build_evidence_prompt(response: EvidenceRetrievalResponse, chunk_ids: list[str] | None = None) -> str:
+    """Ask the model for grounded summaries without allowing it to alter provenance.
+
+    ``chunk_ids`` optionally narrows the prompt to a subset of the retrieved
+    chunks (used by the batched RCS loop); ``None`` keeps the full corpus-wide
+    prompt (the original single-call behavior).
+    """
+    selected = response.ranked_chunks
+    if chunk_ids is not None:
+        wanted = set(chunk_ids)
+        selected = [item for item in response.ranked_chunks if item.chunk.chunk_id in wanted]
     chunks = [
         {
             "chunk_id": item.chunk.chunk_id,
@@ -89,7 +101,7 @@ def build_evidence_prompt(response: EvidenceRetrievalResponse) -> str:
             "page_end": item.chunk.page_end,
             "text": item.chunk.text,
         }
-        for item in response.ranked_chunks
+        for item in selected
     ]
     return (
         "Assess each supplied evidence chunk only against the research query. "
@@ -107,12 +119,24 @@ def build_evidence_prompt(response: EvidenceRetrievalResponse) -> str:
     )
 
 
-def build_json_repair_prompt(raw_output: str) -> str:
-    """Request one bounded repair attempt when structured output was malformed."""
+def build_json_repair_prompt(raw_output: str, expected_chunk_ids: list[str] | None = None) -> str:
+    """Request one bounded repair attempt when structured output was malformed.
+
+    When ``expected_chunk_ids`` is supplied (a batch's full chunk set), the
+    repair prompt additionally demands exactly one assessment for every listed
+    chunk_id, so a model that silently dropped chunks gets one chance to
+    complete the batch (Todo 3: single-repair budget per batch).
+    """
+    coverage_clause = ""
+    if expected_chunk_ids is not None:
+        coverage_clause = (
+            " The repaired response must assess exactly these chunk_ids, each once: "
+            f"{json.dumps(expected_chunk_ids)}."
+        )
     return (
         "The previous response was malformed JSON. Return a repaired version as exactly one JSON object, "
-        "without Markdown or explanation. Preserve the intended assessments and follow the response schema. "
-        f"Previous response:\n{raw_output}"
+        "without Markdown or explanation. Preserve the intended assessments and follow the response schema."
+        f"{coverage_clause}\nPrevious response:\n{raw_output}"
     )
 
 
@@ -178,20 +202,44 @@ def generate_validated(
 def summarize_and_rerank(
     response: EvidenceRetrievalResponse,
     client: JsonGenerationClient,
+    *,
+    batch_size: int = RCS_BATCH_SIZE,
 ) -> EvidenceRerankResponse:
-    """Validate LLM assessments and enrich them only with trusted chunk provenance."""
-    raw_output = client.generate_json(build_evidence_prompt(response), LlmEvidenceAssessmentBatch.model_json_schema())
-    try:
-        generated = validate_evidence_assessments(raw_output)
-    except LlmOutputSyntaxError:
-        generated = validate_evidence_assessments(client.generate_json(
-            build_json_repair_prompt(raw_output), LlmEvidenceAssessmentBatch.model_json_schema()
-        ))
+    """Validate LLM assessments per bounded batch and enrich them only with trusted provenance.
 
-    by_chunk_id = {item.chunk.chunk_id: item.chunk for item in response.ranked_chunks}
-    returned_ids = [item.chunk_id for item in generated.assessments]
-    if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != set(by_chunk_id):
-        raise LlmEvidenceError("LLM output must assess every retrieved chunk exactly once.")
+    The corpus-wide chunk set is split into batches of at most ``batch_size``
+    chunks; each batch is an independent call with at most one repair attempt.
+    The per-batch repair prompt also names the expected chunk_ids, so a model
+    that silently drops chunks gets one chance to complete the batch. The merged
+    result keeps the existing every-chunk-exactly-once invariant.
+    """
+    ranked_chunks = response.ranked_chunks
+    by_chunk_id = {item.chunk.chunk_id: item.chunk for item in ranked_chunks}
+    all_assessments: list[LlmEvidenceAssessment] = []
+    schema = LlmEvidenceAssessmentBatch.model_json_schema()
+
+    for start in range(0, len(ranked_chunks), batch_size):
+        batch_ids = [item.chunk.chunk_id for item in ranked_chunks[start : start + batch_size]]
+        raw_output = client.generate_json(build_evidence_prompt(response, chunk_ids=batch_ids), schema)
+        try:
+            generated = validate_evidence_assessments(raw_output)
+        except LlmEvidenceError:
+            # Local models (Ollama) may return valid JSON with the wrong shape
+            # (e.g. a missing/renamed 'assessments' key); give each batch one
+            # bounded repair, exactly like the syntactic-failure repair below.
+            generated = validate_evidence_assessments(
+                client.generate_json(build_json_repair_prompt(raw_output), schema)
+            )
+        returned_ids = [item.chunk_id for item in generated.assessments]
+        complete = len(returned_ids) == len(set(returned_ids)) and set(returned_ids) == set(batch_ids)
+        if not complete:
+            generated = validate_evidence_assessments(
+                client.generate_json(build_json_repair_prompt(raw_output, expected_chunk_ids=batch_ids), schema)
+            )
+            returned_ids = [item.chunk_id for item in generated.assessments]
+            if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != set(batch_ids):
+                raise LlmEvidenceError("LLM output must assess every retrieved chunk exactly once.")
+        all_assessments.extend(generated.assessments)
 
     summaries = [
         EvidenceSummary(
@@ -200,7 +248,7 @@ def summarize_and_rerank(
             page_start=by_chunk_id[assessment.chunk_id].page_start,
             page_end=by_chunk_id[assessment.chunk_id].page_end,
         )
-        for assessment in generated.assessments
+        for assessment in all_assessments
     ]
     summaries.sort(key=lambda item: (-item.relevance_score, -item.evidence_quality_score, item.chunk_id))
     return EvidenceRerankResponse(

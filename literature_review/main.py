@@ -27,6 +27,7 @@ from literature_review import embedding_retriever
 from literature_review.embedding_retriever import Encoder
 from literature_review.extraction import extract_pdf_text
 from literature_review.llm_evidence import GeminiJsonClient, JsonGenerationClient, LlmEvidenceError
+from literature_review.ollama_client import OllamaJsonClient
 from literature_review.models import (
     EvidenceRetrievalPolicy,
     FullTextDocument,
@@ -85,6 +86,7 @@ def run_end_to_end(
     dest_dir: Path,
     client_plan: JsonGenerationClient | None = None,
     client_synth: JsonGenerationClient | None = None,
+    client_rcs: JsonGenerationClient | None = None,
     use_llm_plan: bool = True,
     dry_run: bool = False,
     json_fetcher: search.JsonFetcher = search.fetch_json,
@@ -172,6 +174,7 @@ def run_end_to_end(
         documents,
         query,
         client_synth,
+        client_rcs=client_rcs,
         retrieval_policy=EvidenceRetrievalPolicy(top_k=TOP_K_CHUNKS, max_chunks_per_paper=6),
     )
     return {
@@ -184,14 +187,20 @@ def run_end_to_end(
     }
 
 
-def _build_clients(arguments: argparse.Namespace) -> tuple[JsonGenerationClient | None, JsonGenerationClient | None]:
-    """Build the two stage clients: planning uses key1, synthesis uses key2.
+def _build_clients(
+    arguments: argparse.Namespace,
+) -> tuple[JsonGenerationClient | None, JsonGenerationClient | None, JsonGenerationClient | None]:
+    """Build the stage clients: planning uses key1, RCS may use local Ollama, synthesis uses key2.
 
     The LLM planner is the default for a full run; it is skipped on ``--dry-run``
     (zero keys) and on ``--rule-based`` (escape hatch). A missing ``GEMINI_API_KEY``
     prints a warning and keeps ``client_plan`` as ``None``, letting
     :func:`_make_plan` fall back to the deterministic rule-based plan without
     aborting the run. ``--dry-run`` never inspects either key.
+
+    ``client_rcs`` is built from the local Ollama endpoint when ``OLLAMA_BASE_URL``
+    is configured (M6); when it is missing the client stays ``None`` and the RCS
+    stage falls back to the Gemini synthesis client (existing behavior).
     """
     client_plan: JsonGenerationClient | None = None
     if not arguments.dry_run and not arguments.rule_based:
@@ -211,7 +220,15 @@ def _build_clients(arguments: argparse.Namespace) -> tuple[JsonGenerationClient 
             print("請在 .env 設定 GEMINI_API_KEY_2", file=sys.stderr)
             raise SystemExit(1)
         client_synth = GeminiJsonClient(api_key=api_key_2)
-    return client_plan, client_synth
+    client_rcs: JsonGenerationClient | None = None
+    if not arguments.dry_run:
+        if os.getenv("OLLAMA_BASE_URL"):
+            try:
+                client_rcs = OllamaJsonClient()
+            except LlmEvidenceError as error:
+                print(f"Ollama RCS client unavailable: {error}", file=sys.stderr)
+                client_rcs = None
+    return client_plan, client_synth, client_rcs
 
 
 def main() -> None:
@@ -236,7 +253,7 @@ def main() -> None:
         print("No query provided; exiting.", file=sys.stderr)
         raise SystemExit(1) from None
 
-    client_plan, client_synth = _build_clients(arguments)
+    client_plan, client_synth, client_rcs = _build_clients(arguments)
 
     try:
         result = run_end_to_end(
@@ -244,6 +261,7 @@ def main() -> None:
             dest_dir=DEST_DIR,
             client_plan=client_plan,
             client_synth=client_synth,
+            client_rcs=client_rcs,
             use_llm_plan=not arguments.rule_based and not arguments.dry_run,
             dry_run=arguments.dry_run,
         )
