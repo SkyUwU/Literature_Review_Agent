@@ -12,7 +12,7 @@
 - **M4（C1=RCS 評分層改版）執行中 🔄（Todo 1-7 ✅，Todo 8 待辦）**：196 tests OK；1-10 分數制（chunk/論文層 `le=10`）、`PaperAssessment` 兩分數 int→float、chunk 層 `recommendation` 從契約移除（models/synthesis 區塊 A）、聚合 `round(...,1)` 不 floor、prior 5.5、門檻 8/6/6、metadata 初評對齊 1-10 並標 deprecated、prompt 加 10/5/1 操作型錨點 + 先 rationale。**剩 Todo 8：改後真實 run + 改前/改後對比 + 門檻校準建議**。
 
 ## 下一步
-0. **M5a（候選 L：planner prompt 多面向）＝執行中 🔄（Todo 1-3 ✅ + Todo 4 核心 ✅，下游待配額補跑）**：問題診斷定案——「1 篇 usable」是**天花板約束**（K/K2/K3 三輪皆 1 篇：下載池裡的最高分論文就是天花板），不是閾值約束；把閾值降到 4.5 才多收 2 篇（她「調很低」的直覺正確）＝閾值不是杠杆，**候選池組成才是**。M5a 執行結果（2026-09-08）：Todo 1-3 ✅（218 tests OK ×3，prompt 多面向指示 + `query_overlap`/`max_query_overlap` Jaccard 外層 retry 超 0.5 重試一次仍超標回第一版+警告 + `_print_plan` log 每 query+purpose+perspectives）；Todo 4 核心 ✅ **重合度 0.444（M4 舊 prompt）→ 0.077/0.059/0.133（新 prompt 三輪）巨幅下降、多面向實證成立**（面向例：架構/檢索/評測/人機協作）；**下游進評分池/usable/天花板 rel 未取得**——三次 run 兩次被 Gemini free-tier 429 卡 RCS、一次使用者 abort（外部配額，非 code 問題），`data/papers` 已還原 21 檔基準。驗收判定：**功能驗收通過（條件式）**，剩「配額恢復後一次完整 run 補下游數據」即可關閉。（使用者尚未 commit；候選 M「DEST_DIR 覆寫」又獲一次實證，建議排 C4）
+0. **M5a（候選 L：planner prompt 多面向）＝執行中 🔄（Todo 1-3 ✅ + Todo 4 核心 ✅，下游待配額補跑）**：問題診斷定案——「1 篇 usable」是**天花板約束**（K/K2/K3 三輪皆 1 篇：下載池裡的最高分論文就是天花板），不是閾值約束；把閾值降到 4.5 才多收 2 篇（她「調很低」的直覺正確）＝閾值不是杠杆，**候選池組成才是**。M5a 執行結果（2026-09-08）：Todo 1-3 ✅（218 tests OK ×3，prompt 多面向指示 + `query_overlap`/`max_query_overlap` Jaccard 外層 retry 超 0.5 重試一次仍超標回第一版+警告 + `_print_plan` log 每 query+purpose+perspectives）；Todo 4 核心 ✅ **重合度 0.444（M4 舊 prompt）→ 0.077/0.059/0.133（新 prompt 三輪）巨幅下降、多面向實證成立**（面向例：架構/檢索/評測/人機協作）；**下游進評分池/usable/天花板 rel 未取得**——三次 run 兩次被 Gemini free-tier 429 卡 RCS、一次使用者 abort（外部配額，非 code 問題），`data/papers` 已還原 21 檔基準。驗收判定：**功能驗收通過（條件式）**，剩「配額恢復後一次完整 run 補下游數據」即可關閉。**已 commit（`6457dbe9`，使用者 2026-09-08 執行）**；push ✅（feature/plan-doc）。候選 M「DEST_DIR 覆寫」又獲一次實證，建議排 C4。
 1. **M5b（RCS 校準回合，接 M5a 之後）**：A9（錨點措辭中性化，數值不動）+ A10（雙 rationale 欄位 `rationale_relevance`/`rationale_quality` + 三層結構「重述→關係→分數」共用重述段；解 A2 表格低估）+ **閾值最後決定**（跑完 L+校準看分布再降；使用者 2026-09-08 期望 usable 2 篇「不算想太多」，但降閾值非正解——M5b 末尾以分布數據決定）。M5b 前動工討論（使用者 2026-09-05 規矩）。
 2. **K3b（shrinkage 3→1 離線重算）✅ 已 commit（2026-09-08 使用者）**：209 tests OK ×2；離線重算正確性 = m=3 重算對 K3 基準 9/9 一致；m=1 vs m=3：usable 1→1、recommendation 零變化（W4401667275 6.5/6.8 微升；8/9 論文 mean<5.5 故多數下降——「普遍微升」預期不成立、如實記錄）；效用=高分更貼實測、低分更誠實。證據 `.omo/evidence/k3b-offline-m1.md/json`。**push 狀態待使用者確認（K/K2/K3/K3b 齊了，Windows pull 同步後一起）。**
     - **K3（已 commit）sanity 摘要**：進評分 9、1 consider（W4401667275 6.3/6.5）、16 citations(15 unique)、AIza 0；固定集 A/B 4→9 篇、壟斷消除。
@@ -132,3 +132,8 @@
 - 狀態以本檔 + 計畫檔「下一步行動卡」+ 計畫 amendment 為準。
 - 重要步驟一律寫進行動卡/STATE.md，不靠對話記憶（防上下文壓縮）。
 - 規劃 agent 只改 `.omo/*.md`，不碰 product code / tests / 其他目錄。
+
+## 明日續跑重點（2026-09-08 收尾）
+- **M5a code 已 commit + push**（`6457dbe9` feat: M5a planner multi-facet prompt + query overlap guard + purpose logging，branch `feature/plan-doc`）；**剩餘決策紀錄 commit 未完成**：`.omo/STATE.md` + `.omo/plans/m5a-planner-multifaceted.md`（+ 使用者決定 `k3b-shrinkage-2.md` 留/刪）——`git add` → commit → push 即可收乾淨。
+- **M5a 待補跑**（配額恢復後）：一次完整 run 補「進評分池組成（對比 K3=9 篇）/ usable / 天花板 rel」，即可關閉 M5a；指令：`printf 'literature review agent\n' | uv run --env-file .env python -m literature_review.main`（run 後新 PDF 移出 `data/papers/` 還原基準）。
+- **M5b（RCS 校準）動工前先與使用者討論**（2026-09-05 規矩）；M5c（多檢索 API 合併池）/ M5d（plan-review loop）列候選待 M5a 數據。Windows 端 pull 同步時記得 checkout `feature/plan-doc`。
