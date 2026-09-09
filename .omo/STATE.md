@@ -136,7 +136,15 @@
 - 重要步驟一律寫進行動卡/STATE.md，不靠對話記憶（防上下文壓縮）。
 - 規劃 agent 只改 `.omo/*.md`，不碰 product code / tests / 其他目錄。
 
-## 明日續跑重點（2026-09-08 收尾）
-- **M5a code 已 commit + push**（`6457dbe9` feat: M5a planner multi-facet prompt + query overlap guard + purpose logging，branch `feature/plan-doc`）；**剩餘決策紀錄 commit 未完成**：`.omo/STATE.md` + `.omo/plans/m5a-planner-multifaceted.md`（+ 使用者決定 `k3b-shrinkage-2.md` 留/刪）——`git add` → commit → push 即可收乾淨。
-- **M5a 待補跑**（配額恢復後）：一次完整 run 補「進評分池組成（對比 K3=9 篇）/ usable / 天花板 rel」，即可關閉 M5a；指令：`printf 'literature review agent\n' | uv run --env-file .env python -m literature_review.main`（run 後新 PDF 移出 `data/papers/` 還原基準）。
-- **M5b（RCS 校準）動工前先與使用者討論**（2026-09-05 規矩）；M5c（多檢索 API 合併池）/ M5d（plan-review loop）列候選待 M5a 數據。Windows 端 pull 同步時記得 checkout `feature/plan-doc`。
+## 明日續跑重點（2026-09-09 收尾）
+- **M6 commit 待使用者執行**（正確指令見下表；先 `git log --oneline -3` 確認 ahead by 1 的那筆是什麼；.omo/STATE.md + .omo/plans/m6-rcs-ollama.md 併入 docs commit）：
+  ```powershell
+  git add literature_review/ollama_client.py literature_review/llm_evidence.py literature_review/pipeline.py literature_review/main.py tests/test_ollama_client.py tests/test_llm_evidence.py tests/test_main.py HANDOFF.md
+  git commit -m "feat: M6 run RCS scoring on local Ollama model with batched chunk assessment"
+  git add .omo/STATE.md .omo/plans/m6-rcs-ollama.md
+  git commit -m "docs: record M6 RCS-on-Ollama plan and project state"
+  git push
+  ```
+- **M6 Todo 5 待補跑（明天配額恢復，一魚兩吃 M5a 下游掛帳）**：真實 run 指令 `printf 'literature review agent\n' | uv run --env-file .env python -m literature_review.main`；記錄進評分池組成（vs K3=9 篇）/ usable / 天花板 rel / Gemini 429 次數；run 後新 PDF 移出 `data/papers/` 還原、log 存 `.omo/evidence/m6-real-final.log`。今天 2 次 run 皆 RCS(Ollama)✅ 卡 key2 429（notes 留 Gemini 的取捨）。
+- **M5b 動工前討論清單（已齊 5 項，先討論再動工）**：① schema 欄位順序修正——`LlmEvidenceAssessment` rationale 目前排在分數後（models.py:183-187），「先理由後給分」被 schema 順序架空（M4 I 項實作不完整，2026-09-09 使用者發現）→ 改 chunk_id → summary → rationale → 分數；② A9 錨點措辭中性化；③ A10 雙 rationale + 強制重述；④ RCS 輸入精簡（prompt 只給 index+text、LLM 回傳 index 程式組合；metadata citation/venue 帶入當參考訊號（Claude ②）；`RCS_BATCH_SIZE` 接 env 可調；Langfuse trace input 精簡）——B=8 竄改 id 即病徵；⑤ 閾值重校：Ollama 校準 15/32 chunks rel=10（10 分廉價）、天花板 9.2 vs Gemini 6.3、跨 run 不可直接比（資料集也不同：data/papers 21 檔 vs K3 固定集）；5 樣本抽查（m6-calibration.md:46-64）使用者尚未親測。
+- **候選**：Marker-pdf（PDF 抽取改善，先 PoC）；M5c（多檢索合併池）；M5d（plan-review loop）。Windows 端 pull 同步時記得 checkout `feature/plan-doc`；Windows `.env` 待加 `OLLAMA_BASE_URL`/`OLLAMA_MODEL`。
