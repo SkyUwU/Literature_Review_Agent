@@ -2,7 +2,7 @@
 
 - slug:`m5e-candidate-pool-upgrade`
 - date:2026-09-09
-- status:已核准(2026-09-10 使用者核准 + 計畫自審 P8/P9 補入)——**動工排 M5b Todo 6 補跑完成之後**(對照基準先產出)
+- status:✅ **Todo 0-4 已執行並驗收通過(2026-09-10)**——248 tests 全綠 + dry-run smoke(13 篇、shortfall 0)+ fake e2e;**Todo 5 真實 run 掛帳**(修改事項清單清空後一次整條;對照基準 = M5b.1 校準 8.5)
 - 前置:M5b 完成驗收(此計畫動工排在 M5b 之後;M5b 執行中不阻塞本計畫撰寫)
 
 ## 動機
@@ -64,12 +64,12 @@ M5a 診斷定案:「1 篇 usable」是**天花板約束**不是閾值約束—�
 - 單元測試全綠(? 個,比照先例);fake 端到端(dry-run 路徑不含 LLM);真實 smoke 視配額(使用者裁示的配額守則)。
 - M5b 的 RCS B=1 預設、分帶定義等不受影響(本計畫不動 RCS)。
 
-## Todo 5 — 真實 run 驗收(配額守則沿用)
+## Todo 5 — 真實 run 驗收(掛帳,2026-09-10 使用者裁示)
 
-- 對照基準:**m5b-real-final.log**(M5b Todo 6 的改後 run,免費,不另跑 baseline)。
-- 指標:M5a 同套——子查詢重合度、進評分池組成(對比 m5b run)、usable、天花板 rel;新增——**follow-up 論文進池率**(follow-up 帶進的論文佔下載池比例)、剔除統計(剔除篇數/理由分布)、Gemini 429 次數。
+- **掛帳原則(2026-09-10 定案)**:真實 run = 收尾儀式,不是開發工具——**「當前修改事項清單」清空(含 C2 報告生成、Marker PoC 等)之前不跑整條**;M5e 的修改完成判定 = ①-③ 全綠(fake/dry smoke 免費驗證)。
+- 對照基準:M5b.1 校準統計(天花板 rel 8.5、include 1-2、B=4)+ 歷史 run(usable=1,天花板 5.0-6.6)——原「m5b-real-final.log」基準由 M5b.1 校準取代(補跑掛帳與 M5e 真實 run 合併)。
 - 指令:`printf 'literature review agent\n' | uv run --env-file .env python -m literature_review.main`;run 後 `data/papers/` 還原、log 存 `.omo/evidence/m5e-real-final.log`。
-- 判定:usable ≥ 2(打破 1 篇天花板)且天花板 rel > m5b run 即通過;低於則記錄並決定後續(閾值/M5c 多來源)。
+- 判定:usable ≥ 2(打破 1 篇天花板)且天花板 rel > 8.5(M5b.1 校準)即通過;低於則記錄並決定後續(閾值/M5c 多來源)。
 
 ## 動工前討論定案紀錄(2026-09-09 全部拍板)
 
