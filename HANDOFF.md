@@ -233,6 +233,19 @@ M5b.1 回應使用者 5 樣本人類基準（①5/6 ②8/8 ③2/9 ④8/8 ⑤4/7�
 - **5 樣本 |Δrel| 平均誤差無改善**（B4 3.60→3.80、B1 3.40→3.40）；|Δqual| B4 1.40 持平、B1 1.40→1.20。**特別檢查未過（Success criterion 4）**：樣本③ AIDE rel 未顯著下降（M5b B1=8/B4=9 → M5b.1 B1=9/B4=8，人類 2）；樣本⑤ protocol rel 未下降（B1=8/B4=10 → B1=9/B4=9，人類 4）。檢討：8B 模型遵從長 prompt 能力有限，「主體內容」判斷太抽象、embedding top-32 已選入相關 chunk。
 - **B 決策（只建議不拍板）**：依計畫判準（|Δrel| 差 0.40 <0.5 且 B4 repairs 顯著少）→ 案 A（建議）維持 B=4；案 B 改 B=1（現數據不支持）。**閾值**：新天花板 8.5 ≥ 7 → 建議維持 M5b 案 (b) include 7/consider 6；但 ③⑤ 高估未解，收進的 include 可能是高估論文，建議以 Todo 6 真實 run 複核。
 
+## M5e — 候選池升級：LLM 摘要篩選層 + 分桶選樣 + gap follow-up（2026-09-10）
+
+M5e 回應「1 篇 usable 是候選池組成問題」：在 search/rank 與 download 之間插入一次 LLM 篩選（key1，與 planner 同 client），用分桶選樣壓縮輸入、keep/maybe 三層級排序下載、gap 分析補 follow-up 檢索。Gemini 全包（planner/screening=key1，notes/synthesis=key2）；RCS 不動（仍 Ollama、B=4）；`SearchPlan` 契約不動（object 保持 planner 輸出原樣）。
+
+- 新增 `literature_review/screening.py`：`search_samples`（B 桶 rank 前 50% + 近 1-2 年；A 桶前 20% + 引用前 30%；C 桶分位 40-70% + 引用前 30%，比例 ~25/50/25）、`build_screening_prompt`（全部 query 候選合併單一 prompt、`## Query N`＋`### [n] year title`＋摘要、**只送 title 不送 id**，回傳 index 制防竄改）、`build_follow_up_queries`（gap 分析 cap 3 條、`generated_by="gap-follow-up"`、帶 `reason`，輸出為 `FollowUpProposal` 清單）、`screen_candidates(client, ..., parse=...)`（共用 `llm_evidence.generate_validated` 一次呼叫＋一次 repair；resolution 錯誤——unknown title/重複 title/缺篇——併入 parse 後亦吃一次 repair budget）。決策集合 `ScreeningDecision`：query/title/recommendation（keep/maybe/exclude）/rationale。
+- `literature_review/main.py`：`run_end_to_end` 新參數 `client_screen`（缺設 None＝legacy per-query 路徑維持原行為）；**screening 路徑**＝分桶選樣 → 單一 merged `screen_candidates` call → gap follow-up 迴圈（至多 1 輪，provenance 記錄於 `follow_ups`）→ **單一 merged download**（`stats_per_query` 僅 1 筆）；`--dry-run`／無 key 時篩選層跳過（`use_screening = client_screen is not None and not dry_run`）。`sample_candidates(ranked, per_query_target=24)`。
+- `literature_review/pdf_downloader.py`：`download_and_backfill` 新增 `priority_groups` 參數——`keep` 組**全下**（不限 target_n，品質已由篩選層把關、下游 RCS 過濾）、`maybe` 組僅補位至 target_n（組內 rank 序）；缺省走原 top-N backfill。
+- `literature_review/planning.py`：planner prompt 維度詞庫內部化（3-5 條 query 覆蓋不同面向/同義詞變體；契約不動）。
+- `literature_review/pipeline.py`：`_notes_pacing_seconds()` 讀 `NOTES_PACING_SECONDS` env（預設 **"4"**、非數字或負值 fallback 4.0、`0` 停用）——逐篇筆記 calls 間 sleep，緩解 Gemini key2 429 頻率。
+- 測試：`tests/test_screening.py`（**10 tests**：分桶組成/邊界、prompt 格式只含 title 無 id、決策解析、缺篇/重複 title/unknown title resolution 錯誤 repair、follow-up cap）；`tests/test_pipeline.py`（+3 pacing tests）；`tests/test_main.py`（+3 M5e 接線：dry-run 傳 `client_screen` 仍跳過篩選、無 screen client 維持 legacy per-query、fake screen e2e 含 follow-up→merged download→報告 4 篇）。**248 tests OK**（`test-suite-m5e.log`）。py_compile 全 OK。
+- 真實 smoke 視配額結果：dry-run smoke 卡 OpenAlex 429 兩次（retryAfter 33-36s）後第三次成功——4 條 rule-based query、下載 5+2+3+3=13 篇、shortfall 0、`stats_per_query` 4 筆＝dry-run 維持 legacy per-query（screening 正確跳過）；log `.omo/evidence/m5e-dryrun-smoke.log`；`data/papers/` 還原 21 檔（新檔 W4318707231.pdf 移出至 `/tmp/m5e-dryrun-run/`）。
+- **Todo 5 真實 run 掛帳**（使用者 2026-09-10 裁示：修改事項清單清空前不跑整條）；判定 = usable ≥ 2 且天花板 rel > 8.5（M5b.1 校準基準）；指令與還原先例比照 M5b，log `.omo/evidence/m5e-real-final.log`。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.

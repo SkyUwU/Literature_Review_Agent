@@ -93,6 +93,39 @@ class RaisePlanClient:
         raise RuntimeError("llm plan unavailable")
 
 
+class FakeScreenClient:
+    """Screening client: keeps every candidate listed in the prompt; one follow-up on first call."""
+
+    def __init__(self, follow_up_query: str | None = None) -> None:
+        self.follow_up_query = follow_up_query
+        self.calls: list[str] = []
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        self.calls.append(prompt)
+        titles = re.findall(r"### \[\d+\] \d+ (.+)", prompt)
+        first_call = len(self.calls) == 1
+        follow_ups = []
+        if first_call and self.follow_up_query:
+            follow_ups = [
+                {
+                    "query": self.follow_up_query,
+                    "target_gap": "missing benchmark family",
+                    "reason": "fill the evaluation gap",
+                }
+            ]
+        return json.dumps(
+            {
+                "decisions": [
+                    {"title": title, "priority": "keep", "reason": "Directly relevant evidence."}
+                    for title in titles
+                ],
+                "covered_areas": ["core topic"],
+                "missing_pieces": ["benchmarks"] if follow_ups else [],
+                "follow_up_queries": follow_ups,
+            }
+        )
+
+
 class SpecialAlignedEncoder:
     """Fake encoder aligning the BGE-prefixed query with the W-special paper."""
 
@@ -447,6 +480,92 @@ class MainEntryTests(unittest.TestCase):
         self.assertNotIn("W-special", lexical_ids)
         self.assertEqual(len(embedding_ids), 5)
         self.assertEqual(len(lexical_ids), 5)
+
+    # -- M5e: screening client drives a merged keep/maybe download -------------
+
+    def test_dry_run_with_screen_client_still_skips_screening(self) -> None:
+        payloads = [
+            results_payload(record_for("W1"), record_for("W2")),
+            results_payload(record_for("W3")),
+        ]
+        screen_client = FakeScreenClient(follow_up_query="literature review agent benchmark")
+        result = run_end_to_end(
+            "literature review agent",
+            dest_dir=self.dest,
+            client_plan=FakePlanClient(2),
+            client_screen=screen_client,
+            use_llm_plan=True,
+            dry_run=True,
+            json_fetcher=FakeJsonFetcher(payloads),
+            pdf_fetcher=pdf_bytes,
+        )
+
+        self.assertEqual(screen_client.calls, [])
+        self.assertNotIn("screening", result)
+        self.assertEqual(len(result["stats_per_query"]), 2)  # legacy per-query path
+        self.assertEqual(len(result["downloads"]), 3)
+
+    def test_no_screen_client_keeps_legacy_per_query_merging(self) -> None:
+        payloads = [
+            results_payload(record_for("W1"), record_for("W2")),
+            results_payload(record_for("W3")),
+        ]
+        result = run_end_to_end(
+            "literature review agent",
+            dest_dir=self.dest,
+            client_plan=FakePlanClient(2),
+            use_llm_plan=True,
+            dry_run=True,
+            json_fetcher=FakeJsonFetcher(payloads),
+            pdf_fetcher=pdf_bytes,
+        )
+
+        self.assertNotIn("screening", result)
+        self.assertEqual(len(result["stats_per_query"]), 2)
+
+    def test_screen_client_full_run_with_follow_up(self) -> None:
+        screen_client = FakeScreenClient(follow_up_query="literature review agent benchmark")
+        payloads = [
+            results_payload(record_for("W1"), record_for("W2")),
+            results_payload(record_for("W3")),
+            results_payload(record_for("W4")),  # answered for the follow-up query
+        ]
+        synth_client = SynthesisFakeClient(("W1", "W2", "W3", "W4"))
+        with mock.patch("literature_review.extraction.PdfReader", FakePdfReader):
+            with mock.patch(
+                "literature_review.embedding_retriever.default_encoder",
+                return_value=FakeEncoder(),
+            ):
+                result = run_end_to_end(
+                    "literature review agent",
+                    dest_dir=self.dest,
+                    client_plan=FakePlanClient(2),
+                    client_synth=synth_client,
+                    client_screen=screen_client,
+                    use_llm_plan=True,
+                    dry_run=False,
+                    json_fetcher=FakeJsonFetcher(payloads),
+                    pdf_fetcher=pdf_bytes,
+                )
+
+        self.assertEqual(len(screen_client.calls), 2)  # one screening + one follow-up round
+        self.assertEqual(len(result["stats_per_query"]), 1)  # single merged download pass
+        self.assertEqual(
+            {entry["paper_id"] for entry in result["downloads"]},
+            {"W1", "W2", "W3", "W4"},
+        )
+        self.assertEqual(
+            result["follow_ups"],
+            [
+                {
+                    "query": "literature review agent benchmark",
+                    "target_gap": "missing benchmark family",
+                    "reason": "fill the evaluation gap",
+                }
+            ],
+        )
+        self.assertIsNotNone(result["screening"])
+        self.assertEqual(len(result["report"].paper_sources), 4)
 
     # -- failure path: every bad PDF aborts cleanly --------------------------
 

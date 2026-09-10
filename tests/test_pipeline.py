@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -347,3 +348,35 @@ class SynthesisPipelineTests(unittest.TestCase):
         )
         self.assertEqual([note.paper_id for note in result.paper_summaries], ["paper-1"])
         self.assertEqual([source.paper_id for source in result.paper_sources], ["paper-1"])
+
+    def _paced_run(self, notes_pacing_seconds: float) -> tuple[mock.MagicMock, object]:
+        with mock.patch("literature_review.pipeline.time.sleep") as sleep:
+            result = run_synthesis_pipeline(
+                [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)],
+                "literature review agent",
+                SynthesisFakeClient(),
+                notes_pacing_seconds=notes_pacing_seconds,
+                **self.policy_arguments(),
+            )
+        return sleep, result
+
+    def test_notes_pacing_spaces_consecutive_note_calls(self) -> None:
+        sleep, result = self._paced_run(4.0)
+        self.assertEqual(len(result.paper_summaries), 2)
+        sleep.assert_called_once_with(4.0)
+
+    def test_notes_pacing_zero_disables_sleep(self) -> None:
+        sleep, result = self._paced_run(0.0)
+        self.assertEqual(len(result.paper_summaries), 2)
+        sleep.assert_not_called()
+
+    def test_notes_pacing_env_default_is_applied_when_parameter_omitted(self) -> None:
+        with mock.patch.dict(os.environ, {"NOTES_PACING_SECONDS": "2.5"}, clear=False):
+            with mock.patch("literature_review.pipeline.time.sleep") as sleep:
+                run_synthesis_pipeline(
+                    [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)],
+                    "literature review agent",
+                    SynthesisFakeClient(),
+                    **self.policy_arguments(),
+                )
+            sleep.assert_called_once_with(2.5)

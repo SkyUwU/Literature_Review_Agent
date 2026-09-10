@@ -1,16 +1,20 @@
 """End-to-end entry point: query -> plan -> search -> rank -> download -> synthesize.
 
 One interactive query produces a :class:`SearchPlan`; every planned query is then
-searched, ranked, and downloaded independently (no cross-query merging). A shared
-``already_downloaded`` set deduplicates across queries: a paper whose id is
-already in the set counts as satisfied without writing a new file and without
-triggering a backfill. Real runs rank papers by bge-small-en-v1.5 embedding
-similarity to title+abstract (plus citation/recency) with hard-coded limits
-``LIMIT=100`` / ``TOTAL_TARGET=20`` / ``TOP_K_CHUNKS=32``. The LLM planner is the
-default (``GEMINI_API_KEY``); ``--rule-based`` is the escape hatch, and
-``--dry-run`` always forces the deterministic rule-based plan with lexical
-ranking (no embedding model), so a dry run stops after downloads with no text
-extraction, embedding encoder, LLM, or API key touched.
+searched and ranked. With a screening client (M5e, key1) each query's candidates
+are bucket-sampled, screened in one LLM call, optionally extended by one gap
+follow-up round, and downloaded in a single merged keep/maybe pass against
+``TOTAL_TARGET``; without a screen client each query is downloaded independently
+with ``target_n = ceil(TOTAL_TARGET / query_count)`` (legacy per-query path). A
+shared ``already_downloaded`` set deduplicates in both paths: a paper whose id
+is already in the set counts as satisfied without writing a new file and
+without triggering a backfill. Real runs rank papers by bge-small-en-v1.5
+embedding similarity to title+abstract (plus citation/recency) with hard-coded
+limits ``LIMIT=100`` / ``TOTAL_TARGET=20`` / ``TOP_K_CHUNKS=32``. The LLM
+planner is the default (``GEMINI_API_KEY``); ``--rule-based`` is the escape
+hatch, and ``--dry-run`` always forces the deterministic rule-based plan with
+lexical ranking (no embedding model), so a dry run stops after downloads with
+no text extraction, embedding encoder, LLM, or API key touched.
 """
 
 from __future__ import annotations
@@ -31,10 +35,12 @@ from literature_review.ollama_client import OllamaJsonClient
 from literature_review.models import (
     EvidenceRetrievalPolicy,
     FullTextDocument,
+    RankedPaper,
     SearchRequest,
 )
 from literature_review.pdf_downloader import Fetcher, default_fetcher, download_and_backfill
 from literature_review.planning import create_llm_plan, create_rule_based_plan
+from literature_review.screening import ScreeningResult, sample_candidates, screen_candidates
 from literature_review.synthesis import SynthesisError
 from literature_review.ranking import FilterPolicy, filter_and_rank
 
@@ -80,6 +86,32 @@ def _print_plan(plan: object) -> None:
     )
 
 
+def _search_and_rank(
+    query_text: str,
+    *,
+    json_fetcher: search.JsonFetcher,
+    encoder: Encoder | None,
+    paper_meta: dict[str, tuple[int | None, str | None]],
+) -> list[RankedPaper]:
+    """Search one query and rank its candidates, recording paper metadata.
+
+    Returns the ranked paper list; shared by the legacy per-query download path,
+    the M5e bucket-sampling path, and the gap follow-up round.
+    """
+    request = SearchRequest(query=query_text, limit=LIMIT, year_from=MIN_YEAR)
+    response = search.search_papers(request, json_fetcher=json_fetcher)
+    ranked = filter_and_rank(
+        response, FilterPolicy(min_year=MIN_YEAR), encoder=encoder
+    )
+    paper_meta.update(
+        {
+            item.paper.paper_id: (item.paper.citation_count, item.paper.venue)
+            for item in ranked.ranked_papers
+        }
+    )
+    return ranked.ranked_papers
+
+
 def run_end_to_end(
     query: str,
     *,
@@ -87,6 +119,7 @@ def run_end_to_end(
     client_plan: JsonGenerationClient | None = None,
     client_synth: JsonGenerationClient | None = None,
     client_rcs: JsonGenerationClient | None = None,
+    client_screen: JsonGenerationClient | None = None,
     use_llm_plan: bool = True,
     dry_run: bool = False,
     json_fetcher: search.JsonFetcher = search.fetch_json,
@@ -110,10 +143,18 @@ def run_end_to_end(
     the default local encoder is built once and shared across planned queries.
     All external I/O (OpenAlex JSON, PDF bytes, LLM) is injectable so tests never
     touch the real network or an API key.
+
+    When ``client_screen`` is provided (M5e, reuse the key1 planner client): every
+    planned query is bucket-sampled (``sample_candidates``), all samples go into
+    one LLM screening + gap call (``screen_candidates``), the gap may produce at
+    most one follow-up round of new queries that are screened the same way, and
+    the final keep/maybe decisions drive a single merged download against
+    ``TOTAL_TARGET`` (keep downloaded entirely, maybe fills the remainder). With
+    ``dry_run`` (or a missing screen client) screening is skipped and the legacy
+    per-query download path runs unchanged.
     """
     plan = _make_plan(query, use_llm_plan=use_llm_plan, client_plan=client_plan)
     _print_plan(plan)
-    target_n = math.ceil(TOTAL_TARGET / len(plan.queries))
     already_downloaded: set[str] = set()
     paper_meta: dict[str, tuple[int | None, str | None]] = {}
     downloads: list[dict[str, str]] = []
@@ -125,24 +166,77 @@ def run_end_to_end(
         else (encoder if encoder is not None else embedding_retriever.default_encoder())
     )
 
-    for planned in plan.queries:
-        request = SearchRequest(query=planned.query, limit=LIMIT, year_from=MIN_YEAR)
-        response = search.search_papers(request, json_fetcher=json_fetcher)
-        ranked = filter_and_rank(
-            response, FilterPolicy(min_year=MIN_YEAR), encoder=effective_encoder
-        )
-        paper_meta.update(
-            {
-                item.paper.paper_id: (item.paper.citation_count, item.paper.venue)
-                for item in ranked.ranked_papers
-            }
-        )
+    use_screening = client_screen is not None and not dry_run
+    screening_result: ScreeningResult | None = None
+    follow_ups: list[dict[str, str]] = []
+
+    if use_screening:
+        query_candidates: dict[str, list[RankedPaper]] = {}
+        for planned in plan.queries:
+            query_candidates[planned.query] = sample_candidates(
+                _search_and_rank(
+                    planned.query,
+                    json_fetcher=json_fetcher,
+                    encoder=effective_encoder,
+                    paper_meta=paper_meta,
+                )
+            )
+        screening_result = screen_candidates(query_candidates, client_screen)
+
+        follow_up_candidates: dict[str, list[RankedPaper]] = {}
+        if screening_result.gap.follow_up_queries:
+            for fu in screening_result.gap.follow_up_queries:
+                follow_ups.append(
+                    {
+                        "query": fu.query,
+                        "target_gap": fu.target_gap,
+                        "reason": fu.reason,
+                    }
+                )
+                follow_up_candidates[fu.query] = sample_candidates(
+                    _search_and_rank(
+                        fu.query,
+                        json_fetcher=json_fetcher,
+                        encoder=effective_encoder,
+                        paper_meta=paper_meta,
+                    )
+                )
+            follow_up_screening = screen_candidates(follow_up_candidates, client_screen)
+            for query, decisions in follow_up_screening.decisions.items():
+                screening_result.decisions.setdefault(query, []).extend(decisions)
+
+        ranked_by_id: dict[str, RankedPaper] = {}
+        for candidates in query_candidates.values():
+            for item in candidates:
+                ranked_by_id.setdefault(item.paper.paper_id, item)
+        for candidates in follow_up_candidates.values():
+            for item in candidates:
+                ranked_by_id.setdefault(item.paper.paper_id, item)
+
+        keep_ranked: list[RankedPaper] = []
+        maybe_ranked: list[RankedPaper] = []
+        seen_paper_ids: set[str] = set()
+        for decisions in screening_result.decisions.values():
+            for decision in decisions:
+                if decision.paper_id in seen_paper_ids:
+                    continue
+                item = ranked_by_id.get(decision.paper_id)
+                if item is None:
+                    # defensive: screening decisions resolve from the same pool
+                    continue
+                seen_paper_ids.add(decision.paper_id)
+                if decision.priority == "keep":
+                    keep_ranked.append(item)
+                elif decision.priority == "maybe":
+                    maybe_ranked.append(item)
+
         result = download_and_backfill(
-            ranked.ranked_papers,
+            [],
             dest_dir,
-            target_n,
+            TOTAL_TARGET,
             fetcher=fetcher,
             already_downloaded=already_downloaded,
+            priority_groups={"keep": keep_ranked, "maybe": maybe_ranked},
         )
         stats_per_query.append(result.stats.to_dict())
         downloads.extend(
@@ -151,14 +245,41 @@ def run_end_to_end(
                 result.downloaded_paper_ids, result.downloaded_paths, strict=False
             )
         )
+    else:
+        target_n = math.ceil(TOTAL_TARGET / len(plan.queries))
+        for planned in plan.queries:
+            ranked_papers = _search_and_rank(
+                planned.query,
+                json_fetcher=json_fetcher,
+                encoder=effective_encoder,
+                paper_meta=paper_meta,
+            )
+            result = download_and_backfill(
+                ranked_papers,
+                dest_dir,
+                target_n,
+                fetcher=fetcher,
+                already_downloaded=already_downloaded,
+            )
+            stats_per_query.append(result.stats.to_dict())
+            downloads.extend(
+                {"paper_id": paper_id, "path": str(path)}
+                for paper_id, path in zip(
+                    result.downloaded_paper_ids, result.downloaded_paths, strict=False
+                )
+            )
 
     if dry_run:
-        return {
+        output: dict[str, object] = {
             "plan": plan,
             "downloads": downloads,
             "stats_per_query": stats_per_query,
             "dry_run": True,
         }
+        if screening_result is not None:
+            output["screening"] = screening_result.model_dump(mode="json")
+            output["follow_ups"] = follow_ups
+        return output
 
     if client_synth is None:
         raise ValueError("client_synth is required for a non-dry-run end-to-end run.")
@@ -191,6 +312,12 @@ def run_end_to_end(
         "stats_per_query": stats_per_query,
         "failed_extractions": failed_extractions,
         "report": report,
+        "screening": (
+            screening_result.model_dump(mode="json")
+            if screening_result is not None
+            else None
+        ),
+        "follow_ups": follow_ups,
         "dry_run": False,
     }
 
@@ -270,6 +397,7 @@ def main() -> None:
             client_plan=client_plan,
             client_synth=client_synth,
             client_rcs=client_rcs,
+            client_screen=client_plan,
             use_llm_plan=not arguments.rule_based and not arguments.dry_run,
             dry_run=arguments.dry_run,
         )

@@ -5,6 +5,7 @@ import glob
 import json
 import os
 import sys
+import time
 
 try:
     from langfuse import get_client
@@ -25,6 +26,7 @@ from literature_review.models import (
     EvidenceRetrievalResponse,
     EvidenceRerankResponse,
     FullTextDocument,
+    PaperSummary,
     SynthesisResponse,
 )
 from literature_review.synthesis import SynthesisError, build_coverage_packs, summarize_paper_notes, synthesize_report
@@ -37,6 +39,23 @@ def _rcs_batch_size() -> int:
     except ValueError:
         return 4
     return value if value >= 1 else 4
+
+
+def _notes_pacing_seconds() -> float:
+    """Seconds to sleep between consecutive per-paper note calls (key2 rate guard).
+
+    Gemini free-tier is limited to 20 generate_content requests per minute per
+    model; the notes stage calls the LLM once per paper in a tight loop, so a
+    multi-paper run structurally exceeds that window (M5b Todo 6 real-run
+    evidence: two runs both failed at ``summarize_paper_notes`` with a short
+    429). This pacing spreads the calls across minutes. Zero disables it.
+    """
+    raw = os.getenv("NOTES_PACING_SECONDS", "4")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 4.0
+    return value if value >= 0 else 4.0
 
 
 def run_evidence_pipeline(
@@ -127,6 +146,7 @@ def run_synthesis_pipeline(
     coverage_policy: CoveragePackPolicy = CoveragePackPolicy(),
     aggregation_policy: EvidenceAggregationPolicy = EvidenceAggregationPolicy(),
     encoder: Encoder | None = None,
+    notes_pacing_seconds: float | None = None,
 ) -> SynthesisResponse:
     """Run retrieval, LLM re-ranking, aggregation, notes, and cited synthesis.
 
@@ -136,6 +156,9 @@ def run_synthesis_pipeline(
     existing single-client behavior / fallback escape hatch).
     ``paper_meta`` carries each paper's ``(citation_count, venue)`` pair into the
     RCS prompt as reference signals (M5b); unknown papers get ``n/a`` values.
+    ``notes_pacing_seconds`` spaces consecutive per-paper note calls (defaults to
+    the ``NOTES_PACING_SECONDS`` env value, ~4s; see ``_notes_pacing_seconds``);
+    passing 0 disables the pacing for tests.
     """
     prepared = _prepare_documents(documents, chunk_policy)
     all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
@@ -155,11 +178,18 @@ def run_synthesis_pipeline(
     coverage_packs = build_coverage_packs(
         [chunk for _, chunks in prepared for chunk in chunks], coverage_policy
     )
-    paper_summaries = [
-        summarize_paper_notes(document.paper_id, chunks, client, coverage_policy)
-        for document, chunks in prepared
-        if document.paper_id in usable_ids
-    ]
+    pacing = (
+        _notes_pacing_seconds() if notes_pacing_seconds is None else notes_pacing_seconds
+    )
+    paper_summaries: list[PaperSummary] = []
+    for position, (document, chunks) in enumerate(
+        (item for item in prepared if item[0].paper_id in usable_ids)
+    ):
+        if position > 0 and pacing > 0:
+            time.sleep(pacing)
+        paper_summaries.append(
+            summarize_paper_notes(document.paper_id, chunks, client, coverage_policy)
+        )
     result = synthesize_report(assessment_response, coverage_packs, paper_summaries, client)
     source_paths = {document.paper_id: document.source_path for document, _ in prepared}
     resolved_sources = [

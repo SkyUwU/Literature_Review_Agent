@@ -140,6 +140,7 @@ def download_and_backfill(
     fetcher: Fetcher = default_fetcher,
     stats_path: Path | None = None,
     already_downloaded: set[str] | None = None,
+    priority_groups: dict[str, list[RankedPaper]] | None = None,
 ) -> DownloadResult:
     """Try to download the top ``target_n`` ranked papers, backfilling failures.
 
@@ -151,25 +152,26 @@ def download_and_backfill(
     count as satisfied (``duplicate_reused``) without writing a new file and
     without triggering a backfill; successfully downloaded ids are added back.
     When ``stats_path`` is given, the OA-coverage statistics are written as JSON.
+
+    When ``priority_groups`` is given (M5e), the ``"keep"`` group is downloaded in
+    its entirety — the LLM screening layer already judged those papers high
+    quality, so they may exceed ``target_n`` (downstream RCS filters the rest) —
+    and the ``"maybe"`` group is used only to fill the total count up to
+    ``target_n`` (rank order within the small filler group). The plain
+    ``ranked_papers`` path keeps the original top-N backfill behaviour untouched.
     """
     result = DownloadResult()
     stats = result.stats
     stats.requested = target_n
-    stats.candidates_available = len(ranked_papers)
-    stats.with_oa_link = sum(
-        1 for ranked in ranked_papers if ranked.paper.open_access_pdf_url is not None
-    )
 
-    for ranked in ranked_papers:
-        if stats.downloaded + stats.duplicate_reused >= target_n:
-            break
+    def _attempt(ranked: RankedPaper) -> None:
         if already_downloaded is not None and ranked.paper.paper_id in already_downloaded:
             stats.duplicate_reused += 1
-            continue
+            return
         if ranked.paper.open_access_pdf_url is None:
             result.failed_paper_ids.append(ranked.paper.paper_id)
             stats.failed_no_oa += 1
-            continue
+            return
         stats.attempted += 1
         try:
             path = download_pdf(ranked.paper, dest_dir, fetcher=fetcher)
@@ -184,6 +186,30 @@ def download_and_backfill(
         except Exception as error:
             result.failed_paper_ids.append(ranked.paper.paper_id)
             stats.failed_other += 1
+
+    if priority_groups is None:
+        stats.candidates_available = len(ranked_papers)
+        stats.with_oa_link = sum(
+            1 for ranked in ranked_papers if ranked.paper.open_access_pdf_url is not None
+        )
+        for ranked in ranked_papers:
+            if stats.downloaded + stats.duplicate_reused >= target_n:
+                break
+            _attempt(ranked)
+    else:
+        keep_papers = priority_groups.get("keep", [])
+        maybe_papers = priority_groups.get("maybe", [])
+        combined = keep_papers + maybe_papers
+        stats.candidates_available = len(combined)
+        stats.with_oa_link = sum(
+            1 for ranked in combined if ranked.paper.open_access_pdf_url is not None
+        )
+        for ranked in keep_papers:
+            _attempt(ranked)
+        for ranked in maybe_papers:
+            if stats.downloaded + stats.duplicate_reused >= target_n:
+                break
+            _attempt(ranked)
 
     stats.shortfall = max(0, target_n - stats.downloaded - stats.duplicate_reused)
     if stats_path is not None:

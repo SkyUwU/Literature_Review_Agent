@@ -126,6 +126,16 @@ class LlmPlanTests(unittest.TestCase):
         self.assertIn("synonyms, hyponyms, and alternative phrasings", prompt)
         self.assertIn("Stay on-topic", prompt)
 
+    def test_llm_prompt_m5e_requires_three_dimensions_and_keyword_pools(self) -> None:
+        prompt = build_llm_plan_prompt("literature review agent")
+
+        self.assertIn("3 complementary research dimensions", prompt)
+        self.assertIn("(1) the core task name", prompt)
+        self.assertIn("(2) key methodology", prompt)
+        self.assertIn("(3) evaluation benchmarks", prompt)
+        self.assertIn("keyword pool for each dimension", prompt)
+        self.assertIn("combine terms taken from different dimensions", prompt)
+
     def test_t_llm_1_valid_plan_returned(self) -> None:
         client = FakePlanClient([json.dumps(valid_plan())])
 
