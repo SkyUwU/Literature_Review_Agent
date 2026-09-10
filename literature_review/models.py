@@ -141,12 +141,20 @@ class ChunkPolicy(BaseModel):
 
 
 class EvidenceChunk(BaseModel):
-    """A page-bounded excerpt available for relevance ranking and citation."""
+    """A page-bounded excerpt available for relevance ranking and citation.
+
+    ``section`` carries the markdown heading path (e.g. ``"Section > Subsection"``)
+    when the chunk came from the section-aware splitter; legacy chunks leave it
+    None. Page bounds are optional: the markdown converter supplies a page
+    number when available, otherwise the caller records None (no page-recovery
+    engineering; sorting treats None as 0).
+    """
 
     chunk_id: str
     paper_id: str
-    page_start: int = Field(ge=1)
-    page_end: int = Field(ge=1)
+    section: str | None = Field(default=None, description="Markdown heading path, e.g. 'Section > Subsection'.")
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
     text: str = Field(min_length=20)
 
 
@@ -204,8 +212,8 @@ class EvidenceSummary(LlmEvidenceAssessment):
     """LLM assessment enriched with trusted local evidence provenance."""
 
     paper_id: str
-    page_start: int = Field(ge=1)
-    page_end: int = Field(ge=1)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
 
 
 class EvidenceRerankResponse(BaseModel):
@@ -222,8 +230,8 @@ class EvidenceCitation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     chunk_id: str
-    page_start: int = Field(ge=1)
-    page_end: int = Field(ge=1)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
     summary: str = Field(min_length=20)
     relevance_score: int = Field(ge=1, le=10)
     evidence_quality_score: int = Field(ge=1, le=10)
@@ -301,8 +309,8 @@ class ChunkReference(BaseModel):
 
     chunk_id: str
     paper_id: str
-    page_start: int = Field(ge=1)
-    page_end: int = Field(ge=1)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
     quote: str = Field(min_length=20)
 
 

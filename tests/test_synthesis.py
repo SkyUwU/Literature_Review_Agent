@@ -19,6 +19,7 @@ from literature_review.models import (
     PaperSource,
     PaperSummary,
 )
+from literature_review.coverage import classify_chunk, drop_noise_sections
 from literature_review.synthesis import (
     SynthesisError,
     build_coverage_packs,
@@ -617,6 +618,94 @@ class LlmSynthesisReportTests(unittest.TestCase):
 
         with self.assertRaises(SynthesisError):
             synthesize_report(response, packs, [note], FakeSynthesisClient(report, [valid_direction_payload()]))
+
+
+class SectionClassificationTests(unittest.TestCase):
+    """classify_chunk: section heading first, legacy text fallback."""
+
+    def _chunk(self, section: str | None, text: str = "A sufficiently long chunk text for the section classification test.") -> EvidenceChunk:
+        return EvidenceChunk(chunk_id="p1-c1", paper_id="p1", section=section, text=text)
+
+    def test_recognized_sections_map_to_priorities(self) -> None:
+        cases = [
+            ("**Paper** > **7 Method**", (7, "method")),
+            ("**Paper** > **4 Experiments**", (5, "experiments")),
+            ("**Paper** > **2 Limitations**", (2, "limitations")),
+            ("**Paper** > **References**", (14, "references")),
+            ("**Paper** > **Bibliography**", (14, "references")),
+            ("**Paper** > **Acknowledgements**", (14, "acknowledgments")),
+            ("**Paper** > **1 Abstract**", (1, "abstract")),
+            ("**Paper** > **Appendix B**", (13, "appendix")),
+        ]
+        for section, expected in cases:
+            with self.subTest(section=section):
+                self.assertEqual(classify_chunk(self._chunk(section)), expected)
+
+    def test_unrecognized_section_falls_to_other(self) -> None:
+        self.assertEqual(
+            classify_chunk(self._chunk("**Paper** > **12 Case Studies**")),
+            (12, "other"),
+        )
+
+    def test_no_section_uses_legacy_text_classification(self) -> None:
+        self.assertEqual(
+            classify_chunk(self._chunk(None, "Method We rank bounded evidence chunks deterministically for the review.")),
+            (7, "method"),
+        )
+        self.assertEqual(
+            classify_chunk(self._chunk(None, "Plain paragraph with no recognizable section header inside it at all.")),
+            (12, "other"),
+        )
+
+
+class DropNoiseSectionsTests(unittest.TestCase):
+    """Blacklist filter for chapter-aware chunks."""
+
+    def _chunk(self, paper_id: str, section: str | None) -> EvidenceChunk:
+        return EvidenceChunk(
+            chunk_id=f"{paper_id}-c1",
+            paper_id=paper_id,
+            section=section,
+            text="A sufficiently long chunk text for the noise filter classification test.",
+        )
+
+    def test_drops_references_acknowledgments_and_appendix(self) -> None:
+        chunks = [
+            self._chunk("p1", "**Paper** > **3 Method**"),
+            self._chunk("p2", "**Paper** > **References**"),
+            self._chunk("p3", "**Paper** > **Acknowledgements**"),
+            self._chunk("p4", "**Paper** > **Appendix A**"),
+        ]
+
+        kept = drop_noise_sections(chunks)
+
+        self.assertEqual([chunk.paper_id for chunk in kept], ["p1"])
+
+    def test_keeps_all_core_and_other_sections(self) -> None:
+        chunks = [
+            self._chunk("p1", "**Paper** > **1 Introduction**"),
+            self._chunk("p2", "**Paper** > **4 Results**"),
+            self._chunk("p3", "**Paper** > **9 Future Work**"),
+            self._chunk("p4", "**Paper** > **12 Survey of Tools**"),
+        ]
+
+        kept = drop_noise_sections(chunks)
+
+        self.assertEqual([chunk.paper_id for chunk in kept], ["p1", "p2", "p3", "p4"])
+
+    def test_keeps_chunks_without_section(self) -> None:
+        chunks = [self._chunk("p1", None)]
+
+        kept = drop_noise_sections(chunks)
+
+        self.assertEqual([chunk.paper_id for chunk in kept], ["p1"])
+
+    def test_drop_appendix_false_keeps_appendix(self) -> None:
+        chunks = [self._chunk("p1", "**Paper** > **Appendix A**")]
+
+        kept = drop_noise_sections(chunks, drop_appendix=False)
+
+        self.assertEqual([chunk.paper_id for chunk in kept], ["p1"])
 
 
 if __name__ == "__main__":

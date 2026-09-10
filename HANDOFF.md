@@ -246,6 +246,19 @@ M5e 回應「1 篇 usable 是候選池組成問題」：在 search/rank 與 down
 - 真實 smoke 視配額結果：dry-run smoke 卡 OpenAlex 429 兩次（retryAfter 33-36s）後第三次成功——4 條 rule-based query、下載 5+2+3+3=13 篇、shortfall 0、`stats_per_query` 4 筆＝dry-run 維持 legacy per-query（screening 正確跳過）；log `.omo/evidence/m5e-dryrun-smoke.log`；`data/papers/` 還原 21 檔（新檔 W4318707231.pdf 移出至 `/tmp/m5e-dryrun-run/`）。
 - **Todo 5 真實 run 掛帳**（使用者 2026-09-10 裁示：修改事項清單清空前不跑整條）；判定 = usable ≥ 2 且天花板 rel > 8.5（M5b.1 校準基準）；指令與還原先例比照 M5b，log `.omo/evidence/m5e-real-final.log`。
 
+## C2a — PDF 抽取換血 pymupdf4llm + 章節感知切分（2026-09-10）
+
+C2a 把 PDF 抽取從 pypdf 裸文字換成 pymupdf4llm（markdown 輸出，表格完整），並新增章節感知的證據切分——治療 K3c/A2「表格破碎→LLM 保守→低估」病根（抽好 vs 硬看）。C2a 不接 pipeline（接線 = C2b），框架層全相容。
+
+- `pyproject.toml`/`uv.lock`：新增 `pymupdf`、`pymupdf4llm`、`langchain-text-splitters`。
+- `literature_review/extraction.py`：`extract_pdf_text` 主路徑改用 `pymupdf4llm.to_markdown(page_chunks=True)`（`extraction_method="pymupdf4llm"`，頁號取自 per-page metadata,1-based）；失敗時 stderr 警告並 fallback 原 pypdf（`extraction_method="pypdf"`）。簽名不變、`FullTextDocument`/`PageText` 保留。**已知限制**：`A Additional...` 型字母前綴 appendix 標題不被 `_APPENDIX_REGEX`（數字前綴限定）識別，維持舊行為。
+- `literature_review/models.py`：`EvidenceChunk` 新欄位 `section: str | None`（markdown heading path，如 `"Title > 1 Introduction"`）；`page_start`/`page_end`、`EvidenceSummary`/`EvidenceCitation`/`ChunkReference` 的 page 欄位改 `int | None`（不做頁碼回推工程，現成才填）。
+- `literature_review/evidence.py`：新增 `chapter_chunk_document(document, policy)`——`MarkdownHeaderTextSplitter` 三層（`#/##/###`）切分、section 帶完整 heading path、**段落優先細切**（空行分組、累積至 ≤ `max_words`=350、表格 block 整體保留、超長純文字段落才滑動視窗兜底）、chunk_id = `{paper_id}-c{n}`（全域連續，不再嵌 page）。**實作發現**：`MarkdownHeaderTextSplitter` 會把段落間 `\n\n` 正規化成 `  \n`（硬換行），`_split_section_paragraphs` 需先 `_HARD_BREAK_REGEX` 還原，否則整段變單一 chunk 走滑動視窗路徑。`chunk_document` 舊函式完整保留（legacy/compare，section=None、舊 chunk_id 格式）。
+- `literature_review/coverage.py`：`_SECTION_HEADERS` 加入 acknowledgments（priority 14，與 references 同級最低）、新增 `classify_chunk(chunk)`（有 section → 最後一級章節名對照總表；無 section → 舊 `classify_section(text)`）、`_classify_heading` 單一來源、`_select_pack`/`_region_priority` 改用 `classify_chunk` + page `or 0` 相容（references/acknowledgments/appendix 偵測 section 優先）。新增黑名單工具 `drop_noise_sections(chunks, *, drop_appendix=True)`——只丟 references/acknowledgments（appendix 可選），其餘全收、無 section chunk 不誤殺；分類判定與 `classify_chunk` 共用。
+- 測試：`tests/test_evidence.py`（+8：heading path 繼承、chunk_id 全域連續、無標題 section=None、page None、段落優先不破界、表格 block 保留、滑動兜底、overlap 拒絕）；`tests/test_synthesis.py`（+7：classify_chunk 帶/無 section、drop_noise_sections 丟/留/不誤殺、drop_appendix 開關）；`tests/test_extraction.py`（+1：pymupdf 合成表格 PDF fixture sanity check）。**264 tests OK**（248 → +16），log `.omo/evidence/c2a-tests.log`。
+- 證據：`.omo/evidence/c2a-table-compare.md`（真實樣本 W3195625625 表格頁：舊 pypdf 破碎 vs 新完整 markdown 表格）；`.omo/evidence/c2a-chapter-smoke.md`（3 真實樣本端到端：chunks 76/74/69、每篇 References 黑名單識別、表格 chunk 帶 `|` 行、chunk_id 全域連續、無標題 PDF 自動標題偵測有效）。樣本 `/tmp/c2a-poc/`（W3195625625 有書籤、ReseachAgent 無書籤、PaperQA2 有書籤），`data/papers/` 21 檔未動。
+- **待辦**：commit/push 由使用者親做（指令見計畫檔 Commit strategy，兩筆 + push）；C2b（功能性分數評分改版）計畫為下一里程碑。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.
