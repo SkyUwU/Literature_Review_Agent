@@ -70,6 +70,7 @@ M5a 診斷定案:「1 篇 usable」是**天花板約束**不是閾值約束—�
 - 對照基準:M5b.1 校準統計(天花板 rel 8.5、include 1-2、B=4)+ 歷史 run(usable=1,天花板 5.0-6.6)——原「m5b-real-final.log」基準由 M5b.1 校準取代(補跑掛帳與 M5e 真實 run 合併)。
 - 指令:`printf 'literature review agent\n' | uv run --env-file .env python -m literature_review.main`;run 後 `data/papers/` 還原、log 存 `.omo/evidence/m5e-real-final.log`。
 - 判定:usable ≥ 2(打破 1 篇天花板)且天花板 rel > 8.5(M5b.1 校準)即通過;低於則記錄並決定後續(閾值/M5c 多來源)。
+- **「keep 但 exclude」衝突集合抽查(2026-09-10 使用者裁示,必做)**:M5e keep 卻被下游 RCS 排除的論文,列清單人工抽查——分辨「M5e 選錯(篩選太寬)」vs「RCS 誤殺(下游缺陷)」;此集合是 M5e 最有價值的產出,也是 C/FU 論文「有用但 rel 中等」是否被現行二維閾值抹殺的實證。**注意:C2 之後報告引用單位改 claim(非 chunk),抽查/統計的引用單位屆時同步調整。「價值實現率」提案已放棄**(被 RCS 排除的論文進不了報告,實現率恆 0,不可當判準)。
 
 ## 動工前討論定案紀錄(2026-09-09 全部拍板)
 
