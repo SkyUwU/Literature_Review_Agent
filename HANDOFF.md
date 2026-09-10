@@ -223,6 +223,16 @@ M5b 回應 M6 校準發現的 5 個病徵（2026-09-09 定案）：schema 欄位
 - 校準（Todo 5，免費全 Ollama）：`data/papers/` 21 檔基準、20 可用文件 32 chunks、同 M6 設定。**B=1 vs B=4**：B=1 32 chunks/48 calls/**16 repairs**（竄改率 50%，掃描 7/14 batches 回 '2'/'A1'/'C1'——無參照漂移實證）；B=4 32 chunks/10 calls/**2 repairs**（穩定）。**B 定案 = B=4**（計畫判準：B=1 有無參照漂移 → 回 B=4）。**10 分比例 15/32（M6）→ B=4 3/32 / B=1 1/32**——A9/A10 分帶收斂有效。論文層天花板 9.2（M6）→ 7.8-7.9；include 0 / consider 9-10 / exclude 0-1（M6 為 2/5/3）——天花板 < include 8 → **閾值決策懸置**（建議 include 8→7 或維持，待使用者 5 樣本抽查裁定；決策文件 `.omo/evidence/m5b-calibration.md`，留待填欄位）。
 - 真實 run（Todo 6，🔄 掛帳——非 Gemini 配額，是 **OpenAlex 429**）：Gemini 兩 key 配額探測皆可用（35s/14.5s）；兩次嘗試（retryAfter 39s/31s 各等後重試）皆被 OpenAlex「Anonymous search is temporarily rate-limited」429 中斷（外部 API 暫態負載、非 code）；依計畫「至多 1 次嘗試 + 1 次 retry；超限即掛帳」→ **Todo 6 掛帳**。`data/papers/` 已還原 21 檔基準（run1 的 3 個新 `W*.pdf` 移出至 `/tmp/m5b-partial-run/`）。log：`.omo/evidence/m5b-real-final.log`（run1）+ `m5b-real-retry.log`（run2）。**殘餘（待 OpenAlex 負載恢復續跑）**：完整 run 一次（M5b 端到端 + M6 Todo 5 關閉 + M5a 下游數據），指令 `printf 'literature review agent\n' | uv run --env-file .env python -m literature_review.main`，跑完移出新 PDF 還原，log 存 `.omo/evidence/m5b-real-final.log`。
 
+## M5b.1 — RCS prompt 小修：5 段指示（子主題定位/反污染/主題混雜/獨立性/metadata 用法）（2026-09-10）
+
+M5b.1 回應使用者 5 樣本人類基準（①5/6 ②8/8 ③2/9 ④8/8 ⑤4/7）揭露的 rel 系統性錯誤——③資料豐富誘導高估（AIDE）、⑤背景/方法被當核心（protocol）、④破碎表格保守、主題混雜誤判。**只動 `llm_evidence.py` prompt 文字 + 測試 + 校準重跑**，不動 schema/流程。
+
+- `literature_review/llm_evidence.py`：`build_evidence_prompt` 在 scoring guide 前插入 5 段指示（英文原文，語義未改）：①sub-question 定位（先一句話陳述 query 的具體子問題，再判 chunk 主體內容是否真正對應）②anti-pollution（rich data/tables/methodology 不自動 = relevant；兩分數獨立）③mixed-topic（以 chunk 主要篇幅討論內容為準，不因孤立片語重疊給高分）④independence（high rel 不必然 high qual）⑤metadata-use（citation/venue 只是次要支援訊號，不因低引文單獨降 qual）。
+- 測試：`tests/test_llm_evidence.py` 新增 `test_evidence_prompt_contains_m5b1_score_guidance`（斷言 sub-question / NOT automatically relevant / majority of the chunk / independently / secondary supporting signals 在 prompt）。**231 tests OK**。
+- 校準重跑（Todo 3-4，免費全 Ollama、設定與 M5b 完全一致）：證據 `.omo/evidence/m5b1-calibration.{json,log,md}`。**全量 vs M5b**：10 分比例 B4 9%→12.5% / B1 3%→12.5%（**回升**，緊縮效果未如預期）；天花板 rel 7.8-7.9 → **8.5**（include 0 → B4 1 篇 PaperQA2 8.5/8.2、B1 2 篇）；repairs B4 2→3 / B1 16→11（竄改率 50%→34% 改善）。
+- **5 樣本 |Δrel| 平均誤差無改善**（B4 3.60→3.80、B1 3.40→3.40）；|Δqual| B4 1.40 持平、B1 1.40→1.20。**特別檢查未過（Success criterion 4）**：樣本③ AIDE rel 未顯著下降（M5b B1=8/B4=9 → M5b.1 B1=9/B4=8，人類 2）；樣本⑤ protocol rel 未下降（B1=8/B4=10 → B1=9/B4=9，人類 4）。檢討：8B 模型遵從長 prompt 能力有限，「主體內容」判斷太抽象、embedding top-32 已選入相關 chunk。
+- **B 決策（只建議不拍板）**：依計畫判準（|Δrel| 差 0.40 <0.5 且 B4 repairs 顯著少）→ 案 A（建議）維持 B=4；案 B 改 B=1（現數據不支持）。**閾值**：新天花板 8.5 ≥ 7 → 建議維持 M5b 案 (b) include 7/consider 6；但 ③⑤ 高估未解，收進的 include 可能是高估論文，建議以 Todo 6 真實 run 複核。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.

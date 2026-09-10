@@ -2,7 +2,12 @@ import json
 import re
 import unittest
 
-from literature_review.llm_evidence import LlmEvidenceError, summarize_and_rerank, validate_evidence_assessments
+from literature_review.llm_evidence import (
+    LlmEvidenceError,
+    build_evidence_prompt,
+    summarize_and_rerank,
+    validate_evidence_assessments,
+)
 from literature_review.models import (
     EvidenceChunk,
     EvidenceRetrievalPolicy,
@@ -189,6 +194,14 @@ class LlmEvidenceTests(unittest.TestCase):
         self.assertNotIn("page_start", client.prompt)
         self.assertEqual([item.chunk_id for item in result.summaries], ["chunk-1", "chunk-2"])
         self.assertEqual(result.summaries[0].page_end, 3)
+
+    def test_evidence_prompt_contains_m5b1_score_guidance(self) -> None:
+        prompt = build_evidence_prompt(retrieval_response())
+        self.assertIn("sub-question", prompt)
+        self.assertIn("NOT automatically relevant", prompt)
+        self.assertIn("majority of the chunk", prompt)
+        self.assertIn("independently", prompt)
+        self.assertIn("secondary supporting signals", prompt)
 
     def test_rejects_unmatched_or_missing_chunk_ids(self) -> None:
         client = FakeClient(
