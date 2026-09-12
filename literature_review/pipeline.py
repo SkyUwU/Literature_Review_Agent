@@ -37,7 +37,13 @@ from literature_review.models import (
     PaperSummary,
     SynthesisResponse,
 )
-from literature_review.synthesis import SynthesisError, build_coverage_packs, summarize_paper_notes, synthesize_report
+from literature_review.synthesis import (
+    SynthesisError,
+    build_coverage_packs,
+    render_materials_section,
+    summarize_paper_notes,
+    synthesize_report,
+)
 
 
 def _rcs_batch_size() -> int:
@@ -161,6 +167,7 @@ def run_synthesis_pipeline(
     client: JsonGenerationClient,
     *,
     client_rcs: JsonGenerationClient | None = None,
+    client_report: JsonGenerationClient | None = None,
     paper_meta: dict[str, tuple[int | None, str | None]] | None = None,
     chunk_policy: ChunkPolicy = ChunkPolicy(),
     retrieval_policy: EvidenceRetrievalPolicy = EvidenceRetrievalPolicy(),
@@ -189,6 +196,10 @@ def run_synthesis_pipeline(
     ``notes_pacing_seconds`` spaces consecutive per-paper note calls (defaults to
     the ``NOTES_PACING_SECONDS`` env value, ~4s; see ``_notes_pacing_seconds``);
     passing 0 disables the pacing for tests.
+    ``client_report`` (C2c, key3) generates the final synthesis report; when
+    omitted, ``client`` serves the report too, and the programmatic 材料來源清單
+    section (A5) is appended to the report by this layer after the real source
+    paths are resolved.
     """
     effective_functional_policy = functional_policy or FunctionalScoringPolicy()
     prepared = _prepare_documents(
@@ -255,17 +266,37 @@ def run_synthesis_pipeline(
         if position > 0 and pacing > 0:
             time.sleep(pacing)
         paper_summaries.append(
-            summarize_paper_notes(document.paper_id, chunks, client, coverage_policy)
+            summarize_paper_notes(
+                document.paper_id,
+                chunks,
+                client,
+                coverage_policy,
+                paper_title=(paper_titles or {}).get(document.paper_id),
+            )
         )
     result = synthesize_report(
-        None, coverage_packs, paper_summaries, client, paper_assessments=assessments
+        None, coverage_packs, paper_summaries, client_report or client, paper_assessments=assessments
     )
     source_paths = {document.paper_id: document.source_path for document, _ in prepared}
     resolved_sources = [
         source.model_copy(update={"source_path": source_paths[source.paper_id]})
         for source in result.paper_sources
     ]
-    return result.model_copy(update={"paper_sources": resolved_sources})
+    report_text = result.report
+    if result.generated_by == "llm":
+        # C2c A5: the LLM report prose is a pure claim-cited narrative; the
+        # deterministic baseline already embeds its own 材料來源清單 block, so the
+        # programmatic section is appended only on the LLM path.
+        materials = render_materials_section(
+            resolved_sources, result.paper_summaries, result.claim_chunks
+        )
+        report_text = report_text.rstrip() + "\n\n" + materials
+    return result.model_copy(
+        update={
+            "paper_sources": resolved_sources,
+            "report": report_text,
+        }
+    )
 
 
 def _default_paper_id(pdf_path: str) -> str:

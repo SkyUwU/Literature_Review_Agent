@@ -292,7 +292,7 @@ class FunctionalScoringPolicy(BaseModel):
     to satisfy the quota part of selection.
     """
 
-    batch_size: int = Field(default=5, ge=1, le=50)
+    batch_size: int = Field(default=8, ge=1, le=50)
     top_chunks_per_paper: int = Field(default=2, ge=1, le=10)
     n_first_round: int = Field(default=2, ge=1, le=10)
     n_follow_up: int = Field(default=1, ge=1, le=10)
@@ -413,12 +413,17 @@ class LlmPaperSummaryNote(BaseModel):
 
 
 class LlmSynthesisDirection(BaseModel):
-    """A future direction requested from an LLM during synthesis."""
+    """A future direction requested from an LLM during synthesis.
+
+    C2c: the LLM cites ``supporting_claim_ids`` (claim tags, never chunk IDs);
+    the consumer expands the tags mechanically into the external
+    ``FutureDirection.supporting_chunk_ids``.
+    """
 
     title: str = Field(min_length=3)
     rationale: str = Field(min_length=20)
     supporting_paper_ids: list[str] = Field(min_length=1)
-    supporting_chunk_ids: list[str] = Field(min_length=1)
+    supporting_claim_ids: list[str] = Field(min_length=1)
 
 
 class LlmSynthesisBatch(BaseModel):
@@ -436,19 +441,35 @@ class PaperSource(BaseModel):
 
 
 class CoveragePackPolicy(BaseModel):
-    """Reproducible settings for bounding the evidence sent to synthesis."""
+    """Reproducible settings for bounding the evidence sent to synthesis.
+
+    ``llm_input_cap`` is a section-aware budget for per-paper note input
+    (C2c): sections are covered first — every heading and each section's first
+    chunk are kept, and only when the cap overflows does selection fall back
+    to within-section strided sampling.
+    """
 
     max_chunks_per_paper: int = Field(default=6, ge=1, le=50)
-    llm_input_cap: int = Field(default=40, ge=1, le=200)
+    llm_input_cap: int = Field(default=80, ge=1, le=200)
 
 
 class SynthesisResponse(BaseModel):
-    """Evidence-cited synthesis that preserves every upstream provenance layer."""
+    """Evidence-cited synthesis that preserves every upstream provenance layer.
+
+    ``report`` carries ``[claim-N]`` markers (C2c): ``claim-1..N`` are the
+    global consecutive tags assigned in paper-summary document order; the
+    mapping to supporting chunks lives in ``claim_chunks``, so the outer
+    report surface switches from ``[chunk_id]`` to ``[claim-N]`` plus one
+    shared lookup table. ``FutureDirection`` keeps ``supporting_chunk_ids``
+    as the external field, filled mechanically from the LLM-level
+    ``supporting_claim_ids``.
+    """
 
     paper_sources: list[PaperSource] = Field(min_length=1)
     evidence_assessment_response: EvidenceAssessmentResponse | None = None
     paper_assessments: list[PaperAssessment] = Field(default_factory=list)
     paper_summaries: list[PaperSummary] = Field(min_length=1)
+    claim_chunks: dict[str, list[str]] = Field(default_factory=dict)
     report: str = Field(min_length=100)
     future_directions: list[FutureDirection] = Field(min_length=1)
     limitations: list[str]

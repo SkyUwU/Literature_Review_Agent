@@ -119,6 +119,7 @@ def run_end_to_end(
     client_synth: JsonGenerationClient | None = None,
     client_rcs: JsonGenerationClient | None = None,
     client_screen: JsonGenerationClient | None = None,
+    client_report: JsonGenerationClient | None = None,
     use_llm_plan: bool = True,
     dry_run: bool = False,
     json_fetcher: search.JsonFetcher = search.fetch_json,
@@ -325,6 +326,7 @@ def run_end_to_end(
         query,
         client_synth,
         client_rcs=client_rcs,
+        client_report=client_report,
         paper_meta=paper_meta,
         paper_titles=paper_titles,
         paper_queries=paper_queries,
@@ -348,18 +350,25 @@ def run_end_to_end(
 
 def _build_clients(
     arguments: argparse.Namespace,
-) -> tuple[JsonGenerationClient | None, JsonGenerationClient | None, JsonGenerationClient | None]:
-    """Build the stage clients: planning uses key1, RCS may use local Ollama, synthesis uses key2.
+) -> tuple[
+    JsonGenerationClient | None,
+    JsonGenerationClient | None,
+    JsonGenerationClient | None,
+    JsonGenerationClient | None,
+]:
+    """Build the stage clients: planning uses key1, RCS may use local Ollama, synthesis uses key2, report uses key3.
 
     The LLM planner is the default for a full run; it is skipped on ``--dry-run``
     (zero keys) and on ``--rule-based`` (escape hatch). A missing ``GEMINI_API_KEY``
     prints a warning and keeps ``client_plan`` as ``None``, letting
     :func:`_make_plan` fall back to the deterministic rule-based plan without
-    aborting the run. ``--dry-run`` never inspects either key.
+    aborting the run. ``--dry-run`` never inspects any key.
 
     ``client_rcs`` is built from the local Ollama endpoint when ``OLLAMA_BASE_URL``
     is configured (M6); when it is missing the client stays ``None`` and the RCS
     stage falls back to the Gemini synthesis client (existing behavior).
+    ``client_report`` (C2c) uses the dedicated ``GEMINI_API_KEY_3``: a full run
+    without it exits with code 1 (the report has no fallback, mirroring key2).
     """
     client_plan: JsonGenerationClient | None = None
     if not arguments.dry_run and not arguments.rule_based:
@@ -387,7 +396,14 @@ def _build_clients(
             except LlmEvidenceError as error:
                 print(f"Ollama RCS client unavailable: {error}", file=sys.stderr)
                 client_rcs = None
-    return client_plan, client_synth, client_rcs
+    client_report: JsonGenerationClient | None = None
+    if not arguments.dry_run:
+        api_key_3 = os.getenv("GEMINI_API_KEY_3")
+        if not api_key_3:
+            print("請在 .env 設定 GEMINI_API_KEY_3", file=sys.stderr)
+            raise SystemExit(1)
+        client_report = GeminiJsonClient(api_key=api_key_3)
+    return client_plan, client_synth, client_rcs, client_report
 
 
 def main() -> None:
@@ -412,7 +428,7 @@ def main() -> None:
         print("No query provided; exiting.", file=sys.stderr)
         raise SystemExit(1) from None
 
-    client_plan, client_synth, client_rcs = _build_clients(arguments)
+    client_plan, client_synth, client_rcs, client_report = _build_clients(arguments)
 
     try:
         result = run_end_to_end(
@@ -422,6 +438,7 @@ def main() -> None:
             client_synth=client_synth,
             client_rcs=client_rcs,
             client_screen=client_plan,
+            client_report=client_report,
             use_llm_plan=not arguments.rule_based and not arguments.dry_run,
             dry_run=arguments.dry_run,
         )

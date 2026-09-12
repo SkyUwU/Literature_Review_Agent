@@ -33,7 +33,7 @@ uv run python -m literature_review.pipeline data/papers/example.pdf "literature 
 
 After copying `.env.example` to `.env` and setting `GEMINI_API_KEY`, omit `--dry-run` to run the LLM re-ranking stage. Start with one PDF and `--top-k 2` or `--top-k 3` (chunks across all papers combined, not per-paper).
 
-`literature_review.synthesis` completes the evidence-cited report with three-layer traceability: every claim flows from an `EvidenceChunk` through a per-paper note (`PaperSummary`) into the final report prose, which carries inline `[chunk_id]` citation markers. Per-paper notes are built only for papers recommended as include or consider. Future directions come from three sources: strong cross-paper convergence, explicit limitations stated in the retrieved evidence, and a deterministic fallback when neither yields a direction.
+`literature_review.synthesis` completes the evidence-cited report with three-layer traceability: every claim flows from an `EvidenceChunk` through a per-paper note (`PaperSummary`) into the final report prose, which carries inline `[claim-N]` citation markers (A5: the programmatic `材料來源清單` maps each claim to its source chunks). Per-paper notes are built only for papers recommended as include or consider. Future directions come from three sources: strong cross-paper convergence, explicit limitations stated in the retrieved evidence, and a deterministic fallback when neither yields a direction.
 
 Run the multi-PDF synthesis flow over a folder of papers (requires `GEMINI_API_KEY`):
 
@@ -51,7 +51,7 @@ One interactive query produces a complete literature-review report: plan -> sear
 uv run python -m literature_review.main --dry-run
 ```
 
-The full run plans with the LLM planner (default, `GEMINI_API_KEY`) and synthesizes with `GEMINI_API_KEY_2`:
+The full run plans with the LLM planner (default, `GEMINI_API_KEY`), scores and generates per-paper notes with `GEMINI_API_KEY_2`, and produces the synthesis report with `GEMINI_API_KEY_3`:
 
 ```powershell
 uv run python -m literature_review.main

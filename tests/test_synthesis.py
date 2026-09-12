@@ -6,6 +6,7 @@ import unittest
 # existing test module without modifying or relocating the pre-existing test cases.
 
 from literature_review.models import (
+    ChunkReference,
     CoveragePackPolicy,
     EvidenceAggregationPolicy,
     EvidenceAssessmentResponse,
@@ -18,16 +19,22 @@ from literature_review.models import (
     PaperAssessment,
     PaperSource,
     PaperSummary,
+    PaperSummaryClaim,
 )
 from literature_review.coverage import classify_chunk, drop_noise_sections
 from literature_review.synthesis import (
     SynthesisError,
+    _bounded_chunks_for_llm,
+    _group_chunks_by_section,
+    build_claim_chunks,
     build_coverage_packs,
     build_deterministic_paper_notes,
     build_deterministic_synthesis,
+    build_paper_notes_prompt,
     detect_limitation_chunks,
     summarize_paper_notes,
     synthesize_report,
+    top_level_section,
 )
 
 
@@ -75,6 +82,35 @@ def compact_sectioned_chunks(paper_id: str) -> list[EvidenceChunk]:
     return [
         make_chunk(paper_id, number, page, text)
         for number, (page, text) in enumerate(pages_and_texts, start=1)
+    ]
+
+
+def chapter_chunks(paper_id: str) -> list[EvidenceChunk]:
+    """Chunks carrying a markdown heading path (C2a ``_heading_path`` shape).
+
+    Section paths use ``"Title"`` as the placeholder document title, so tests
+    pass ``paper_title="Title"`` to exercise the title-skip signal.
+    """
+    paths_and_pages = [
+        ("Title > Abstract", 1, "Abstract This paper studies evidence-cited literature review agents."),
+        ("Title > 1 Introduction", 1, "Introduction Prior systems lack page-level provenance for claims."),
+        ("Title > 1 Introduction", 1, "Introduction More context that pads the introduction section text."),
+        ("Title > 2 Method", 2, "Method We group chunks by their top-level section before scoring."),
+        ("Title > 2 Method > 2.1 Ranking", 2, "Method detail Ranking orders chunks within the method section."),
+        ("Title > 3 Experiments", 3, "Experiments We evaluate coverage across three public benchmarks."),
+        ("Title > 4 Results", 3, "Results Section-first sampling keeps every chapter represented."),
+        ("Title > 5 Limitations", 4, "Limitations Our evaluation is restricted to English papers only."),
+    ]
+    return [
+        EvidenceChunk(
+            chunk_id=f"{paper_id}-c{number}",
+            paper_id=paper_id,
+            page_start=page,
+            page_end=page,
+            section=path,
+            text=text,
+        )
+        for number, (path, page, text) in enumerate(paths_and_pages, start=1)
     ]
 
 
@@ -491,7 +527,7 @@ def valid_direction_payload() -> dict[str, object]:
         "title": "Harden extraction for scanned low-resource papers",
         "rationale": "The stated limitation on scanned low-resource papers directly motivates extraction research.",
         "supporting_paper_ids": ["p1"],
-        "supporting_chunk_ids": ["p1-p4-4-c4"],
+        "supporting_claim_ids": ["claim-4"],
     }
 
 
@@ -572,26 +608,30 @@ class LlmPaperNotesTests(unittest.TestCase):
 class LlmSynthesisReportTests(unittest.TestCase):
     def test_synthesize_report_happy(self) -> None:
         response, packs, note = llm_synthesis_fixture()
-        allowed = {citation.chunk_id for citation in response.assessments[0].evidence} | set(
-            note.coverage_chunk_ids
-        )
         report = (
             "# Evidence-cited synthesis\n"
             "The reviewed study proposes evidence-cited synthesis for literature review agents "
-            "[p1-p2-2-c2]. Its template pipeline composes paragraphs from bounded retrieved chunks "
-            "[p1-p1-1-c1].\n\n"
-            "## 材料來源清單\n"
-            "- p1: notes cover=" + ",".join(sorted(allowed)) + "\n"
+            "[claim-2]. Its template pipeline composes paragraphs from bounded retrieved chunks "
+            "[claim-1].\n\n"
         )
 
         result = synthesize_report(response, packs, [note], FakeSynthesisClient(report, [valid_direction_payload()]))
 
         self.assertEqual(result.generated_by, "llm")
-        self.assertIn("材料來源清單", result.report)
+        self.assertNotIn("材料來源清單", result.report)
         markers = re.findall(r"\[([^\[\]]+)\]", result.report)
         self.assertGreaterEqual(len(markers), 2)
-        self.assertTrue(set(markers).issubset(allowed))
+        self.assertTrue(set(markers).issubset(set(result.claim_chunks)))
         self.assertEqual(result.future_directions[0].supporting_chunk_ids, ["p1-p4-4-c4"])
+        self.assertEqual(
+            result.claim_chunks,
+            {
+                "claim-1": ["p1-p1-1-c1"],
+                "claim-2": ["p1-p2-2-c2"],
+                "claim-3": ["p1-p3-3-c3"],
+                "claim-4": ["p1-p4-4-c4"],
+            },
+        )
         self.assertEqual([item.paper_id for item in result.paper_summaries], ["p1"])
         self.assertEqual(result.paper_sources[0].paper_id, "p1")
 
@@ -599,8 +639,7 @@ class LlmSynthesisReportTests(unittest.TestCase):
         response, packs, note = llm_synthesis_fixture()
         report = (
             "The reviewed study proposes evidence-cited synthesis, and one sentence cites an identifier "
-            "that was never supplied to the model [unknown-id], so validation must reject it.\n\n"
-            "材料來源清單\n- p1\n"
+            "that was never supplied to the model [unknown-id], so validation must reject it."
         )
 
         with self.assertRaises(SynthesisError):
@@ -615,6 +654,37 @@ class LlmSynthesisReportTests(unittest.TestCase):
 
         with self.assertRaises(SynthesisError):
             synthesize_report(response, packs, [note], FakeSynthesisClient(report, [valid_direction_payload()]))
+
+    def test_synthesize_report_unknown_claim_marker_repair_retry(self) -> None:
+        response, packs, note = llm_synthesis_fixture()
+        good_report = (
+            "The reviewed study proposes evidence-cited synthesis for literature review agents "
+            "[claim-1]. A second grounded sentence keeps the report long enough to validate."
+        )
+        bad_report = (
+            "The reviewed study proposes evidence-cited synthesis for literature review agents "
+            "[claim-99]. A second grounded sentence keeps the report long enough to validate."
+        )
+
+        class RepairingClient:
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
+                self.responses: list[dict[str, object]] = [
+                    {"report": bad_report, "future_directions": [valid_direction_payload()]},
+                    {"report": good_report, "future_directions": [valid_direction_payload()]},
+                ]
+
+            def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+                self.prompts.append(prompt)
+                return json.dumps(self.responses.pop(0))
+
+        client = RepairingClient()
+
+        result = synthesize_report(response, packs, [note], client)
+
+        self.assertEqual(len(client.prompts), 2)
+        self.assertIn("claim-99", client.prompts[1])
+        self.assertEqual(result.future_directions[0].supporting_chunk_ids, ["p1-p4-4-c4"])
 
 
 class SectionClassificationTests(unittest.TestCase):
@@ -703,6 +773,302 @@ class DropNoiseSectionsTests(unittest.TestCase):
         kept = drop_noise_sections(chunks, drop_appendix=False)
 
         self.assertEqual([chunk.paper_id for chunk in kept], ["p1"])
+
+
+# -- C2c: section-aware notes input (Todo 1) ---
+
+
+class TopLevelSectionTests(unittest.TestCase):
+    """top_level_section: layer-independent extraction of the first non-title aspect."""
+
+    def test_multi_level_path_defaults_to_first_section(self) -> None:
+        self.assertEqual(
+            top_level_section("Title > 2 Related Work > 2.1 Surveys", paper_title="Title"),
+            "2 Related Work",
+        )
+        self.assertEqual(
+            top_level_section("Title > 2 Related Work", paper_title="Title"),
+            "2 Related Work",
+        )
+
+    def test_single_level_path_is_kept(self) -> None:
+        self.assertEqual(top_level_section("2 Related Work"), "2 Related Work")
+        self.assertEqual(top_level_section("1 Introduction"), "1 Introduction")
+
+    def test_numbered_segments_never_skipped(self) -> None:
+        self.assertEqual(top_level_section("1 Introduction > 1.1 Background"), "1 Introduction")
+
+    def test_paper_title_signal_skips_title_segment(self) -> None:
+        # ① 正規化比對:相等
+        self.assertEqual(
+            top_level_section(
+                "AutoGen: Enabling Multi-Agent Conversation > 2 Related Work",
+                paper_title="AutoGen: Enabling Multi-Agent Conversation",
+            ),
+            "2 Related Work",
+        )
+        # ① 正規化比對:paper title 為 segment 開頭(受截斷)
+        self.assertEqual(
+            top_level_section(
+                "AutoGen: Enabling > 3 Experiments",
+                paper_title="AutoGen: Enabling Multi-Agent Conversation",
+            ),
+            "3 Experiments",
+        )
+
+    def test_position_signal_skips_unnumbered_first_segment(self) -> None:
+        # 無 paper_title 時,多層路徑首段(位置②)判為標題
+        self.assertEqual(top_level_section("Title > 2 Related Work"), "2 Related Work")
+        # 單層無編號不跳(誤判偏向當章節)
+        self.assertEqual(top_level_section("Related Work"), "Related Work")
+
+    def test_title_only_path_returns_none(self) -> None:
+        self.assertIsNone(
+            top_level_section(
+                "AutoGen: Enabling Multi-Agent Conversation",
+                paper_title="AutoGen: Enabling Multi-Agent Conversation",
+            )
+        )
+        self.assertIsNone(top_level_section("Title", paper_title="Title"))
+        self.assertIsNone(top_level_section(None))
+        self.assertIsNone(top_level_section(""))
+
+    def test_mixed_levels_are_consistent(self) -> None:
+        # 部分章節有小節、部分無 → 一致取第一段
+        self.assertEqual(
+            top_level_section("Title > 2 Method > 2.1 Ranking", paper_title="Title"),
+            "2 Method",
+        )
+        self.assertEqual(top_level_section("Title > 2 Method", paper_title="Title"), "2 Method")
+
+    def test_strips_markdown_bold_markers(self) -> None:
+        self.assertEqual(
+            top_level_section("**Title** > **7 Method**", paper_title="Title"),
+            "7 Method",
+        )
+
+
+class SectionAwareNotesInputTests(unittest.TestCase):
+    """Section grouping and cap behavior of the per-paper note input."""
+
+    def _ids(self, chunks: list[EvidenceChunk]) -> list[str]:
+        return [chunk.chunk_id for chunk in chunks]
+
+    def test_group_chunks_by_section(self) -> None:
+        groups = _group_chunks_by_section(chapter_chunks("p1"), paper_title="Title")
+
+        self.assertEqual(
+            list(groups),
+            [
+                "Abstract",
+                "1 Introduction",
+                "2 Method",
+                "3 Experiments",
+                "4 Results",
+                "5 Limitations",
+            ],
+        )
+        self.assertEqual(self._ids(groups["1 Introduction"]), ["p1-c2", "p1-c3"])
+        self.assertEqual(self._ids(groups["2 Method"]), ["p1-c4", "p1-c5"])
+
+    def test_legacy_chunks_group_under_other(self) -> None:
+        legacy = [
+            make_chunk("p1", 1, 1, "Abstract legacy text without a heading path."),
+            make_chunk("p1", 2, 2, "Method legacy paragraph without a heading path."),
+        ]
+
+        groups = _group_chunks_by_section(legacy)
+
+        self.assertEqual(list(groups), ["other"])
+        self.assertEqual(len(groups["other"]), 2)
+
+    def test_cap_all_kept_when_under_cap(self) -> None:
+        chunks = chapter_chunks("p1")
+        self.assertEqual(len(chunks), 8)
+
+        selected = _bounded_chunks_for_llm(chunks, 80, paper_title="Title")
+
+        self.assertEqual(self._ids(selected), self._ids(chunks))
+
+    def test_cap_keeps_every_section_opener(self) -> None:
+        chunks = chapter_chunks("p1")
+
+        selected = _bounded_chunks_for_llm(chunks, 5, paper_title="Title")
+
+        self.assertEqual(
+            self._ids(selected),
+            ["p1-c1", "p1-c2", "p1-c4", "p1-c6", "p1-c7"],
+        )
+        self.assertNotIn("p1-c8", self._ids(selected))
+
+    def test_cap_round_robin_extra_across_sections(self) -> None:
+        chunks = chapter_chunks("p1")
+
+        selected = _bounded_chunks_for_llm(chunks, 7, paper_title="Title")
+
+        # 6 節 opener + 1 extra(第一個有剩餘的節 = Introduction)
+        self.assertEqual(
+            self._ids(selected),
+            ["p1-c1", "p1-c2", "p1-c3", "p1-c4", "p1-c6", "p1-c7", "p1-c8"],
+        )
+
+    def test_prompt_groups_chunks_by_section(self) -> None:
+        chunks = chapter_chunks("p1")
+
+        prompt = build_paper_notes_prompt("p1", chunks, paper_title="Title")
+
+        self.assertIn("Cover every section", prompt)
+        self.assertIn("Never use a subsection name", prompt)
+        for chunk in chunks:
+            self.assertIn(chunk.chunk_id, prompt)
+        self.assertNotIn("sections_by_aspect", prompt)
+        self.assertNotIn("contribution", prompt)  # _NOTE_ASPECTS 白名單退役
+
+    def test_prompt_groups_by_top_level_not_subsection(self) -> None:
+        chunks = chapter_chunks("p1")
+
+        prompt = build_paper_notes_prompt("p1", chunks, paper_title="Title")
+
+        # 頂層章節才列為 aspect 選項,小節名(2.1)不出現在 section_titles
+        self.assertIn('"2 Method"', prompt)
+        self.assertNotIn("2.1", prompt)
+
+
+class SectionAwareFakeE2ETests(unittest.TestCase):
+    """Fake client e2e: every section is covered by at least one claim."""
+
+    def test_every_section_has_a_claim(self) -> None:
+        chunks = chapter_chunks("p1")
+        payload = {
+            "claims": [
+                {
+                    "text": "The abstract studies evidence-cited literature review agents.",
+                    "chunk_ids": ["p1-c1"],
+                    "aspect": "Abstract",
+                },
+                {
+                    "text": "The introduction motivates page-level claim provenance.",
+                    "chunk_ids": ["p1-c2"],
+                    "aspect": "1 Introduction",
+                },
+                {
+                    "text": "The method groups chunks by top-level section before scoring.",
+                    "chunk_ids": ["p1-c4"],
+                    "aspect": "2 Method",
+                },
+                {
+                    "text": "Experiments evaluate coverage across three public benchmarks.",
+                    "chunk_ids": ["p1-c6"],
+                    "aspect": "3 Experiments",
+                },
+                {
+                    "text": "Results show every chapter stays represented after sampling.",
+                    "chunk_ids": ["p1-c7"],
+                    "aspect": "4 Results",
+                },
+                {
+                    "text": "Limitations restrict the evaluation to English papers only.",
+                    "chunk_ids": ["p1-c8"],
+                    "aspect": "5 Limitations",
+                },
+            ],
+        }
+        client = FakeNoteClient(payload)
+
+        note = summarize_paper_notes(
+            "p1", chunks, client, CoveragePackPolicy(), paper_title="Title"
+        )
+
+        self.assertEqual(
+            [claim.aspect for claim in note.claims],
+            [
+                "Abstract",
+                "1 Introduction",
+                "2 Method",
+                "3 Experiments",
+                "4 Results",
+                "5 Limitations",
+            ],
+        )
+        self.assertEqual(
+            note.coverage_chunk_ids,
+            ["p1-c1", "p1-c2", "p1-c4", "p1-c6", "p1-c7", "p1-c8"],
+        )
+
+
+# -- C2c Todo 2: claim→chunks 機械展開 --
+
+
+def make_note(paper_id: str, claim_chunks: list[list[str]]) -> PaperSummary:
+    claims = [
+        PaperSummaryClaim(
+            text=f"Claim {index} of {paper_id} backed by bounded retrieved evidence chunks.",
+            aspect="contribution",
+            evidence=[
+                ChunkReference(
+                    chunk_id=chunk_id,
+                    paper_id=paper_id,
+                    page_start=1,
+                    page_end=1,
+                    quote="A sufficiently long quoted evidence span supporting the claim.",
+                )
+                for chunk_id in chunks
+            ],
+        )
+        for index, chunks in enumerate(claim_chunks, start=1)
+    ]
+    coverage_chunk_ids = sorted(
+        {reference.chunk_id for claim in claims for reference in claim.evidence}
+    )
+    return PaperSummary(
+        paper_id=paper_id,
+        claims=claims,
+        coverage_chunk_ids=coverage_chunk_ids,
+    )
+
+
+class ClaimChunksTests(unittest.TestCase):
+    """C2c Todo 2: global claim-1..N numbering and the claim→chunks table."""
+
+    def test_global_numbering_contiguous_across_papers(self) -> None:
+        table = build_claim_chunks(
+            [
+                make_note("p-a", [["p-a-c1"], ["p-a-c2", "p-a-c3"]]),
+                make_note("p-b", [["p-b-c4"]]),
+            ]
+        )
+
+        self.assertEqual(list(table), ["claim-1", "claim-2", "claim-3"])
+        self.assertEqual(table["claim-1"], ["p-a-c1"])
+        self.assertEqual(table["claim-2"], ["p-a-c2", "p-a-c3"])
+        self.assertEqual(table["claim-3"], ["p-b-c4"])
+
+    def test_multi_chunk_claim_sorted_and_deduplicated(self) -> None:
+        table = build_claim_chunks([make_note("p-a", [["p-a-c3", "p-a-c1", "p-a-c1"]])])
+
+        self.assertEqual(table["claim-1"], ["p-a-c1", "p-a-c3"])
+
+    def test_each_claim_maps_to_non_empty_chunks(self) -> None:
+        table = build_claim_chunks([make_note("p-a", [["p-a-c1"], ["p-a-c2"]])])
+
+        self.assertTrue(all(table[claim_id] for claim_id in table))
+
+    def test_empty_summaries_returns_empty_table(self) -> None:
+        self.assertEqual(build_claim_chunks([]), {})
+
+    def test_direction_unknown_claim_id_rejected(self) -> None:
+        response, packs, note = llm_synthesis_fixture()
+        report = (
+            "The reviewed study proposes evidence-cited synthesis for literature review agents "
+            "[claim-1]. A second grounded sentence keeps the report long enough to validate."
+        )
+        direction = valid_direction_payload()
+        direction["supporting_claim_ids"] = ["claim-99"]
+
+        with self.assertRaises(SynthesisError):
+            synthesize_report(
+                response, packs, [note], FakeSynthesisClient(report, [direction])
+            )
 
 
 if __name__ == "__main__":

@@ -156,12 +156,12 @@ def note_payload(paper_id: str) -> dict[str, object]:
     }
 
 
-def direction_payload(paper_id: str) -> dict[str, object]:
+def direction_payload(paper_id: str, claim_id: str) -> dict[str, object]:
     return {
         "title": "Harden multilingual evaluation coverage",
         "rationale": "Both studies state evaluation restrictions that motivate broader multilingual benchmarks.",
         "supporting_paper_ids": [paper_id],
-        "supporting_chunk_ids": [f"{paper_id}-c1"],
+        "supporting_claim_ids": [claim_id],
     }
 
 
@@ -171,30 +171,31 @@ class SynthesisFakeClient:
     def __init__(self, paper_ids: tuple[str, ...]) -> None:
         self.paper_ids = paper_ids
         self.prompts: list[str] = []
-        self.cited_chunk_ids: list[str] = []
+        self.cited_claim_ids: list[str] = []
+        self.note_paper_ids: list[str] = []
 
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.prompts.append(prompt)
         if prompt.startswith("Summarize this single paper"):
             for paper_id in self.paper_ids:
                 if f"Paper ID: {paper_id}\n" in prompt:
+                    self.note_paper_ids.append(paper_id)
                     return json.dumps(note_payload(paper_id))
         if prompt.startswith("Write a fluent literature-review"):
-            real_chunk_ids = re.findall(r'"([^"]+-c\d+)"', prompt)
-            self.cited_chunk_ids.extend(real_chunk_ids)
+            real_claim_ids = re.findall(r'"claim_id": "(claim-\d+)"', prompt)
+            self.cited_claim_ids.extend(real_claim_ids)
             report = (
                 "# Evidence-cited synthesis\n"
                 + "".join(
-                    f"The reviewed study {paper} supplies retrieved evidence for its claims "
-                    f"in [{chunk_id}].\n"
-                    for paper, chunk_id in zip(
-                        self.paper_ids, real_chunk_ids, strict=False
-                    )
+                    f"The reviewed study supplies retrieved evidence for its claims "
+                    f"in [{claim_id}].\n"
+                    for claim_id in real_claim_ids
                 )
-                + "\n## 材料來源清單\n- cited chunk identifiers appear inline above\n"
             )
+            cited = self.paper_ids[-1]
+            claim_id = f"claim-{self.note_paper_ids.index(cited) + 1}"
             return json.dumps(
-                {"report": report, "future_directions": [direction_payload(self.paper_ids[-1])]}
+                {"report": report, "future_directions": [direction_payload(cited, claim_id)]}
             )
         indexes = re.findall(r"## Chunk (\d+)", prompt)
         return json.dumps({"assessments": [assessment_payload(index) for index in indexes]})
@@ -347,7 +348,8 @@ class MainEntryTests(unittest.TestCase):
         self.assertIsInstance(report, SynthesisResponse)
         self.assertEqual(len(report.paper_sources), 2)
         self.assertTrue(len(synth_client.prompts) >= 2)
-        self.assertIn("[W1-", report.report)
+        self.assertIn("[claim-", report.report)
+        self.assertIn("## 材料來源清單", report.report)
 
     # -- scenario 5: target_n follows ceil(TOTAL_TARGET / query count) ------
 
@@ -616,68 +618,88 @@ class MainEntryTests(unittest.TestCase):
 
     def test_build_clients_default_full_run_builds_plan_client(self) -> None:
         with mock.patch.dict(
-            os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False
+            os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "GEMINI_API_KEY_3": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False
         ):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                client_plan, client_synth, client_rcs = main_module._build_clients(
+                client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
                     argparse.Namespace(rule_based=False, dry_run=False)
                 )
-        self.assertEqual(client_cls.call_count, 2)
+        self.assertEqual(client_cls.call_count, 3)
         self.assertIsNotNone(client_plan)
         self.assertIsNotNone(client_synth)
         self.assertIsNone(client_rcs)  # OLLAMA_BASE_URL 未設定 → No fallback client
+        self.assertIsNotNone(client_report)  # C2c: key3 專屬報告 client
 
     def test_build_clients_rule_based_skips_plan_client(self) -> None:
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "GEMINI_API_KEY_3": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                client_plan, client_synth, client_rcs = main_module._build_clients(
+                client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
                     argparse.Namespace(rule_based=True, dry_run=False)
                 )
-        self.assertEqual(client_cls.call_count, 1)
+        self.assertEqual(client_cls.call_count, 2)
         self.assertIsNone(client_plan)
         self.assertIsNotNone(client_synth)
         self.assertIsNone(client_rcs)
+        self.assertIsNotNone(client_report)
 
     def test_build_clients_missing_key1_falls_back_without_exit(self) -> None:
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "AIza000", "GEMINI_API_KEY_3": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                client_plan, client_synth, client_rcs = main_module._build_clients(
+                client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
                     argparse.Namespace(rule_based=False, dry_run=False)
                 )
         self.assertIsNone(client_plan)
         self.assertIsNotNone(client_synth)
         self.assertIsNone(client_rcs)
+        self.assertIsNotNone(client_report)
 
     def test_build_clients_dry_run_bypasses_all_keys(self) -> None:
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "", "OLLAMA_BASE_URL": ""}, clear=False):
-            client_plan, client_synth, client_rcs = main_module._build_clients(
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "", "GEMINI_API_KEY_3": "", "OLLAMA_BASE_URL": ""}, clear=False):
+            client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
                 argparse.Namespace(rule_based=False, dry_run=True)
             )
         self.assertIsNone(client_plan)
         self.assertIsNone(client_synth)
         self.assertIsNone(client_rcs)
+        self.assertIsNone(client_report)
 
     def test_build_clients_ollama_configured_builds_rcs_client(self) -> None:
-        """OLLAMA_BASE_URL 設定存在 → 第三 client 用 Ollama(RCS)，Gemini 仍只建 plan + synth 兩個。"""
+        """OLLAMA_BASE_URL 設定存在 → 第三 client 用 Ollama(RCS)，Gemini 仍只建 plan + synth + report 三個。"""
         with mock.patch.dict(
             os.environ,
             {
                 "GEMINI_API_KEY": "AIza000",
                 "GEMINI_API_KEY_2": "AIza000",
+                "GEMINI_API_KEY_3": "AIza000",
                 "OLLAMA_BASE_URL": "http://ollama:11434/v1",
             },
             clear=False,
         ):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
                 with mock.patch("literature_review.main.OllamaJsonClient") as ollama_cls:
-                    client_plan, client_synth, client_rcs = main_module._build_clients(
+                    client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
                         argparse.Namespace(rule_based=False, dry_run=False)
                     )
-        self.assertEqual(client_cls.call_count, 2)
+        self.assertEqual(client_cls.call_count, 3)
         self.assertEqual(ollama_cls.call_count, 1)
         self.assertIsNotNone(client_plan)
         self.assertIsNotNone(client_synth)
         self.assertIsNotNone(client_rcs)
+        self.assertIsNotNone(client_report)
+
+    def test_build_clients_missing_key3_exits(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "AIza000", "GEMINI_API_KEY_3": "", "OLLAMA_BASE_URL": ""},
+            clear=False,
+        ):
+            with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
+                with self.assertRaises(SystemExit) as ctx:
+                    main_module._build_clients(
+                        argparse.Namespace(rule_based=False, dry_run=False)
+                    )
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(client_cls.call_count, 1)  # 只建了 key2 synth，就因缺 key3 提早退出
 
     def test_main_dry_run_forces_rule_based(self) -> None:
         plan = create_rule_based_plan("literature review agent")

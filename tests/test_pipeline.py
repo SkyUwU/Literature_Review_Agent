@@ -134,19 +134,18 @@ UNRELATED_TEXT = (
     "molar mass statistical mechanics"
 )
 
-RETAINED_DIRECTION_PAYLOAD = {
-    "title": "Harden multilingual evaluation coverage",
-    "rationale": "The retained study states evaluation restrictions that motivate broader multilingual benchmarks.",
-    "supporting_paper_ids": ["paper-1"],
-    "supporting_chunk_ids": ["paper-1-c1"],
-}
-
-DIRECTION_PAYLOAD = {
-    "title": "Harden multilingual evaluation coverage",
-    "rationale": "Both studies state evaluation restrictions that motivate broader multilingual benchmarks.",
-    "supporting_paper_ids": ["paper-2"],
-    "supporting_chunk_ids": ["paper-2-c1"],
-}
+def direction_payload(cited_paper_id: str, claim_id: str) -> dict[str, object]:
+    rationale = (
+        "The retained study states evaluation restrictions that motivate broader multilingual benchmarks."
+        if cited_paper_id == "paper-1"
+        else "Both studies state evaluation restrictions that motivate broader multilingual benchmarks."
+    )
+    return {
+        "title": "Harden multilingual evaluation coverage",
+        "rationale": rationale,
+        "supporting_paper_ids": [cited_paper_id],
+        "supporting_claim_ids": [claim_id],
+    }
 
 
 def make_document(paper_id: str, text: str) -> FullTextDocument:
@@ -183,27 +182,31 @@ class SynthesisFakeClient:
 
     def __init__(self) -> None:
         self.prompts: list[str] = []
-        self.cited_chunk_ids: list[str] = []
+        self.cited_claim_ids: list[str] = []
+        self.note_paper_ids: list[str] = []
 
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.prompts.append(prompt)
         if prompt.startswith("Summarize this single paper"):
             for paper_id in ("paper-1", "paper-2"):
                 if f"Paper ID: {paper_id}\n" in prompt:
+                    self.note_paper_ids.append(paper_id)
                     return json.dumps(note_payload(paper_id))
         if prompt.startswith("Write a fluent literature-review"):
-            real_chunk_ids = re.findall(r'"([^"]+-c\d+)"', prompt)
-            self.cited_chunk_ids.extend(real_chunk_ids)
+            real_claim_ids = re.findall(r'"claim_id": "(claim-\d+)"', prompt)
+            self.cited_claim_ids.extend(real_claim_ids)
             report = (
                 "# Evidence-cited synthesis\n"
                 + "".join(
                     f"The reviewed study supplies retrieved evidence for its claims "
-                    f"in [{chunk_id}].\n"
-                    for chunk_id in real_chunk_ids
+                    f"in [{claim_id}].\n"
+                    for claim_id in real_claim_ids
                 )
-                + "\n## 材料來源清單\n- cited chunk identifiers appear inline above\n"
             )
-            return json.dumps({"report": report, "future_directions": [DIRECTION_PAYLOAD]})
+            claim_id = f"claim-{self.note_paper_ids.index('paper-2') + 1}"
+            return json.dumps(
+                {"report": report, "future_directions": [direction_payload("paper-2", claim_id)]}
+            )
         indexes = re.findall(r"## Chunk (\d+)", prompt)
         return json.dumps({"assessments": [assessment_payload(index) for index in indexes]})
 
@@ -216,19 +219,22 @@ class PaperDropFakeClient(SynthesisFakeClient):
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.prompts.append(prompt)
         if prompt.startswith("Summarize this single paper") and "Paper ID: paper-1\n" in prompt:
+            self.note_paper_ids.append("paper-1")
             return json.dumps(note_payload("paper-1"))
         if prompt.startswith("Write a fluent literature-review"):
-            real_chunk_ids = re.findall(r'"([^"]+-c\d+)"', prompt)
+            real_claim_ids = re.findall(r'"claim_id": "(claim-\d+)"', prompt)
             report = (
                 "# Evidence-cited synthesis\n"
                 + "".join(
                     f"The reviewed study supplies retrieved evidence for its claims "
-                    f"in [{chunk_id}].\n"
-                    for chunk_id in real_chunk_ids
+                    f"in [{claim_id}].\n"
+                    for claim_id in real_claim_ids
                 )
-                + "\n## 材料來源清單\n- cited chunk identifiers appear inline above\n"
             )
-            return json.dumps({"report": report, "future_directions": [RETAINED_DIRECTION_PAYLOAD]})
+            claim_id = f"claim-{self.note_paper_ids.index('paper-1') + 1}"
+            return json.dumps(
+                {"report": report, "future_directions": [direction_payload("paper-1", claim_id)]}
+            )
         blocks = re.findall(
             r"## Chunk (\d+)\nPaper: [^\n]*\| Section: [^\n]*\n(.*?)(?=\n## Chunk |\Z)",
             prompt,
@@ -294,6 +300,10 @@ class SynthesisPipelineTests(unittest.TestCase):
         self.assertEqual(result.generated_by, "llm")
         self.assertEqual(len(result.paper_summaries), 2)
         self.assertEqual({note.paper_id for note in result.paper_summaries}, {"paper-1", "paper-2"})
+        self.assertEqual(
+            result.claim_chunks,
+            {"claim-1": ["paper-1-c1"], "claim-2": ["paper-2-c1"]},
+        )
         self.assertEqual(len(result.paper_sources), 2)
         self.assertEqual(
             {source.source_path for source in result.paper_sources},
@@ -302,12 +312,8 @@ class SynthesisPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(len(result.future_directions), 1)
         markers = re.findall(r"\[([^\[\]]+)\]", result.report)
         self.assertGreaterEqual(len(markers), 1)
-        supplied_ids = {
-            citation.chunk_id
-            for assessment in result.paper_assessments
-            for citation in assessment.evidence
-        } | {chunk_id for note in result.paper_summaries for chunk_id in note.coverage_chunk_ids}
-        self.assertTrue(set(markers).issubset(supplied_ids))
+        self.assertTrue(set(markers).issubset(set(result.claim_chunks)))
+        self.assertIn("## 材料來源清單", result.report)
 
     def test_synthesis_pipeline_same_paper_id(self) -> None:
         with self.assertRaises(ValueError):
@@ -330,6 +336,7 @@ class SynthesisPipelineTests(unittest.TestCase):
 
         self.assertIn("empty-paper", stderr.getvalue())
         self.assertEqual([note.paper_id for note in result.paper_summaries], ["paper-2"])
+        self.assertEqual(result.claim_chunks, {"claim-1": ["paper-2-c1"]})
         self.assertEqual([source.paper_id for source in result.paper_sources], ["paper-2"])
 
     def test_synthesis_pipeline_functional_single_batch_by_default(self) -> None:
@@ -344,7 +351,7 @@ class SynthesisPipelineTests(unittest.TestCase):
         functional_calls = sum(
             1 for prompt in client.prompts if prompt.startswith("Score each supplied evidence chunk")
         )
-        self.assertEqual(functional_calls, 1)  # FUNCTIONAL_BATCH_SIZE=5; 4 sampled chunks fit one batch
+        self.assertEqual(functional_calls, 1)  # FUNCTIONAL_BATCH_SIZE=8; 4 sampled chunks fit one batch
         self.assertEqual(len(result.paper_summaries), 2)
 
     def test_synthesis_pipeline_unrelated_paper_below_threshold_excluded(self) -> None:
@@ -361,6 +368,7 @@ class SynthesisPipelineTests(unittest.TestCase):
             ["paper-1"],
         )
         self.assertEqual([note.paper_id for note in result.paper_summaries], ["paper-1"])
+        self.assertEqual(result.claim_chunks, {"claim-1": ["paper-1-c1"]})
         self.assertEqual([source.paper_id for source in result.paper_sources], ["paper-1"])
 
     def _paced_run(self, notes_pacing_seconds: float) -> tuple[mock.MagicMock, object]:

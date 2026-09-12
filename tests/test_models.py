@@ -148,7 +148,7 @@ class ModelTests(unittest.TestCase):
         from literature_review.models import FunctionalScoringPolicy
 
         policy = FunctionalScoringPolicy()
-        self.assertEqual(policy.batch_size, 5)
+        self.assertEqual(policy.batch_size, 8)
         self.assertEqual(policy.top_chunks_per_paper, 2)
         self.assertEqual(policy.n_first_round, 2)
         self.assertEqual(policy.n_follow_up, 1)
@@ -211,7 +211,7 @@ def llm_synthesis_direction() -> LlmSynthesisDirection:
         title="abc",
         rationale="A" * 20,
         supporting_paper_ids=["p1"],
-        supporting_chunk_ids=["p1-p1-2-c1"],
+        supporting_claim_ids=["claim-1"],
     )
 
 
@@ -327,7 +327,7 @@ class SynthesisModelTests(unittest.TestCase):
         policy = CoveragePackPolicy()
 
         self.assertEqual(policy.max_chunks_per_paper, 6)
-        self.assertEqual(policy.llm_input_cap, 40)
+        self.assertEqual(policy.llm_input_cap, 80)
 
     def test_synthesis_response_round_trip(self) -> None:
         response = SynthesisResponse(
@@ -395,6 +395,59 @@ class SynthesisModelTests(unittest.TestCase):
         )
 
         self.assertIn("[chunk-id]", response.report)
+
+    # -- C2c: claim-level synthesis contract --------------------------------
+
+    def test_llm_synthesis_direction_requires_supporting_claim_ids(self) -> None:
+        with self.assertRaises(ValidationError):
+            LlmSynthesisDirection(
+                title="abc",
+                rationale="A" * 20,
+                supporting_paper_ids=["p1"],
+                supporting_claim_ids=[],
+            )
+
+    def test_llm_synthesis_direction_round_trip_claim_ids(self) -> None:
+        direction = llm_synthesis_direction()
+
+        restored = LlmSynthesisDirection.model_validate_json(direction.model_dump_json())
+
+        self.assertEqual(restored, direction)
+        self.assertEqual(restored.supporting_claim_ids, ["claim-1"])
+
+    def test_synthesis_response_claim_chunks_round_trip(self) -> None:
+        response = SynthesisResponse(
+            paper_sources=[PaperSource(paper_id="p1", source_path="/tmp/test.pdf")],
+            evidence_assessment_response=evidence_assessment_response(),
+            paper_summaries=[paper_summary()],
+            claim_chunks={"claim-1": ["p1-p1-2-c1"]},
+            report="[claim-1] " + "X" * 100,
+            future_directions=[
+                FutureDirection(title="abc", rationale="A" * 20, supporting_paper_ids=["p1"])
+            ],
+            limitations=[],
+            generated_by="deterministic",
+        )
+
+        restored = SynthesisResponse.model_validate_json(response.model_dump_json())
+
+        self.assertEqual(restored, response)
+        self.assertEqual(restored.claim_chunks, {"claim-1": ["p1-p1-2-c1"]})
+
+    def test_synthesis_response_claim_chunks_defaults_empty(self) -> None:
+        response = SynthesisResponse(
+            paper_sources=[PaperSource(paper_id="p1", source_path="/tmp/test.pdf")],
+            evidence_assessment_response=evidence_assessment_response(),
+            paper_summaries=[paper_summary()],
+            report="X" * 100,
+            future_directions=[
+                FutureDirection(title="abc", rationale="A" * 20, supporting_paper_ids=["p1"])
+            ],
+            limitations=[],
+            generated_by="deterministic",
+        )
+
+        self.assertEqual(response.claim_chunks, {})
 
 
 if __name__ == "__main__":

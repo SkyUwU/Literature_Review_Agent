@@ -311,7 +311,7 @@ class FunctionalScoringTests(unittest.TestCase):
             client,
         )
 
-        self.assertEqual(len(client.prompts), 1)  # FUNCTIONAL_BATCH_SIZE defaults to 5
+        self.assertEqual(len(client.prompts), 1)  # FUNCTIONAL_BATCH_SIZE defaults to 8
         self.assertEqual(len(result), 3)
 
     def test_batch_boundary_exact_multiple_single_batch(self) -> None:

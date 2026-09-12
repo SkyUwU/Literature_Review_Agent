@@ -270,6 +270,19 @@ C2a 把 PDF 抽取從 pypdf 裸文字換成 pymupdf4llm（markdown 輸出，表�
 - 證據：`.omo/evidence/c2a-table-compare.md`（真實樣本 W3195625625 表格頁：舊 pypdf 破碎 vs 新完整 markdown 表格）；`.omo/evidence/c2a-chapter-smoke.md`（3 真實樣本端到端：chunks 76/74/69、每篇 References 黑名單識別、表格 chunk 帶 `|` 行、chunk_id 全域連續、無標題 PDF 自動標題偵測有效）。樣本 `/tmp/c2a-poc/`（W3195625625 有書籤、ReseachAgent 無書籤、PaperQA2 有書籤），`data/papers/` 21 檔未動。
 - **待辦**：commit/push 由使用者親做（指令見計畫檔 Commit strategy，兩筆 + push）；C2b（功能性分數評分改版）計畫為下一里程碑。
 
+## C2c — 報告 claim-level 標註 + key3 + materials 程式組裝（2026-09-12）
+
+C2c 把報告生成從「逐 chunk marker」改成「claim-level marker」（設計 B）：LLM 只產 `[claim-N]` 標註（全域連續、文件序編號），程式機械 claim→chunks 展開；`[claim-N]` 驗證 + 未知 claim 修復（一輪 `_generate_validated` repair）；`render_materials_section` 程式組裝材料來源清單（A5：LLM 不碰）；報告第三 key（`GEMINI_API_KEY_3`）；`FUNCTIONAL_BATCH_SIZE` 5→8。
+
+- `literature_review/synthesis.py`：`build_synthesis_prompt` 重寫（notes 含 `claim_id`/`text`/`aspect`、assessments 只含 `paper_id`/`utility_score`/`rationale`、指示「End every factual sentence with `[claim-N]`」、無材料清單句）；`_allowed_marker_ids` 改用 `build_claim_chunks(usable_notes)` 產 claim id 集合；`_build_claim_repair_prompt`（unknown markers → prompt 修復）；`_repair_claim_markers`（no markers → SynthesisError、unknown → 一輪修復 + re-check → still unknown → raise）；`synthesize_report` 呼叫 `_repair_claim_markers`、limitation text `[claim-N]`；`render_materials_section(paper_sources, paper_summaries, claim_chunks)` — 程式組裝 `## 材料來源清單`。
+- `literature_review/models.py`：`FunctionalScoringPolicy.batch_size` 預設 5→8。
+- `literature_review/functional.py`：`FUNCTIONAL_BATCH_SIZE = 5` → 8。
+- `literature_review/pipeline.py`：`run_synthesis_pipeline` 簽名加 `client_report: JsonGenerationClient | None`；呼叫 `synthesize_report(..., client_report or client, ...)`；LLM 路徑自動 append `render_materials_section`（`generated_by == "llm"` 才 append，deterministic 路徑自帶自己的材料清單）。
+- `literature_review/main.py`：`_build_clients` 回傳 4-tuple `(client_plan, client_synth, client_rcs, client_report)`；key2 缺 → exit 1（在 key3 之前）；key3 缺 → exit 1；`run_end_to_end` 簽名加 `client_report`，pass-through 到 pipeline；`main()` 解包 4-tuple。
+- 測試遷移：`test_synthesis.py` — LlmSynthesisReportTests 改用 `[claim-1]`/`[claim-2]` markers、`assertNotIn("材料來源清單")`、markers ⊆ `set(result.claim_chunks)`、新增 repair-retry test（RepairingClient 2-call）；direction test marker → `[claim-1]`；`test_pipeline.py` — SynthesisFakeClient/PaperDropFakeClient regex → `"claim_id": "(claim-\d+)"`、`cited_claim_ids`、drops 材料來源清單；happy assertions → markers ⊆ set(result.claim_chunks) + assertIn 材料來源清單；batch comment 5→8；`test_main.py` — SynthesisFakeClient regex + cited_claim_ids + drops 材料來源清單；`_build_clients` tests 4-tuple + GEMINI_API_KEY_3 env patches + call counts (Gemini 3/rule-based 2/ollama 3+1) + new `test_build_clients_missing_key3_exits`；`test_full_run_produces_report` assertIn("[claim-" + assertIn 材料來源清單；`test_models.py` batch_size 5→8；`test_functional.py` comment 5→8。**335 tests OK**（`c2c-tests.log`，308→335、+2 新測試、0 刪除）。py_compile 全 OK。
+- README.md：marker 契約更新（`[chunk_id]` → `[claim-N]`）、key config 更新（key2=notes/scoring、key3=report）。
+- **Todo 5 真實 run 掛帳**（最終線路：評分 Gemini+B=8、notes key2、報告 key3；收集：claim marker 正確率、材料清單渲染、報告尾端中文瑕疵消失確認、claim→chunks 完整性、各 key call 次數統計）；指令 `printf 'literature review agent\n' | uv run --env-file .env python -m literature_review.main`；`data/papers/` 還原 21 檔基準。**待辦**：commit/push 由使用者親做（指令見計畫檔 Commit strategy，code 1 筆 + docs 1 筆 + push）。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.
