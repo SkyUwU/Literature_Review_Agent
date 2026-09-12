@@ -191,7 +191,7 @@ def test_shrunk_mean_with_strength_one(self) -> None:
     )
     reranked = rerank_scores(response, {"p-a-c1": [10, 10]})
     result = aggregate_evidence_assessments(reranked, EvidenceAggregationPolicy())
-    self.assertEqual(result.assessments[0].relevance_score, 7.8)
+    self.assertEqual(result.assessments[0].utility_score, 7.8)
 
 
 if __name__ == "__main__":

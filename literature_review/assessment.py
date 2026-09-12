@@ -14,6 +14,10 @@ from literature_review.models import (
     SelectedPaperSet,
 )
 
+# C2b: the functional include boundary on the shared 1-10 scale. The retired
+# rel/qual rule (8/6) is not reusable for the legacy compare path.
+_UTILITY_INCLUDE_THRESHOLD = 6.0
+
 
 def relevance_score(rank_score: float) -> int:
     """Map a baseline rank score (0-3) to a bounded 1-10 scale.
@@ -53,25 +57,26 @@ def assess_selected_papers(
         paper = ranked_paper.paper
         relevance = relevance_score(ranked_paper.score)
         evidence_quality = evidence_quality_score(paper.citation_count, paper.venue)
+        # C2b: two-way recommendation only; the retired "consider" band maps to
+        # "exclude" so the metadata rule keeps its conservative reading-priority
+        # meaning (include keeps requiring its own policy thresholds).
         if (
             relevance >= policy.include_relevance_score
             and evidence_quality >= policy.include_evidence_quality_score
         ):
             recommendation = "include"
-        elif relevance >= policy.consider_relevance_score:
-            recommendation = "consider"
         else:
             recommendation = "exclude"
         assessments.append(
             PaperAssessment(
                 paper_id=paper.paper_id,
-                relevance_score=relevance,
-                evidence_quality_score=evidence_quality,
+                utility_score=float(relevance),
                 recommendation=recommendation,
                 rationale=(
                     f"Metadata assessment: baseline rank score {ranked_paper.score:.3f}; "
                     f"citation count {paper.citation_count or 0}; "
-                    f"venue metadata {'available' if paper.venue else 'unavailable'}."
+                    f"venue metadata {'available' if paper.venue else 'unavailable'}; "
+                    f"legacy relevance {relevance}, legacy quality {evidence_quality}."
                 ),
             )
         )
@@ -109,6 +114,11 @@ def aggregate_evidence_assessments(
 
     The result is limited to the chunks supplied by first-stage retrieval; it does
     not claim to judge the paper outside that bounded evidence set.
+
+    C2b compare/legacy: the retired dual rel/qual contract is translated to the
+    functional contract — ``utility_score`` is the relevance shrunk mean and the
+    two-way recommendation uses the functional include boundary 6.0 (the retired
+    8/6 rule is not reusable, per the C2b scale decision).
     """
     summaries_by_paper: dict[str, list[EvidenceSummary]] = {}
     for summary in rerank_response.summaries:
@@ -120,24 +130,15 @@ def aggregate_evidence_assessments(
         evidence_quality = _shrunk_mean(
             [summary.evidence_quality_score for summary in summaries], policy
         )
-        if (
-            relevance >= policy.include_relevance_score
-            and evidence_quality >= policy.include_evidence_quality_score
-        ):
-            recommendation = "include"
-        elif relevance >= policy.consider_relevance_score:
-            recommendation = "consider"
-        else:
-            recommendation = "exclude"
+        recommendation = "include" if relevance >= _UTILITY_INCLUDE_THRESHOLD else "exclude"
 
         evidence = [
             EvidenceCitation(
                 chunk_id=summary.chunk_id,
                 page_start=summary.page_start,
                 page_end=summary.page_end,
-                summary=summary.summary,
-                relevance_score=summary.relevance_score,
-                evidence_quality_score=summary.evidence_quality_score,
+                rationale=summary.rationale_relevance,
+                utility_score=summary.relevance_score,
             )
             for summary in summaries
         ]
@@ -147,8 +148,7 @@ def aggregate_evidence_assessments(
         assessments.append(
             PaperAssessment(
                 paper_id=paper_id,
-                relevance_score=relevance,
-                evidence_quality_score=evidence_quality,
+                utility_score=relevance,
                 recommendation=recommendation,
                 rationale=(
                     f"Evidence-based aggregate from {len(evidence)} chunk(s) "

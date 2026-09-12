@@ -138,14 +138,14 @@ RETAINED_DIRECTION_PAYLOAD = {
     "title": "Harden multilingual evaluation coverage",
     "rationale": "The retained study states evaluation restrictions that motivate broader multilingual benchmarks.",
     "supporting_paper_ids": ["paper-1"],
-    "supporting_chunk_ids": ["paper-1-p1-1-c1"],
+    "supporting_chunk_ids": ["paper-1-c1"],
 }
 
 DIRECTION_PAYLOAD = {
     "title": "Harden multilingual evaluation coverage",
     "rationale": "Both studies state evaluation restrictions that motivate broader multilingual benchmarks.",
     "supporting_paper_ids": ["paper-2"],
-    "supporting_chunk_ids": ["paper-2-p1-1-c1"],
+    "supporting_chunk_ids": ["paper-2-c1"],
 }
 
 
@@ -161,11 +161,8 @@ def make_document(paper_id: str, text: str) -> FullTextDocument:
 def assessment_payload(chunk_id: str) -> dict[str, object]:
     return {
         "chunk_id": chunk_id,
-        "summary": f"The chunk {chunk_id} provides relevant evidence about review agents.",
-        "relevance_score": 10,
-        "evidence_quality_score": 10,
-        "rationale_relevance": "The chunk directly discusses the requested literature review agent topic.",
-        "rationale_quality": "The chunk supplies concrete evidence with sufficient detail.",
+        "rationale": f"The chunk {chunk_id} supplies concrete evidence that directly advances the literature review agent research idea.",
+        "utility_score": 10,
     }
 
 
@@ -174,7 +171,7 @@ def note_payload(paper_id: str) -> dict[str, object]:
         "claims": [
             {
                 "text": f"The study in {paper_id} reports evidence selection results for review agents.",
-                "chunk_ids": [f"{paper_id}-p1-1-c1"],
+                "chunk_ids": [f"{paper_id}-c1"],
                 "aspect": "contribution",
             }
         ],
@@ -195,7 +192,7 @@ class SynthesisFakeClient:
                 if f"Paper ID: {paper_id}\n" in prompt:
                     return json.dumps(note_payload(paper_id))
         if prompt.startswith("Write a fluent literature-review"):
-            real_chunk_ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
+            real_chunk_ids = re.findall(r'"([^"]+-c\d+)"', prompt)
             self.cited_chunk_ids.extend(real_chunk_ids)
             report = (
                 "# Evidence-cited synthesis\n"
@@ -212,14 +209,16 @@ class SynthesisFakeClient:
 
 
 class PaperDropFakeClient(SynthesisFakeClient):
-    """SynthesisFakeClient variant whose future direction cites only the retained paper."""
+    """Variant whose future direction cites only the retained paper and which
+    scores the *unrelated* (thermodynamics) chunks with utility 1, so paper-2
+    falls below the functional threshold and is dropped from notes/synthesis."""
 
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.prompts.append(prompt)
         if prompt.startswith("Summarize this single paper") and "Paper ID: paper-1\n" in prompt:
             return json.dumps(note_payload("paper-1"))
         if prompt.startswith("Write a fluent literature-review"):
-            real_chunk_ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
+            real_chunk_ids = re.findall(r'"([^"]+-c\d+)"', prompt)
             report = (
                 "# Evidence-cited synthesis\n"
                 + "".join(
@@ -230,7 +229,23 @@ class PaperDropFakeClient(SynthesisFakeClient):
                 + "\n## 材料來源清單\n- cited chunk identifiers appear inline above\n"
             )
             return json.dumps({"report": report, "future_directions": [RETAINED_DIRECTION_PAYLOAD]})
-        return super().generate_json(prompt, schema)
+        blocks = re.findall(
+            r"## Chunk (\d+)\nPaper: [^\n]*\| Section: [^\n]*\n(.*?)(?=\n## Chunk |\Z)",
+            prompt,
+            re.DOTALL,
+        )
+        return json.dumps(
+            {
+                "assessments": [
+                    {
+                        "chunk_id": index,
+                        "rationale": "The chunk supplies background context but does not directly advance the literature review agent research idea.",
+                        "utility_score": 1 if "thermodynamics" in text else 10,
+                    }
+                    for index, text in blocks
+                ]
+            }
+        )
 
 
 class ExpandPdfInputsTests(unittest.TestCase):
@@ -289,7 +304,7 @@ class SynthesisPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(len(markers), 1)
         supplied_ids = {
             citation.chunk_id
-            for assessment in result.evidence_assessment_response.assessments
+            for assessment in result.paper_assessments
             for citation in assessment.evidence
         } | {chunk_id for note in result.paper_summaries for chunk_id in note.coverage_chunk_ids}
         self.assertTrue(set(markers).issubset(supplied_ids))
@@ -317,7 +332,7 @@ class SynthesisPipelineTests(unittest.TestCase):
         self.assertEqual([note.paper_id for note in result.paper_summaries], ["paper-2"])
         self.assertEqual([source.paper_id for source in result.paper_sources], ["paper-2"])
 
-    def test_synthesis_pipeline_rcs_single_batch_by_default(self) -> None:
+    def test_synthesis_pipeline_functional_single_batch_by_default(self) -> None:
         client = SynthesisFakeClient()
         result = run_synthesis_pipeline(
             [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)],
@@ -326,24 +341,23 @@ class SynthesisPipelineTests(unittest.TestCase):
             **self.policy_arguments(),
         )
 
-        rcs_calls = sum(
-            1 for prompt in client.prompts if prompt.startswith("Assess each supplied evidence chunk")
+        functional_calls = sum(
+            1 for prompt in client.prompts if prompt.startswith("Score each supplied evidence chunk")
         )
-        self.assertEqual(rcs_calls, 1)  # RCS_BATCH_SIZE defaults to 4; 2 chunks fit one batch
+        self.assertEqual(functional_calls, 1)  # FUNCTIONAL_BATCH_SIZE=5; 4 sampled chunks fit one batch
         self.assertEqual(len(result.paper_summaries), 2)
 
-    def test_synthesis_pipeline_paper_dropped_out_of_corpus_top_k(self) -> None:
+    def test_synthesis_pipeline_unrelated_paper_below_threshold_excluded(self) -> None:
         result = run_synthesis_pipeline(
             [make_document("paper-1", PAPER_TEXT), make_document("paper-2", UNRELATED_TEXT)],
             "literature review agent",
             PaperDropFakeClient(),
             chunk_policy=ChunkPolicy(max_words=60, overlap_words=10),
-            retrieval_policy=EvidenceRetrievalPolicy(top_k=1),
             encoder=FakeEncoder(),
         )
 
         self.assertEqual(
-            [assessment.paper_id for assessment in result.evidence_assessment_response.assessments],
+            [a.paper_id for a in result.paper_assessments],
             ["paper-1"],
         )
         self.assertEqual([note.paper_id for note in result.paper_summaries], ["paper-1"])

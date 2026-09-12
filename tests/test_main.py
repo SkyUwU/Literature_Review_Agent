@@ -139,11 +139,8 @@ class SpecialAlignedEncoder:
 def assessment_payload(chunk_id: str) -> dict[str, object]:
     return {
         "chunk_id": chunk_id,
-        "summary": f"The chunk {chunk_id} provides relevant evidence about review agents.",
-        "relevance_score": 10,
-        "evidence_quality_score": 10,
-        "rationale_relevance": "The chunk directly discusses the requested literature review agent topic.",
-        "rationale_quality": "The chunk supplies concrete evidence with sufficient detail.",
+        "rationale": f"The chunk {chunk_id} supplies concrete evidence that directly advances the literature review agent research idea.",
+        "utility_score": 10,
     }
 
 
@@ -152,7 +149,7 @@ def note_payload(paper_id: str) -> dict[str, object]:
         "claims": [
             {
                 "text": f"The study in {paper_id} reports evidence selection results for review agents.",
-                "chunk_ids": [f"{paper_id}-p1-1-c1"],
+                "chunk_ids": [f"{paper_id}-c1"],
                 "aspect": "contribution",
             }
         ],
@@ -164,7 +161,7 @@ def direction_payload(paper_id: str) -> dict[str, object]:
         "title": "Harden multilingual evaluation coverage",
         "rationale": "Both studies state evaluation restrictions that motivate broader multilingual benchmarks.",
         "supporting_paper_ids": [paper_id],
-        "supporting_chunk_ids": [f"{paper_id}-p1-1-c1"],
+        "supporting_chunk_ids": [f"{paper_id}-c1"],
     }
 
 
@@ -183,7 +180,7 @@ class SynthesisFakeClient:
                 if f"Paper ID: {paper_id}\n" in prompt:
                     return json.dumps(note_payload(paper_id))
         if prompt.startswith("Write a fluent literature-review"):
-            real_chunk_ids = re.findall(r'"chunk_id": "([^"]+)"', prompt)
+            real_chunk_ids = re.findall(r'"([^"]+-c\d+)"', prompt)
             self.cited_chunk_ids.extend(real_chunk_ids)
             report = (
                 "# Evidence-cited synthesis\n"

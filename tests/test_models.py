@@ -10,6 +10,7 @@ from literature_review.models import (
     EvidenceAggregationPolicy,
     EvidenceAssessmentResponse,
     EvidenceChunk,
+    EvidenceCitation,
     EvidenceRetrievalPolicy,
     EvidenceRetrievalResponse,
     EvidenceRerankResponse,
@@ -39,8 +40,7 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             PaperAssessment(
                 paper_id="example",
-                relevance_score=11,
-                evidence_quality_score=3,
+                utility_score=11,
                 recommendation="include",
                 rationale="This rationale is intentionally long enough to validate.",
             )
@@ -48,14 +48,12 @@ class ModelTests(unittest.TestCase):
     def test_float_paper_scores_are_accepted(self) -> None:
         assessment = PaperAssessment(
             paper_id="example",
-            relevance_score=7.5,
-            evidence_quality_score=6.0,
+            utility_score=7.5,
             recommendation="include",
             rationale="This rationale is intentionally long enough to validate.",
         )
 
-        self.assertEqual(assessment.relevance_score, 7.5)
-        self.assertEqual(assessment.evidence_quality_score, 6.0)
+        self.assertEqual(assessment.utility_score, 7.5)
 
     def test_chunk_assessment_score_above_ten_rejected(self) -> None:
         with self.assertRaises(ValidationError):
@@ -93,6 +91,89 @@ class ModelTests(unittest.TestCase):
                 "evidence_quality_score",
             ],
         )
+
+    def test_functional_assessment_field_order_matches_prompt_contract(self) -> None:
+        from literature_review.models import LlmFunctionalAssessment
+
+        properties = list(LlmFunctionalAssessment.model_json_schema()["properties"])
+        self.assertEqual(properties, ["chunk_id", "rationale", "utility_score"])
+
+    def test_functional_assessment_score_above_ten_rejected(self) -> None:
+        from literature_review.models import LlmFunctionalAssessment
+
+        with self.assertRaises(ValidationError):
+            LlmFunctionalAssessment(
+                chunk_id="c1",
+                rationale="This rationale is intentionally long enough to validate.",
+                utility_score=11,
+            )
+
+    def test_functional_assessment_rejects_short_rationale(self) -> None:
+        from literature_review.models import LlmFunctionalAssessment
+
+        with self.assertRaises(ValidationError):
+            LlmFunctionalAssessment(
+                chunk_id="c1",
+                rationale="too short",
+                utility_score=8,
+            )
+
+    def test_functional_assessment_rejects_extra_field(self) -> None:
+        from literature_review.models import LlmFunctionalAssessment
+
+        with self.assertRaises(ValidationError):
+            LlmFunctionalAssessment(
+                chunk_id="c1",
+                rationale="This rationale is intentionally long enough to validate.",
+                utility_score=8,
+                recommendation="include",
+            )
+
+    def test_functional_assessment_batch_requires_at_least_one_assessment(self) -> None:
+        from literature_review.models import LlmFunctionalAssessmentBatch
+
+        with self.assertRaises(ValidationError):
+            LlmFunctionalAssessmentBatch(assessments=[])
+
+    def test_paper_assessment_rejects_retired_consider_recommendation(self) -> None:
+        with self.assertRaises(ValidationError):
+            PaperAssessment(
+                paper_id="example",
+                utility_score=7.0,
+                recommendation="consider",
+                rationale="This rationale is intentionally long enough to validate.",
+            )
+
+    def test_functional_scoring_policy_defaults(self) -> None:
+        from literature_review.models import FunctionalScoringPolicy
+
+        policy = FunctionalScoringPolicy()
+        self.assertEqual(policy.batch_size, 5)
+        self.assertEqual(policy.top_chunks_per_paper, 2)
+        self.assertEqual(policy.n_first_round, 2)
+        self.assertEqual(policy.n_follow_up, 1)
+        self.assertEqual(policy.threshold, 6.0)
+        self.assertEqual(policy.min_words, 4)
+
+    def test_functional_paper_score_round_trip(self) -> None:
+        from literature_review.models import FunctionalPaperScore
+
+        score = FunctionalPaperScore(
+            paper_id="p1",
+            utility_score=7.5,
+            n_samples=2,
+            evidence=[
+                EvidenceCitation(
+                    chunk_id="p1-p1-1-c1",
+                    rationale="This rationale is intentionally long enough to validate.",
+                    utility_score=8,
+                )
+            ],
+        )
+
+        restored = FunctionalPaperScore.model_validate_json(score.model_dump_json())
+
+        self.assertEqual(restored, score)
 
     def test_search_limit_must_be_positive(self) -> None:
         with self.assertRaises(ValidationError):
@@ -176,8 +257,7 @@ def evidence_assessment_response() -> EvidenceAssessmentResponse:
         assessments=[
             PaperAssessment(
                 paper_id="p1",
-                relevance_score=8,
-                evidence_quality_score=7,
+                utility_score=8.0,
                 recommendation="include",
                 rationale="This rationale is intentionally long enough to validate.",
             )

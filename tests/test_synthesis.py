@@ -78,11 +78,10 @@ def compact_sectioned_chunks(paper_id: str) -> list[EvidenceChunk]:
     ]
 
 
-def make_assessment(paper_id: str, relevance_score: int) -> PaperAssessment:
+def make_assessment(paper_id: str, utility_score: int) -> PaperAssessment:
     return PaperAssessment(
         paper_id=paper_id,
-        relevance_score=relevance_score,
-        evidence_quality_score=4,
+        utility_score=utility_score,
         recommendation="include",
         rationale=f"Evidence-based aggregate for {paper_id} derived from the supplied retrieved chunks.",
         evidence=[
@@ -90,9 +89,8 @@ def make_assessment(paper_id: str, relevance_score: int) -> PaperAssessment:
                 chunk_id=f"{paper_id}-p2-2-c1",
                 page_start=2,
                 page_end=2,
-                summary=f"Trusted fixture summary for one chunk of {paper_id} with sufficient length.",
-                relevance_score=8,
-                evidence_quality_score=6,
+                rationale=f"Trusted fixture rationale for one chunk of {paper_id} with sufficient length.",
+                utility_score=8,
             )
         ],
     )
@@ -107,9 +105,9 @@ def make_evidence_assessment_response(
             paper_id=assessment.paper_id,
             page_start=citation.page_start,
             page_end=citation.page_end,
-            summary=citation.summary,
-            relevance_score=citation.relevance_score,
-            evidence_quality_score=citation.evidence_quality_score,
+            summary=citation.rationale,
+            relevance_score=citation.utility_score,
+            evidence_quality_score=citation.utility_score,
             rationale_relevance="Fixture relevance rationale long enough to satisfy the schema.",
             rationale_quality="Fixture quality rationale long enough to satisfy the schema.",
         )
@@ -316,7 +314,7 @@ class DeterministicDirectionTests(unittest.TestCase):
     def test_convergence_direction(self) -> None:
         chunks = [*plain_chunks("p1"), *plain_chunks("p2")]
         response = make_evidence_assessment_response(
-            [make_assessment("p1", 5), make_assessment("p2", 4)]
+            [make_assessment("p1", 7), make_assessment("p2", 8)]
         )
         packs = build_coverage_packs(chunks, CoveragePackPolicy())
         sources = [
@@ -346,8 +344,7 @@ class DeterministicDirectionTests(unittest.TestCase):
     def test_rejects_synthesis_without_usable_assessments(self) -> None:
         excluded = PaperAssessment(
             paper_id="p1",
-            relevance_score=2,
-            evidence_quality_score=2,
+            utility_score=2.0,
             recommendation="exclude",
             rationale="This paper was excluded by the aggregation policy thresholds.",
         )

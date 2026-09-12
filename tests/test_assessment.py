@@ -119,13 +119,13 @@ class AssessmentTests(unittest.TestCase):
     def test_evidence_quality_score_deprecated_marker(self) -> None:
         self.assertIn("Deprecated", evidence_quality_score.__doc__)
 
-    def test_assessment_recommends_medium_relevance_paper_for_consideration(self) -> None:
+    def test_assessment_excludes_medium_relevance_paper_under_two_way_rule(self) -> None:
         selected = select_papers(ranked_response_0_3(), policy=SelectionPolicy(max_papers=1))
 
         response = assess_selected_papers(selected, AssessmentPolicy())
 
-        self.assertEqual(response.assessments[0].relevance_score, 6)
-        self.assertEqual(response.assessments[0].recommendation, "consider")
+        self.assertEqual(response.assessments[0].utility_score, 6.0)
+        self.assertEqual(response.assessments[0].recommendation, "exclude")
         self.assertIn("full-text", response.limitations[0])
 
     def test_low_ranked_paper_is_excluded(self) -> None:
@@ -134,7 +134,7 @@ class AssessmentTests(unittest.TestCase):
 
         response = assess_selected_papers(selected, AssessmentPolicy())
 
-        self.assertEqual(response.assessments[-1].relevance_score, 2)
+        self.assertEqual(response.assessments[-1].utility_score, 2.0)
         self.assertEqual(response.assessments[-1].recommendation, "exclude")
 
     def test_aggregates_chunk_evidence_with_page_traceability(self) -> None:
@@ -193,11 +193,11 @@ class AssessmentTests(unittest.TestCase):
 
         assessment = result.assessments[0]
         self.assertEqual(assessment.paper_id, "paper-1")
-        self.assertEqual(assessment.relevance_score, 7.8)
-        self.assertEqual(assessment.evidence_quality_score, 6.8)
-        self.assertEqual(assessment.recommendation, "consider")
+        self.assertEqual(assessment.utility_score, 7.8)
+        self.assertEqual(assessment.recommendation, "include")
         self.assertEqual([item.chunk_id for item in assessment.evidence], [chunk_one.chunk_id, chunk_two.chunk_id])
         self.assertEqual((assessment.evidence[0].page_start, assessment.evidence[0].page_end), (2, 3))
+        self.assertEqual(assessment.evidence[0].utility_score, 10)
         self.assertIn("paper-1-p7-7-c2 (pages 7-7)", assessment.rationale)
         self.assertTrue(any("top-k" in item for item in result.limitations))
 
@@ -208,17 +208,15 @@ class ShrunkMeanAggregationTests(unittest.TestCase):
             _rerank_response_with_scores([(10, 10)]), EvidenceAggregationPolicy()
         )
 
-        self.assertEqual(result.assessments[0].relevance_score, 7.8)
-        self.assertEqual(result.assessments[0].evidence_quality_score, 7.8)
-        self.assertEqual(result.assessments[0].recommendation, "consider")
+        self.assertEqual(result.assessments[0].utility_score, 7.8)
+        self.assertEqual(result.assessments[0].recommendation, "include")
 
     def test_shrunk_mean_many_chunks(self) -> None:
         scores = [(10, 8)] * 8
 
         result = aggregate_evidence_assessments(_rerank_response_with_scores(scores), EvidenceAggregationPolicy())
 
-        self.assertEqual(result.assessments[0].relevance_score, 9.5)
-        self.assertEqual(result.assessments[0].evidence_quality_score, 7.7)
+        self.assertEqual(result.assessments[0].utility_score, 9.5)
         self.assertEqual(result.assessments[0].recommendation, "include")
 
     def test_shrunk_mean_zero_strength_behaves_like_rounded_mean(self) -> None:
@@ -226,39 +224,39 @@ class ShrunkMeanAggregationTests(unittest.TestCase):
 
         result = aggregate_evidence_assessments(_rerank_response_with_scores([(5, 4), (4, 3)]), policy)
 
-        self.assertEqual(result.assessments[0].relevance_score, 4.5)
-        self.assertEqual(result.assessments[0].evidence_quality_score, 3.5)
+        self.assertEqual(result.assessments[0].utility_score, 4.5)
+        self.assertEqual(result.assessments[0].recommendation, "exclude")
 
-    def test_include_threshold_at_8_0(self) -> None:
+    def test_utility_score_at_8_7_includes(self) -> None:
         result = aggregate_evidence_assessments(
             _rerank_response_with_scores([(9, 8)] * 10), EvidenceAggregationPolicy()
         )
 
-        self.assertEqual(result.assessments[0].relevance_score, 8.7)
+        self.assertEqual(result.assessments[0].utility_score, 8.7)
         self.assertEqual(result.assessments[0].recommendation, "include")
 
-    def test_include_threshold_below_8_0_falls_to_consider(self) -> None:
+    def test_utility_score_between_6_and_8_still_includes(self) -> None:
         result = aggregate_evidence_assessments(
             _rerank_response_with_scores([(8, 8)] * 6), EvidenceAggregationPolicy()
         )
 
-        self.assertEqual(result.assessments[0].relevance_score, 7.6)
-        self.assertEqual(result.assessments[0].recommendation, "consider")
+        self.assertEqual(result.assessments[0].utility_score, 7.6)
+        self.assertEqual(result.assessments[0].recommendation, "include")
 
-    def test_consider_threshold_at_6_0(self) -> None:
+    def test_utility_score_at_6_5_includes(self) -> None:
         result = aggregate_evidence_assessments(
             _rerank_response_with_scores([(7, 7)] * 2), EvidenceAggregationPolicy()
         )
 
-        self.assertEqual(result.assessments[0].relevance_score, 6.5)
-        self.assertEqual(result.assessments[0].recommendation, "consider")
+        self.assertEqual(result.assessments[0].utility_score, 6.5)
+        self.assertEqual(result.assessments[0].recommendation, "include")
 
-    def test_consider_threshold_below_6_0_excludes(self) -> None:
+    def test_utility_score_below_6_0_excludes(self) -> None:
         result = aggregate_evidence_assessments(
             _rerank_response_with_scores([(5, 5)] * 12), EvidenceAggregationPolicy()
         )
 
-        self.assertEqual(result.assessments[0].relevance_score, 5.0)
+        self.assertEqual(result.assessments[0].utility_score, 5.0)
         self.assertEqual(result.assessments[0].recommendation, "exclude")
 
     def test_empty_scores_raise_error(self) -> None:

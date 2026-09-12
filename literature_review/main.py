@@ -33,7 +33,6 @@ from literature_review.extraction import extract_pdf_text
 from literature_review.llm_evidence import GeminiJsonClient, JsonGenerationClient, LlmEvidenceError
 from literature_review.ollama_client import OllamaJsonClient
 from literature_review.models import (
-    EvidenceRetrievalPolicy,
     FullTextDocument,
     RankedPaper,
     SearchRequest,
@@ -47,7 +46,7 @@ from literature_review.ranking import FilterPolicy, filter_and_rank
 LIMIT = 100
 MIN_YEAR = 2021
 TOTAL_TARGET = 20
-TOP_K_CHUNKS = 32
+TOP_K_CHUNKS = 32  # legacy: C2b per-paper sampling uses FunctionalScoringPolicy.top_chunks_per_paper
 DEST_DIR = Path("data/papers")
 
 
@@ -169,6 +168,9 @@ def run_end_to_end(
     use_screening = client_screen is not None and not dry_run
     screening_result: ScreeningResult | None = None
     follow_ups: list[dict[str, str]] = []
+    paper_queries: dict[str, str] = {}
+    paper_titles: dict[str, str] = {}
+    follow_up_queries: set[str] = set()
 
     if use_screening:
         query_candidates: dict[str, list[RankedPaper]] = {}
@@ -182,6 +184,9 @@ def run_end_to_end(
                 )
             )
         screening_result = screen_candidates(query_candidates, client_screen)
+        follow_up_queries = {
+            fu.query for fu in screening_result.gap.follow_up_queries
+        }
 
         follow_up_candidates: dict[str, list[RankedPaper]] = {}
         if screening_result.gap.follow_up_queries:
@@ -212,6 +217,13 @@ def run_end_to_end(
         for candidates in follow_up_candidates.values():
             for item in candidates:
                 ranked_by_id.setdefault(item.paper.paper_id, item)
+        paper_titles = {
+            paper_id: item.paper.title for paper_id, item in ranked_by_id.items()
+        }
+        # 追蹤 paper_id → 下載來源 query:後寫入者(follow-up)優先,供配額分組用
+        for query_text, decisions in screening_result.decisions.items():
+            for decision in decisions:
+                paper_queries[decision.paper_id] = query_text
 
         keep_ranked: list[RankedPaper] = []
         maybe_ranked: list[RankedPaper] = []
@@ -239,6 +251,12 @@ def run_end_to_end(
             priority_groups={"keep": keep_ranked, "maybe": maybe_ranked},
         )
         stats_per_query.append(result.stats.to_dict())
+        downloaded_ids = set(result.downloaded_paper_ids)
+        paper_queries = {
+            paper_id: query
+            for paper_id, query in paper_queries.items()
+            if paper_id in downloaded_ids
+        }
         downloads.extend(
             {"paper_id": paper_id, "path": str(path)}
             for paper_id, path in zip(
@@ -262,6 +280,10 @@ def run_end_to_end(
                 already_downloaded=already_downloaded,
             )
             stats_per_query.append(result.stats.to_dict())
+            for paper_id in result.downloaded_paper_ids:
+                paper_queries[paper_id] = planned.query
+            for item in ranked_papers:
+                paper_titles.setdefault(item.paper.paper_id, item.paper.title)
             downloads.extend(
                 {"paper_id": paper_id, "path": str(path)}
                 for paper_id, path in zip(
@@ -303,8 +325,10 @@ def run_end_to_end(
         query,
         client_synth,
         client_rcs=client_rcs,
-        retrieval_policy=EvidenceRetrievalPolicy(top_k=TOP_K_CHUNKS, max_chunks_per_paper=6),
         paper_meta=paper_meta,
+        paper_titles=paper_titles,
+        paper_queries=paper_queries,
+        follow_up_queries=follow_up_queries,
     )
     return {
         "plan": plan,

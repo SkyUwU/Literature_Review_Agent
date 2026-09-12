@@ -208,6 +208,29 @@ class LlmEvidenceAssessmentBatch(BaseModel):
     assessments: list[LlmEvidenceAssessment] = Field(min_length=1)
 
 
+class LlmFunctionalAssessment(BaseModel):
+    """Functional (utility) assessment requested from an LLM for one evidence chunk.
+
+    Field order matters: ``rationale`` comes *before* ``utility_score`` so an
+    autoregressive model must restate the chunk's contribution to the research
+    idea before assigning a number (M4 I / A10: understand first, then score).
+    ``utility_score`` rates the chunk's contribution to the research idea on a
+    1-10 scale, independent of the query wording (C2b).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str
+    rationale: str = Field(min_length=20)
+    utility_score: int = Field(ge=1, le=10)
+
+
+class LlmFunctionalAssessmentBatch(BaseModel):
+    """The JSON object an LLM must return for one bounded functional-scoring batch."""
+
+    assessments: list[LlmFunctionalAssessment] = Field(min_length=1)
+
+
 class EvidenceSummary(LlmEvidenceAssessment):
     """LLM assessment enriched with trusted local evidence provenance."""
 
@@ -225,26 +248,70 @@ class EvidenceRerankResponse(BaseModel):
 
 
 class EvidenceCitation(BaseModel):
-    """Trusted provenance and LLM assessment for one chunk used in a paper assessment."""
+    """Trusted provenance and functional (utility) score for one chunk in a paper assessment.
+
+    C2b: the dual relevance/quality dimensions are retired; ``utility_score``
+    (1-10, int) is a single functional score rated by the LLM for the chunk's
+    contribution to the research idea. ``rationale`` restates the chunk's
+    content and its contribution (understand first, then score, M4 I / A10).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     chunk_id: str
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
-    summary: str = Field(min_length=20)
-    relevance_score: int = Field(ge=1, le=10)
-    evidence_quality_score: int = Field(ge=1, le=10)
+    rationale: str = Field(min_length=20)
+    utility_score: int = Field(ge=1, le=10)
 
 
 class PaperAssessment(BaseModel):
-    """Why a paper is or is not useful for the current idea."""
+    """Why a paper is or is not useful for the current idea (C2b two-way).
+
+    ``utility_score`` (float, 1-10) is the aggregated functional score of the
+    paper's sampled evidence; ``recommendation`` is two-way only
+    (include|exclude) — the ``consider`` band is retired. ``rationale`` must
+    explain the score and the quota/threshold decision.
+    """
 
     paper_id: str
-    relevance_score: float = Field(ge=1, le=10)
-    evidence_quality_score: float = Field(ge=1, le=10)
-    recommendation: Literal["include", "consider", "exclude"]
+    utility_score: float = Field(ge=1, le=10)
+    recommendation: Literal["include", "exclude"]
     rationale: str = Field(min_length=20)
+    evidence: list[EvidenceCitation] = Field(default_factory=list)
+
+
+class FunctionalScoringPolicy(BaseModel):
+    """Settings for the C2b functional evidence-scoring stage.
+
+    ``batch_size`` (env ``FUNCTIONAL_BATCH_SIZE`` at the construction site)
+    bounds how many chunks are scored per LLM call; ``top_chunks_per_paper``
+    caps the per-paper sample before scoring; ``n_first_round`` /
+    ``n_follow_up`` are per-query download quotas; ``threshold`` (env
+    ``FUNCTIONAL_THRESHOLD``) is the minimum mean utility score a paper needs
+    to satisfy the quota part of selection.
+    """
+
+    batch_size: int = Field(default=5, ge=1, le=50)
+    top_chunks_per_paper: int = Field(default=2, ge=1, le=10)
+    n_first_round: int = Field(default=2, ge=1, le=10)
+    n_follow_up: int = Field(default=1, ge=1, le=10)
+    threshold: float = Field(default=6.0, ge=1, le=10)
+    min_words: int = Field(default=4, ge=1, le=50)
+
+
+class FunctionalPaperScore(BaseModel):
+    """One paper's aggregated functional score before quota/threshold selection.
+
+    Carries the mean utility score of the paper's sampled chunks (sample size
+    recorded because fairness is only guaranteed among equal-size samples) and
+    the functional citations backing it. The final include/exclude decision is
+    made by the selector (C2b Todo 3), not by this container.
+    """
+
+    paper_id: str
+    utility_score: float = Field(ge=1, le=10)
+    n_samples: int = Field(ge=1)
     evidence: list[EvidenceCitation] = Field(default_factory=list)
 
 
@@ -379,7 +446,8 @@ class SynthesisResponse(BaseModel):
     """Evidence-cited synthesis that preserves every upstream provenance layer."""
 
     paper_sources: list[PaperSource] = Field(min_length=1)
-    evidence_assessment_response: EvidenceAssessmentResponse
+    evidence_assessment_response: EvidenceAssessmentResponse | None = None
+    paper_assessments: list[PaperAssessment] = Field(default_factory=list)
     paper_summaries: list[PaperSummary] = Field(min_length=1)
     report: str = Field(min_length=100)
     future_directions: list[FutureDirection] = Field(min_length=1)

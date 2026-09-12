@@ -13,9 +13,16 @@ except Exception:  # langfuse 未安裝或 import 失敗 — 不擋 pipeline
     get_client = None
 
 from literature_review.assessment import aggregate_evidence_assessments
-from literature_review.evidence import chunk_document
-from literature_review.embedding_retriever import Encoder, retrieve_evidence_embedding
+from literature_review.coverage import drop_noise_sections
+from literature_review.evidence import chapter_chunk_document, chunk_document
+from literature_review.embedding_retriever import Encoder, default_encoder, retrieve_evidence_embedding
 from literature_review.extraction import PdfExtractionError, extract_pdf_text
+from literature_review.functional import (
+    aggregate_functional,
+    sample_top_chunks_per_paper,
+    score_chunks_functionally,
+    select_quota_threshold,
+)
 from literature_review.llm_evidence import GeminiJsonClient, JsonGenerationClient, LlmEvidenceError, summarize_and_rerank
 from literature_review.models import (
     ChunkPolicy,
@@ -26,6 +33,7 @@ from literature_review.models import (
     EvidenceRetrievalResponse,
     EvidenceRerankResponse,
     FullTextDocument,
+    FunctionalScoringPolicy,
     PaperSummary,
     SynthesisResponse,
 )
@@ -116,15 +124,28 @@ def expand_pdf_inputs(inputs: list[str]) -> list[str]:
 def _prepare_documents(
     documents: list[FullTextDocument],
     chunk_policy: ChunkPolicy,
+    min_words: int = 4,
 ) -> list[tuple[FullTextDocument, list[EvidenceChunk]]]:
-    """Chunk every document, rejecting duplicates and skipping chunkless ones."""
+    """Chunk every document (section-aware), dropping noise regions, rejecting duplicates.
+
+    C2b (A10): the legacy word-overlap ``chunk_document`` is replaced by the
+    section-aware ``chapter_chunk_document`` (chunk ids ``{paper_id}-c{n}`` with a
+    ``section`` heading path); ``drop_noise_sections`` removes
+    references/acknowledgments (and appendix) chunks so notes and functional
+    scoring never see citation noise. Chunks shorter than ``min_words`` words are
+    dropped (default 4, mirroring both the legacy splitter minimum and
+    ``FunctionalScoringPolicy.min_words``), so a near-empty document is skipped
+    with the stderr note below.
+    """
     seen_ids: set[str] = set()
     prepared: list[tuple[FullTextDocument, list[EvidenceChunk]]] = []
     for document in documents:
         if document.paper_id in seen_ids:
             raise ValueError(f"Duplicate paper_id {document.paper_id!r} in the supplied documents.")
         seen_ids.add(document.paper_id)
-        chunks = chunk_document(document, chunk_policy)
+        chunks = drop_noise_sections(chapter_chunk_document(document, chunk_policy))
+        if min_words > 0:
+            chunks = [chunk for chunk in chunks if len(chunk.text.split()) >= min_words]
         if chunks:
             prepared.append((document, chunks))
         else:
@@ -145,39 +166,85 @@ def run_synthesis_pipeline(
     retrieval_policy: EvidenceRetrievalPolicy = EvidenceRetrievalPolicy(),
     coverage_policy: CoveragePackPolicy = CoveragePackPolicy(),
     aggregation_policy: EvidenceAggregationPolicy = EvidenceAggregationPolicy(),
+    functional_policy: FunctionalScoringPolicy | None = None,
     encoder: Encoder | None = None,
     notes_pacing_seconds: float | None = None,
+    paper_titles: dict[str, str] | None = None,
+    paper_queries: dict[str, str] | None = None,
+    follow_up_queries: set[str] | None = None,
 ) -> SynthesisResponse:
-    """Run retrieval, LLM re-ranking, aggregation, notes, and cited synthesis.
+    """Run section-aware chunking, per-paper functional scoring, notes, and cited synthesis.
 
-    ``client`` serves per-paper notes and synthesis (Gemini key2 in real runs).
-    ``client_rcs`` is optional and, when supplied, is used only for the RCS stage
-    (``summarize_and_rerank``); when omitted, ``client`` also serves RCS (the
-    existing single-client behavior / fallback escape hatch).
-    ``paper_meta`` carries each paper's ``(citation_count, venue)`` pair into the
-    RCS prompt as reference signals (M5b); unknown papers get ``n/a`` values.
+    C2b: the corpus-wide RCS stage (``summarize_and_rerank`` then
+    ``aggregate_evidence_assessments``) is retired from this path. ``retrieval_policy``
+    and ``aggregation_policy`` are kept only for CLI/legacy signature compatibility
+    and are ignored (per-paper sampling is driven by
+    ``FunctionalScoringPolicy.top_chunks_per_paper``).
+    ``client_rcs`` is now the *functional-scoring* client: each paper's top sampled
+    chunks are scored against the main research ``query`` (batched utility scores);
+    when omitted, ``client`` serves scoring too. ``paper_titles`` feeds the scoring
+    prompt's paper-title line; ``paper_queries`` maps each paper to the query that
+    downloaded it and ``follow_up_queries`` marks the gap follow-up group, so
+    ``select_quota_threshold`` can apply the per-query quota ∩ threshold rule.
     ``notes_pacing_seconds`` spaces consecutive per-paper note calls (defaults to
     the ``NOTES_PACING_SECONDS`` env value, ~4s; see ``_notes_pacing_seconds``);
     passing 0 disables the pacing for tests.
     """
-    prepared = _prepare_documents(documents, chunk_policy)
-    all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
-    rcs_client = client_rcs or client
-    rerank_response = summarize_and_rerank(
-        retrieve_evidence_embedding(all_chunks, query, retrieval_policy, encoder),
-        rcs_client,
-        batch_size=_rcs_batch_size(),
-        paper_meta=paper_meta,
+    effective_functional_policy = functional_policy or FunctionalScoringPolicy()
+    prepared = _prepare_documents(
+        documents,
+        chunk_policy,
+        min_words=effective_functional_policy.min_words,
     )
-    assessment_response = aggregate_evidence_assessments(rerank_response, aggregation_policy)
+    all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
+    scoring_client = client_rcs or client
+    effective_encoder = encoder if encoder is not None else default_encoder()
+
+    sampled = sample_top_chunks_per_paper(
+        all_chunks,
+        query,
+        top_n=effective_functional_policy.top_chunks_per_paper,
+        encoder=effective_encoder,
+    )
+    sampled_flat = [chunk for chunks in sampled.values() for chunk in chunks]
+    functional_assessments = score_chunks_functionally(
+        query,
+        sampled_flat,
+        scoring_client,
+        batch_size=effective_functional_policy.batch_size,
+        paper_titles=paper_titles,
+    )
+    functional_scores = aggregate_functional(functional_assessments, sampled)
+
+    if paper_queries is None:
+        # 缺省:全部歸一組、配額 = 組內篇數(僅閾值把關),相容舊測試
+        effective_paper_queries = {paper_id: "" for paper_id in functional_scores}
+        effective_follow_ups: set[str] = set()
+        quota = max(1, len(effective_paper_queries))
+        assessments = select_quota_threshold(
+            functional_scores,
+            effective_paper_queries,
+            effective_follow_ups,
+            n_first_round=quota,
+            n_follow_up=quota,
+            threshold=effective_functional_policy.threshold,
+        )
+    else:
+        assessments = select_quota_threshold(
+            functional_scores,
+            paper_queries,
+            follow_up_queries or set(),
+            n_first_round=effective_functional_policy.n_first_round,
+            n_follow_up=effective_functional_policy.n_follow_up,
+            threshold=effective_functional_policy.threshold,
+        )
+
     usable_ids = {
         assessment.paper_id
-        for assessment in assessment_response.assessments
-        if assessment.recommendation in {"include", "consider"}
+        for assessment in assessments
+        if assessment.recommendation == "include"
     }
-    coverage_packs = build_coverage_packs(
-        [chunk for _, chunks in prepared for chunk in chunks], coverage_policy
-    )
+    coverage_packs = build_coverage_packs(all_chunks, coverage_policy)
     pacing = (
         _notes_pacing_seconds() if notes_pacing_seconds is None else notes_pacing_seconds
     )
@@ -190,7 +257,9 @@ def run_synthesis_pipeline(
         paper_summaries.append(
             summarize_paper_notes(document.paper_id, chunks, client, coverage_policy)
         )
-    result = synthesize_report(assessment_response, coverage_packs, paper_summaries, client)
+    result = synthesize_report(
+        None, coverage_packs, paper_summaries, client, paper_assessments=assessments
+    )
     source_paths = {document.paper_id: document.source_path for document, _ in prepared}
     resolved_sources = [
         source.model_copy(update={"source_path": source_paths[source.paper_id]})
@@ -223,9 +292,7 @@ def main() -> None:
     parser.add_argument("--model", default="gemini-3.6-flash", help="Gemini model for the LLM stage")
     arguments = parser.parse_args()
     chunk_policy = ChunkPolicy()
-    retrieval_policy = EvidenceRetrievalPolicy(top_k=arguments.top_k)
     coverage_policy = CoveragePackPolicy()
-    aggregation_policy = EvidenceAggregationPolicy()
 
     try:
         pdf_paths = expand_pdf_inputs(arguments.inputs)
@@ -240,7 +307,7 @@ def main() -> None:
             retrieved = retrieve_evidence_embedding(
                 [chunk for _, document_chunks in prepared for chunk in document_chunks],
                 arguments.query,
-                retrieval_policy,
+                EvidenceRetrievalPolicy(top_k=arguments.top_k),
             )
             print(json.dumps(retrieved.model_dump(mode="json"), ensure_ascii=True, indent=2))
             _flush_langfuse()
@@ -250,9 +317,7 @@ def main() -> None:
             arguments.query,
             GeminiJsonClient(model=arguments.model),
             chunk_policy=chunk_policy,
-            retrieval_policy=retrieval_policy,
             coverage_policy=coverage_policy,
-            aggregation_policy=aggregation_policy,
         )
         print(json.dumps(result.model_dump(mode="json"), ensure_ascii=True, indent=2))
         _flush_langfuse()

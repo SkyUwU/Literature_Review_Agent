@@ -50,8 +50,8 @@ __all__ = [
 
 _QUOTE_MAX_CHARS = 240
 _CONVERGENCE_MIN_PAPERS = 2
-_CONVERGENCE_RELEVANCE_SCORE = 4
-_USABLE_RECOMMENDATIONS = frozenset({"include", "consider"})
+_CONVERGENCE_UTILITY_SCORE = 6
+_USABLE_RECOMMENDATIONS = frozenset({"include"})
 _APPENDIX_BOUNDARY_REGEX: Final[re.Pattern[str]] = re.compile(
     r"(?i)^(?:appendix|supplementary\s+material)\b"
 )
@@ -124,12 +124,18 @@ def _claims_from_chunks(
     ]
 
 
-def _usable_assessments(response: EvidenceAssessmentResponse) -> list[PaperAssessment]:
+def _filter_usable(assessments: list[PaperAssessment]) -> list[PaperAssessment]:
+    """Return assessments whose recommendation is in the usable set."""
     return [
         assessment
-        for assessment in response.assessments
+        for assessment in assessments
         if assessment.recommendation in _USABLE_RECOMMENDATIONS
     ]
+
+
+def _usable_assessments(response: EvidenceAssessmentResponse) -> list[PaperAssessment]:
+    """Legacy wrapper: extract usable assessments from an EvidenceAssessmentResponse."""
+    return _filter_usable(response.assessments)
 
 
 def _make_direction(
@@ -154,9 +160,9 @@ def _convergence_direction(strong: list[PaperAssessment]) -> LlmSynthesisDirecti
     paper_ids = [item.paper_id for item in strong]
     chunk_ids = sorted({citation.chunk_id for item in strong for citation in item.evidence})
     return _make_direction(
-        "Consolidate converging high-relevance evidence",
-        f"{len(strong)} papers ({', '.join(paper_ids)}) independently reach relevance score "
-        f"{_CONVERGENCE_RELEVANCE_SCORE} or higher on their retrieved chunks.",
+        "Consolidate converging high-utility evidence",
+        f"{len(strong)} papers ({', '.join(paper_ids)}) independently reach utility score "
+        f"{_CONVERGENCE_UTILITY_SCORE} or higher on their retrieved chunks.",
         paper_ids,
         chunk_ids,
     )
@@ -188,7 +194,7 @@ def _fallback_direction(assessments: list[PaperAssessment]) -> LlmSynthesisDirec
         return None
     best = min(
         assessments,
-        key=lambda item: (-item.relevance_score, -item.evidence_quality_score, item.paper_id),
+        key=lambda item: (-item.utility_score, item.paper_id),
     )
     return _make_direction(
         f"Extend the strongest single-paper evidence of {best.paper_id}",
@@ -200,12 +206,12 @@ def _fallback_direction(assessments: list[PaperAssessment]) -> LlmSynthesisDirec
 
 
 def _deterministic_directions(
-    response: EvidenceAssessmentResponse,
+    paper_assessments: list[PaperAssessment],
     notes: list[PaperSummary],
 ) -> list[LlmSynthesisDirection]:
-    assessments = _usable_assessments(response)
+    assessments = _filter_usable(paper_assessments)
     convergence = _convergence_direction(
-        [item for item in assessments if item.relevance_score >= _CONVERGENCE_RELEVANCE_SCORE]
+        [item for item in assessments if item.utility_score >= _CONVERGENCE_UTILITY_SCORE]
     )
     limitation_directions = _limitation_directions(notes)
     if convergence is not None:
@@ -219,7 +225,6 @@ def _deterministic_directions(
 def _render_report(
     notes: list[PaperSummary],
     assessments: list[PaperAssessment],
-    response: EvidenceAssessmentResponse,
     source_paths: dict[str, str],
 ) -> str:
     lines = ["# Deterministic evidence-cited synthesis", ""]
@@ -239,14 +244,16 @@ def _render_report(
         for assessment in assessments
     )
 
-    summary_ids_by_paper: dict[str, list[str]] = {}
-    for summary in response.evidence_rerank_response.summaries:
-        summary_ids_by_paper.setdefault(summary.paper_id, []).append(summary.chunk_id)
+    evidence_ids_by_paper: dict[str, list[str]] = {}
+    for assessment in assessments:
+        evidence_ids_by_paper.setdefault(assessment.paper_id, []).extend(
+            citation.chunk_id for citation in assessment.evidence
+        )
     lines.append("")
     lines.append("## 材料來源清單")
     lines.extend(
         f"- {note.paper_id}: source={source_paths.get(note.paper_id, 'unavailable')}; "
-        f"evidence summaries={', '.join(summary_ids_by_paper.get(note.paper_id, [])) or 'none'}; "
+        f"evidence chunks={', '.join(sorted(set(evidence_ids_by_paper.get(note.paper_id, [])))) or 'none'}; "
         f"notes cover={', '.join(note.coverage_chunk_ids)}"
         for note in notes
     )
@@ -254,15 +261,26 @@ def _render_report(
 
 
 def build_deterministic_synthesis(
-    evidence_assessment_response: EvidenceAssessmentResponse,
+    evidence_assessment_response: EvidenceAssessmentResponse | None,
     coverage_packs: dict[str, list[EvidenceChunk]],
     paper_sources: list[PaperSource],
     policy: CoveragePackPolicy,
+    *,
+    paper_assessments: list[PaperAssessment] | None = None,
 ) -> SynthesisResponse:
-    """Compose the template report, per-paper notes, and rule-based directions."""
-    assessments = _usable_assessments(evidence_assessment_response)
+    """Compose the template report, per-paper notes, and rule-based directions.
+
+    ``paper_assessments`` carries the C2b functional scoring path; when supplied it
+    supersedes ``evidence_assessment_response`` (which is kept for the legacy RCS
+    path and may be ``None`` in the functional path).
+    """
+    assessments = (
+        _filter_usable(paper_assessments)
+        if paper_assessments is not None
+        else _usable_assessments(evidence_assessment_response)
+    )
     if not assessments:
-        raise SynthesisError("Synthesis needs at least one include/consider paper assessment.")
+        raise SynthesisError("Synthesis needs at least one include paper assessment.")
 
     notes: list[PaperSummary] = []
     for assessment in assessments:
@@ -273,7 +291,7 @@ def build_deterministic_synthesis(
 
     directions = [
         FutureDirection(**direction.model_dump())
-        for direction in _deterministic_directions(evidence_assessment_response, notes)
+        for direction in _deterministic_directions(assessments, notes)
     ]
     if not directions:
         raise SynthesisError("Could not derive any deterministic future direction.")
@@ -281,8 +299,9 @@ def build_deterministic_synthesis(
     return SynthesisResponse(
         paper_sources=paper_sources,
         evidence_assessment_response=evidence_assessment_response,
+        paper_assessments=assessments,
         paper_summaries=notes,
-        report=_render_report(notes, assessments, evidence_assessment_response, source_paths),
+        report=_render_report(notes, assessments, source_paths),
         future_directions=directions,
         limitations=[
             "Section-sampled coverage, not a full-text reading.",
@@ -490,23 +509,20 @@ def summarize_paper_notes(
 
 
 def build_synthesis_prompt(
-    evidence_assessment_response: EvidenceAssessmentResponse,
+    paper_assessments: list[PaperAssessment],
     paper_summaries: list[PaperSummary],
 ) -> str:
     """Ask the model for a fluent report whose facts cite only supplied chunk identifiers."""
-    usable_ids = {assessment.paper_id for assessment in _usable_assessments(evidence_assessment_response)}
-    summaries = [
+    usable_ids = {assessment.paper_id for assessment in _filter_usable(paper_assessments)}
+    assessment_summaries = [
         {
-            "chunk_id": summary.chunk_id,
-            "paper_id": summary.paper_id,
-            "page_start": summary.page_start,
-            "page_end": summary.page_end,
-            "summary": summary.summary,
-            "relevance_score": summary.relevance_score,
-            "evidence_quality_score": summary.evidence_quality_score,
+            "paper_id": assessment.paper_id,
+            "utility_score": assessment.utility_score,
+            "rationale": assessment.rationale,
+            "evidence_chunk_ids": [citation.chunk_id for citation in assessment.evidence],
         }
-        for summary in evidence_assessment_response.evidence_rerank_response.summaries
-        if summary.paper_id in usable_ids
+        for assessment in paper_assessments
+        if assessment.paper_id in usable_ids
     ]
     notes = [
         {
@@ -534,20 +550,21 @@ def build_synthesis_prompt(
         "explanation, shaped as {'report': <report string>, 'future_directions': <array>}; each direction must "
         "contain 'title', 'rationale', 'supporting_paper_ids', and 'supporting_chunk_ids', where every id comes "
         "from the supplied sets. "
-        f"Evidence summaries: {json.dumps(summaries, ensure_ascii=False)}\n"
+        f"Paper assessments: {json.dumps(assessment_summaries, ensure_ascii=False)}\n"
         f"Per-paper notes: {json.dumps(notes, ensure_ascii=False)}"
     )
 
 
 def _allowed_marker_ids(
-    evidence_assessment_response: EvidenceAssessmentResponse,
+    paper_assessments: list[PaperAssessment],
     paper_summaries: list[PaperSummary],
     usable_ids: set[str],
 ) -> set[str]:
     return {
-        summary.chunk_id
-        for summary in evidence_assessment_response.evidence_rerank_response.summaries
-        if summary.paper_id in usable_ids
+        citation.chunk_id
+        for assessment in paper_assessments
+        if assessment.paper_id in usable_ids
+        for citation in assessment.evidence
     } | {
         chunk_id
         for note in paper_summaries
@@ -558,27 +575,35 @@ def _allowed_marker_ids(
 
 @observe(name="synthesis_report")
 def synthesize_report(
-    evidence_assessment_response: EvidenceAssessmentResponse,
+    evidence_assessment_response: EvidenceAssessmentResponse | None,
     coverage_packs: dict[str, list[EvidenceChunk]],
     paper_summaries: list[PaperSummary],
     client: JsonGenerationClient,
+    *,
+    paper_assessments: list[PaperAssessment] | None = None,
 ) -> SynthesisResponse:
     """Produce the final evidence-cited synthesis through one bounded LLM call.
 
+    ``paper_assessments`` carries the C2b functional scoring path; when supplied it
+    supersedes ``evidence_assessment_response`` (kept for the legacy RCS path).
     Local file paths are not part of the assessment contract, so paper sources are
     reported as unavailable here; the pipeline layer that owns real paths can replace them.
     """
-    assessments = _usable_assessments(evidence_assessment_response)
+    assessments = (
+        _filter_usable(paper_assessments)
+        if paper_assessments is not None
+        else _usable_assessments(evidence_assessment_response)
+    )
     if not assessments:
-        raise SynthesisError("Synthesis needs at least one include/consider paper assessment.")
+        raise SynthesisError("Synthesis needs at least one include paper assessment.")
     usable_ids = {assessment.paper_id for assessment in assessments}
     batch = _generate_validated(
         client,
         LlmSynthesisBatch,
-        build_synthesis_prompt(evidence_assessment_response, paper_summaries),
+        build_synthesis_prompt(assessments, paper_summaries),
         LlmSynthesisBatch.model_json_schema(),
     )
-    allowed_ids = _allowed_marker_ids(evidence_assessment_response, paper_summaries, usable_ids)
+    allowed_ids = _allowed_marker_ids(assessments, paper_summaries, usable_ids)
     markers = _MARKER_REGEX.findall(batch.report)
     if not markers:
         raise SynthesisError("LLM report must contain at least one inline [chunk_id] citation marker.")
@@ -600,8 +625,8 @@ def synthesize_report(
             )
     excluded_count = sum(
         1
-        for assessment in evidence_assessment_response.assessments
-        if assessment.recommendation == "exclude"
+        for assessment in (paper_assessments or [])
+        if assessment.recommendation != "include"
     )
     limitations = [
         "Section-sampled coverage, not a full-text reading.",
@@ -615,6 +640,7 @@ def synthesize_report(
             for paper_id in sorted(usable_ids & coverage_packs.keys())
         ],
         evidence_assessment_response=evidence_assessment_response,
+        paper_assessments=assessments,
         paper_summaries=[note for note in paper_summaries if note.paper_id in usable_ids],
         report=batch.report,
         future_directions=[
