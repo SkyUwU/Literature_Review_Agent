@@ -191,8 +191,11 @@ def run_synthesis_pipeline(
     chunks are scored against the main research ``query`` (batched utility scores);
     when omitted, ``client`` serves scoring too. ``paper_titles`` feeds the scoring
     prompt's paper-title line; ``paper_queries`` maps each paper to the query that
-    downloaded it and ``follow_up_queries`` marks the gap follow-up group, so
-    ``select_quota_threshold`` can apply the per-query quota ∩ threshold rule.
+    downloaded it — the sub-query also drives per-paper *sampling* (S2: the top
+    chunks of each paper are ranked against that paper's own query), while scoring
+    still uses the main ``query`` — and ``follow_up_queries`` marks the gap
+    follow-up group, so ``select_quota_threshold`` can apply the per-query
+    quota ∩ threshold rule.
     ``notes_pacing_seconds`` spaces consecutive per-paper note calls (defaults to
     the ``NOTES_PACING_SECONDS`` env value, ~4s; see ``_notes_pacing_seconds``);
     passing 0 disables the pacing for tests.
@@ -216,6 +219,7 @@ def run_synthesis_pipeline(
         query,
         top_n=effective_functional_policy.top_chunks_per_paper,
         encoder=effective_encoder,
+        query_map=paper_queries,
     )
     sampled_flat = [chunk for chunks in sampled.values() for chunk in chunks]
     functional_assessments = score_chunks_functionally(
@@ -225,7 +229,11 @@ def run_synthesis_pipeline(
         batch_size=effective_functional_policy.batch_size,
         paper_titles=paper_titles,
     )
-    functional_scores = aggregate_functional(functional_assessments, sampled)
+    functional_scores = aggregate_functional(
+        functional_assessments,
+        sampled,
+        max_weight=effective_functional_policy.max_weight,
+    )
 
     if paper_queries is None:
         # 缺省:全部歸一組、配額 = 組內篇數(僅閾值把關),相容舊測試

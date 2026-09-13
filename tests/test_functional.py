@@ -159,10 +159,24 @@ class FunctionalPromptTests(unittest.TestCase):
     def test_prompt_instructs_functional_utility_not_query_literal(self) -> None:
         prompt = build_functional_prompt("Rank evidence.", evidence_chunks(1))
         self.assertIn("rationale first", prompt)
-        self.assertIn("(1-10)", prompt)
+        self.assertIn("(0-10)", prompt)  # S4: 0 分錨點放寬下限
         self.assertIn("NOT how literally", prompt)
-        self.assertIn("10 directly provides a reusable method", prompt)
+        self.assertIn("10 directly provides one of the three support kinds", prompt)
         self.assertIn("5-6 useful background", prompt)
+
+    def test_prompt_lists_three_support_kinds_as_examples(self) -> None:
+        # S4: 三類支持檢查清單(舉例性質,不限於此)
+        prompt = build_functional_prompt("Rank evidence.", evidence_chunks(1))
+        self.assertIn("examples only, not an exhaustive list", prompt)
+        self.assertIn("problem-definition or pain-point support", prompt)
+        self.assertIn("reusable technical mechanisms", prompt)
+        self.assertIn("experimental and evaluation grounding", prompt)
+
+    def test_prompt_anchors_zero_score_with_rationale_requirement(self) -> None:
+        # S4: 0 分錨點(純常識/泛泛而談/無關)+ 給 0 分必須說明理由
+        prompt = build_functional_prompt("Rank evidence.", evidence_chunks(1))
+        self.assertIn("0 pure common knowledge", prompt)
+        self.assertIn("If you assign 0, state in the rationale", prompt)
 
     def test_missing_titles_and_sections_fall_back_to_na(self) -> None:
         prompt = build_functional_prompt(
@@ -183,6 +197,15 @@ class FunctionalValidationTests(unittest.TestCase):
         )
         self.assertEqual(batch.assessments[0].chunk_id, "1")
         self.assertEqual(batch.assessments[0].utility_score, 8)
+
+    def test_accepts_utility_score_zero(self) -> None:
+        # S4:utility_score 下限放寬到 0(純常識/泛泛而談/無關 → 0 分)
+        batch = validate_functional_assessments(
+            '{"assessments": [{"chunk_id": "1", '
+            '"rationale": "Common knowledge stated without specific detail, unrelated to the research idea.", '
+            '"utility_score": 0}]}'
+        )
+        self.assertEqual(batch.assessments[0].utility_score, 0)
 
     def test_reports_first_schema_failure_without_echoing_model_output(self) -> None:
         with self.assertRaisesRegex(FunctionalScoringError, "rationale"):
@@ -386,6 +409,24 @@ class KeywordEncoder:
         return [[1.0 if self.keyword in text else 0.0] for text in texts]
 
 
+class MultiKeywordEncoder:
+    """Deterministic fake encoder with one dimension per keyword (S2 tests).
+
+    Lets a sub-query vector differ from the main query vector, so a paper
+    sampled under its own sub-query ranks its chunks differently than under
+    the main query.
+    """
+
+    def __init__(self, keywords: list[str]) -> None:
+        self.keywords = keywords
+
+    def __call__(self, texts: list[str]) -> list[list[float]]:
+        return [
+            [1.0 if keyword in text else 0.0 for keyword in self.keywords]
+            for text in texts
+        ]
+
+
 def keyword_chunks(
     paper_id: str,
     count: int,
@@ -515,6 +556,95 @@ class FunctionalSamplingTests(unittest.TestCase):
         )
         self.assertEqual(sampled, {})
 
+    def test_query_map_subsamples_paper_under_its_own_subquery(self) -> None:
+        # paper-b 的 c1 對主 query "method" 相似、c2 對其 sub-query "baseline" 相似
+        # (S2):有 map → paper-b 用 sub-query 取樣,取樣結果與無 map 不同
+        encoder = MultiKeywordEncoder(["method", "baseline"])
+        chunks = [
+            EvidenceChunk(
+                chunk_id="paper-b-c1",
+                paper_id="paper-b",
+                section="Results",
+                page_start=1,
+                page_end=1,
+                text="method results with enough detail for functional scoring in tests.",
+            ),
+            EvidenceChunk(
+                chunk_id="paper-b-c2",
+                paper_id="paper-b",
+                section="Results",
+                page_start=2,
+                page_end=2,
+                text="baseline results with enough detail for functional scoring in tests.",
+            ),
+        ]
+
+        without_map = sample_top_chunks_per_paper(
+            chunks, "method", top_n=2, encoder=encoder
+        )
+        with_map = sample_top_chunks_per_paper(
+            chunks,
+            "method",
+            top_n=2,
+            encoder=encoder,
+            query_map={"paper-b": "baseline"},
+        )
+
+        self.assertEqual(
+            [item.chunk_id for item in without_map["paper-b"]],
+            ["paper-b-c1", "paper-b-c2"],
+        )
+        self.assertEqual(
+            [item.chunk_id for item in with_map["paper-b"]],
+            ["paper-b-c2", "paper-b-c1"],
+        )
+
+    def test_query_map_absent_and_empty_entries_fall_back_to_main_query(self) -> None:
+        # (S2/P2):不在 map 內或值為空字串 → 回退主 query "method"
+        encoder = MultiKeywordEncoder(["method", "baseline"])
+        chunks = [
+            EvidenceChunk(
+                chunk_id="paper-b-c1",
+                paper_id="paper-b",
+                section="Results",
+                page_start=1,
+                page_end=1,
+                text="method results with enough detail for functional scoring in tests.",
+            ),
+            EvidenceChunk(
+                chunk_id="paper-b-c2",
+                paper_id="paper-b",
+                section="Results",
+                page_start=2,
+                page_end=2,
+                text="baseline results with enough detail for functional scoring in tests.",
+            ),
+        ]
+
+        absent = sample_top_chunks_per_paper(
+            chunks,
+            "method",
+            top_n=2,
+            encoder=encoder,
+            query_map={"paper-x": "baseline"},
+        )
+        empty = sample_top_chunks_per_paper(
+            chunks,
+            "method",
+            top_n=2,
+            encoder=encoder,
+            query_map={"paper-b": ""},
+        )
+
+        self.assertEqual(
+            [item.chunk_id for item in absent["paper-b"]],
+            ["paper-b-c1", "paper-b-c2"],
+        )
+        self.assertEqual(
+            [item.chunk_id for item in empty["paper-b"]],
+            ["paper-b-c1", "paper-b-c2"],
+        )
+
 
 class FunctionalAggregationTests(unittest.TestCase):
     def _assessments(
@@ -551,18 +681,51 @@ class FunctionalAggregationTests(unittest.TestCase):
             ]
         }
 
-    def test_mean_is_rounded_to_one_decimal_with_sample_size(self) -> None:
+    def test_weighted_blend_is_rounded_to_one_decimal_with_sample_size(self) -> None:
+        # 0.7*8 + 0.3*7.5 = 7.85 → round → 7.8 (S3)
         assessments = self._assessments([("paper-1-c1", 8), ("paper-1-c2", 7)])
         scores = aggregate_functional(assessments, self._paper_chunks())
 
         score = scores["paper-1"]
-        self.assertEqual(score.utility_score, 7.5)
+        self.assertEqual(score.utility_score, 7.8)
         self.assertEqual(score.n_samples, 2)
 
-    def test_mean_rounds_half_up_case(self) -> None:
+    def test_weighted_blend_max_dominant_case(self) -> None:
+        # 0.7*9 + 0.3*8.5 = 8.85 → round → 8.8 (S3)
         assessments = self._assessments([("paper-1-c1", 8), ("paper-1-c2", 9)])
         score = aggregate_functional(assessments, self._paper_chunks())["paper-1"]
-        self.assertEqual(score.utility_score, 8.5)
+        self.assertEqual(score.utility_score, 8.8)
+
+    def test_weighted_blend_weak_chunk_case(self) -> None:
+        # 0.7*8 + 0.3*5.5 = 7.25 → round → 7.2 (S3: 高分 chunk 主導、弱 chunk 壓制)
+        assessments = self._assessments([("paper-1-c1", 8), ("paper-1-c2", 3)])
+        score = aggregate_functional(assessments, self._paper_chunks())["paper-1"]
+        self.assertEqual(score.utility_score, 7.2)
+
+    def test_max_weight_is_adjustable_via_policy_value(self) -> None:
+        # max_weight=0 → 純 mean (5.5);max_weight=1 → 純 max (8.0)
+        assessments = self._assessments([("paper-1-c1", 8), ("paper-1-c2", 3)])
+        chunks = self._paper_chunks()
+        self.assertEqual(
+            aggregate_functional(assessments, chunks, max_weight=0.0)["paper-1"].utility_score,
+            5.5,
+        )
+        self.assertEqual(
+            aggregate_functional(assessments, chunks, max_weight=1.0)["paper-1"].utility_score,
+            8.0,
+        )
+
+    def test_single_chunk_collapses_regardless_of_weight(self) -> None:
+        # n=1 時 max=mean=該值,權重不影響 (S3)
+        assessments = self._assessments([("paper-1-c1", 8)])
+        score = aggregate_functional(
+            assessments, self._paper_chunks(), max_weight=1.0
+        )["paper-1"]
+        self.assertEqual(score.utility_score, 8.0)
+        self.assertEqual(
+            aggregate_functional(assessments, self._paper_chunks())["paper-1"].utility_score,
+            8.0,
+        )
 
     def test_evidence_citations_carry_chunk_provenance_and_scores(self) -> None:
         assessments = self._assessments([("paper-1-c2", 9), ("paper-1-c1", 7)])

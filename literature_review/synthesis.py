@@ -125,9 +125,8 @@ def build_claim_chunks(paper_summaries: list[PaperSummary]) -> dict[str, list[st
     ``paper_summaries`` document order, and within a paper the claims follow
     their claim order, so the tags are unique across the whole corpus. Each
     tag maps to the paper's evidence chunks cited by that claim (sorted,
-    deduplicated), which is the single source of truth for the mechanical
-    expansion into the external ``FutureDirection.supporting_chunk_ids`` and
-    for the response-level ``claim_chunks`` lookup table.
+    deduplicated), which is the single source of truth for the
+    response-level ``claim_chunks`` lookup table.
     """
     claim_chunks: dict[str, list[str]] = {}
     for summary in paper_summaries:
@@ -137,25 +136,6 @@ def build_claim_chunks(paper_summaries: list[PaperSummary]) -> dict[str, list[st
                 {reference.chunk_id for reference in claim.evidence}
             )
     return claim_chunks
-
-
-def _expand_claim_ids(
-    claim_ids: list[str],
-    claim_chunks: dict[str, list[str]],
-) -> list[str]:
-    """Mechanically expand claim tags into their supporting chunk ids.
-
-    The union is deduplicated and sorted so the outer
-    ``FutureDirection.supporting_chunk_ids`` is deterministic regardless of
-    claim ordering in the LLM payload.
-    """
-    return sorted(
-        {
-            chunk_id
-            for claim_id in claim_ids
-            for chunk_id in claim_chunks.get(claim_id, [])
-        }
-    )
 
 
 def _filter_usable(assessments: list[PaperAssessment]) -> list[PaperAssessment]:
@@ -178,11 +158,12 @@ def _make_direction(
     paper_ids: list[str],
     chunk_ids: list[str],
 ) -> FutureDirection | None:
-    """Build an external (chunk-citing) direction for the deterministic path.
+    """Build an external direction for the deterministic path (S1).
 
     The deterministic path never runs an LLM, so it bypasses the LLM-level
-    ``LlmSynthesisDirection`` (claim-citing) contract and emits
-    ``FutureDirection`` directly with chunk ids.
+    ``LlmSynthesisDirection`` (claim-citing) contract entirely: there is no
+    claim system, and ``FutureDirection.supporting_chunk_ids`` is filled
+    directly, leaving ``supporting_claim_ids`` at its default ``None``.
     """
     if not chunk_ids:
         return None
@@ -456,6 +437,18 @@ def _normalize_title(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
+def merge_numbered_section(aspect: str) -> str:
+    """Collapse a dotted numbered aspect to its top-level number (S5).
+
+    ``2.1 Multi-Agent`` and ``2.1.3 X`` both become ``2``, so sub-section
+    headings flattened into the same markdown level stop fragmenting the
+    aspect list; single-numbered (``1 Introduction``) and unnumbered
+    (``Background``) aspects are kept unchanged.
+    """
+    match = re.match(r"^(\d+)\.\d+", aspect)
+    return match.group(1) if match else aspect
+
+
 def _is_title_segment(first: str, parts: list[str], paper_title: str | None) -> bool:
     """Judge whether the first path segment is the document title, not a section.
 
@@ -484,10 +477,14 @@ def _group_chunks_by_section(
     """Group chunks by their top-level section aspect in first-appearance order.
 
     Legacy chunks without a section path fall into the ``other`` group.
+    Dotted numbered sub-headings are collapsed to their top-level number (S5)
+    so flattened heading levels do not fragment the aspect groups.
     """
     groups: dict[str, list[EvidenceChunk]] = {}
     for chunk in chunks:
-        aspect = top_level_section(chunk.section, paper_title) or "other"
+        aspect = merge_numbered_section(
+            top_level_section(chunk.section, paper_title) or "other"
+        )
         groups.setdefault(aspect, []).append(chunk)
     return groups
 
@@ -830,9 +827,7 @@ def synthesize_report(
                 title=direction.title,
                 rationale=direction.rationale,
                 supporting_paper_ids=direction.supporting_paper_ids,
-                supporting_chunk_ids=_expand_claim_ids(
-                    direction.supporting_claim_ids, claim_chunks
-                ),
+                supporting_claim_ids=direction.supporting_claim_ids,
             )
             for direction in batch.future_directions
         ],

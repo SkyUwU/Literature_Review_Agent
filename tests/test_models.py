@@ -336,7 +336,12 @@ class SynthesisModelTests(unittest.TestCase):
             paper_summaries=[paper_summary()],
             report="X" * 100,
             future_directions=[
-                FutureDirection(title="abc", rationale="A" * 20, supporting_paper_ids=["p1"])
+                FutureDirection(
+                    title="abc",
+                    rationale="A" * 20,
+                    supporting_paper_ids=["p1"],
+                    supporting_chunk_ids=["p1-p1-2-c1"],
+                )
             ],
             limitations=[],
             generated_by="deterministic",
@@ -346,12 +351,29 @@ class SynthesisModelTests(unittest.TestCase):
 
         self.assertEqual(restored, response)
 
-    def test_future_direction_supporting_chunk_ids_default(self) -> None:
-        direction = FutureDirection(
-            title="abc", rationale="A" * 20, supporting_paper_ids=["p1"]
-        )
+    def test_future_direction_supporting_surfaces_require_one(self) -> None:
+        # S1: exactly one of claim ids (LLM path) / chunk ids (deterministic
+        # path) must be non-empty; a direction with neither is rejected.
+        with self.assertRaises(ValidationError):
+            FutureDirection(title="abc", rationale="A" * 20, supporting_paper_ids=["p1"])
 
-        self.assertEqual(direction.supporting_chunk_ids, [])
+        claim_direction = FutureDirection(
+            title="abc",
+            rationale="A" * 20,
+            supporting_paper_ids=["p1"],
+            supporting_claim_ids=["claim-1"],
+        )
+        self.assertEqual(claim_direction.supporting_claim_ids, ["claim-1"])
+        self.assertEqual(claim_direction.supporting_chunk_ids, [])
+
+        chunk_direction = FutureDirection(
+            title="abc",
+            rationale="A" * 20,
+            supporting_paper_ids=["p1"],
+            supporting_chunk_ids=["p1-p2-2-c1"],
+        )
+        self.assertIsNone(chunk_direction.supporting_claim_ids)
+        self.assertEqual(chunk_direction.supporting_chunk_ids, ["p1-p2-2-c1"])
 
     def test_evidence_aggregation_policy_expanded(self) -> None:
         policy = EvidenceAggregationPolicy()
@@ -388,7 +410,12 @@ class SynthesisModelTests(unittest.TestCase):
             paper_summaries=[paper_summary()],
             report="[chunk-id] " + "X" * 100,
             future_directions=[
-                FutureDirection(title="abc", rationale="A" * 20, supporting_paper_ids=["p1"])
+                FutureDirection(
+                    title="abc",
+                    rationale="A" * 20,
+                    supporting_paper_ids=["p1"],
+                    supporting_claim_ids=["claim-1"],
+                )
             ],
             limitations=[],
             generated_by="deterministic",
@@ -423,7 +450,12 @@ class SynthesisModelTests(unittest.TestCase):
             claim_chunks={"claim-1": ["p1-p1-2-c1"]},
             report="[claim-1] " + "X" * 100,
             future_directions=[
-                FutureDirection(title="abc", rationale="A" * 20, supporting_paper_ids=["p1"])
+                FutureDirection(
+                    title="abc",
+                    rationale="A" * 20,
+                    supporting_paper_ids=["p1"],
+                    supporting_claim_ids=["claim-1"],
+                )
             ],
             limitations=[],
             generated_by="deterministic",
@@ -441,7 +473,12 @@ class SynthesisModelTests(unittest.TestCase):
             paper_summaries=[paper_summary()],
             report="X" * 100,
             future_directions=[
-                FutureDirection(title="abc", rationale="A" * 20, supporting_paper_ids=["p1"])
+                FutureDirection(
+                    title="abc",
+                    rationale="A" * 20,
+                    supporting_paper_ids=["p1"],
+                    supporting_chunk_ids=["p1-p1-2-c1"],
+                )
             ],
             limitations=[],
             generated_by="deterministic",

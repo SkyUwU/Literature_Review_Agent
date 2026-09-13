@@ -32,6 +32,7 @@ from literature_review.synthesis import (
     build_deterministic_synthesis,
     build_paper_notes_prompt,
     detect_limitation_chunks,
+    merge_numbered_section,
     summarize_paper_notes,
     synthesize_report,
     top_level_section,
@@ -622,7 +623,9 @@ class LlmSynthesisReportTests(unittest.TestCase):
         markers = re.findall(r"\[([^\[\]]+)\]", result.report)
         self.assertGreaterEqual(len(markers), 2)
         self.assertTrue(set(markers).issubset(set(result.claim_chunks)))
-        self.assertEqual(result.future_directions[0].supporting_chunk_ids, ["p1-p4-4-c4"])
+        direction = result.future_directions[0]
+        self.assertEqual(direction.supporting_claim_ids, ["claim-4"])
+        self.assertEqual(direction.supporting_chunk_ids, [])
         self.assertEqual(
             result.claim_chunks,
             {
@@ -684,7 +687,9 @@ class LlmSynthesisReportTests(unittest.TestCase):
 
         self.assertEqual(len(client.prompts), 2)
         self.assertIn("claim-99", client.prompts[1])
-        self.assertEqual(result.future_directions[0].supporting_chunk_ids, ["p1-p4-4-c4"])
+        direction = result.future_directions[0]
+        self.assertEqual(direction.supporting_claim_ids, ["claim-4"])
+        self.assertEqual(direction.supporting_chunk_ids, [])
 
 
 class SectionClassificationTests(unittest.TestCase):
@@ -846,6 +851,33 @@ class TopLevelSectionTests(unittest.TestCase):
             top_level_section("**Title** > **7 Method**", paper_title="Title"),
             "7 Method",
         )
+
+
+class MergeNumberedSectionTests(unittest.TestCase):
+    """merge_numbered_section: dotted sub-headings collapse to their top number (S5)."""
+
+    def test_dotted_numbered_aspects_collapse_to_top_level_number(self) -> None:
+        self.assertEqual(merge_numbered_section("2.1 Multi-Agent"), "2")
+        self.assertEqual(merge_numbered_section("2.1.3 X"), "2")
+
+    def test_single_numbered_and_unnumbered_aspects_are_kept(self) -> None:
+        self.assertEqual(merge_numbered_section("1 Introduction"), "1 Introduction")
+        self.assertEqual(merge_numbered_section("Background"), "Background")
+        self.assertEqual(merge_numbered_section("2 Method"), "2 Method")
+
+    def test_group_chunks_by_section_merges_dotted_subheadings(self) -> None:
+        # 層級壓平(全部 #)時「2.1/2.2」小節 → 合併成同一個 aspect「2」
+        chunks = [
+            make_chunk("p1", 1, 1, "Surveys under the second chapter keep the fragment aspect stable."),
+            make_chunk("p1", 2, 2, "Benchmarks under the second chapter stay in the same aspect group."),
+        ]
+        chunks[0].section = "2.1 Surveys"
+        chunks[1].section = "2.2 Benchmarks"
+
+        groups = _group_chunks_by_section(chunks)
+
+        self.assertEqual(list(groups), ["2"])
+        self.assertEqual(len(groups["2"]), 2)
 
 
 class SectionAwareNotesInputTests(unittest.TestCase):

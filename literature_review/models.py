@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 
 class ResearchIdea(BaseModel):
@@ -222,7 +222,7 @@ class LlmFunctionalAssessment(BaseModel):
 
     chunk_id: str
     rationale: str = Field(min_length=20)
-    utility_score: int = Field(ge=1, le=10)
+    utility_score: int = Field(ge=0, le=10)
 
 
 class LlmFunctionalAssessmentBatch(BaseModel):
@@ -262,7 +262,7 @@ class EvidenceCitation(BaseModel):
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)
     rationale: str = Field(min_length=20)
-    utility_score: int = Field(ge=1, le=10)
+    utility_score: int = Field(ge=0, le=10)
 
 
 class PaperAssessment(BaseModel):
@@ -275,7 +275,7 @@ class PaperAssessment(BaseModel):
     """
 
     paper_id: str
-    utility_score: float = Field(ge=1, le=10)
+    utility_score: float = Field(ge=0, le=10)
     recommendation: Literal["include", "exclude"]
     rationale: str = Field(min_length=20)
     evidence: list[EvidenceCitation] = Field(default_factory=list)
@@ -289,7 +289,11 @@ class FunctionalScoringPolicy(BaseModel):
     caps the per-paper sample before scoring; ``n_first_round`` /
     ``n_follow_up`` are per-query download quotas; ``threshold`` (env
     ``FUNCTIONAL_THRESHOLD``) is the minimum mean utility score a paper needs
-    to satisfy the quota part of selection.
+    to satisfy the quota part of selection. ``max_weight`` (S3, 2026-09-12)
+    weights the per-paper maximum in ``max_weight * max + (1 - max_weight) *
+    mean`` aggregation — a smoothed max adoption so one outstanding chunk is
+    not drowned by the mean, while the mean still suppresses a single outlier
+    inflating the score. 0.7 is the starting value (policy-tunable).
     """
 
     batch_size: int = Field(default=8, ge=1, le=50)
@@ -298,6 +302,7 @@ class FunctionalScoringPolicy(BaseModel):
     n_follow_up: int = Field(default=1, ge=1, le=10)
     threshold: float = Field(default=6.0, ge=1, le=10)
     min_words: int = Field(default=4, ge=1, le=50)
+    max_weight: float = Field(default=0.7, ge=0, le=1)
 
 
 class FunctionalPaperScore(BaseModel):
@@ -310,7 +315,7 @@ class FunctionalPaperScore(BaseModel):
     """
 
     paper_id: str
-    utility_score: float = Field(ge=1, le=10)
+    utility_score: float = Field(ge=0, le=10)
     n_samples: int = Field(ge=1)
     evidence: list[EvidenceCitation] = Field(default_factory=list)
 
@@ -352,12 +357,30 @@ class EvidenceAssessmentResponse(BaseModel):
 
 
 class FutureDirection(BaseModel):
-    """A proposed next step with links back to supporting papers."""
+    """A proposed next step with links back to supporting papers.
+
+    Two coexisting citation surfaces (S1, 2026-09-12): the LLM path fills
+    ``supporting_claim_ids`` (claim tags, never chunk ids — chunk tracing
+    lives in the response-level ``claim_chunks`` lookup table); the
+    deterministic path (no LLM, no claim system) fills ``supporting_chunk_ids``
+    directly. Exactly one of the two must be non-empty.
+    """
 
     title: str = Field(min_length=3)
     rationale: str = Field(min_length=20)
     supporting_paper_ids: list[str] = Field(min_length=1)
+    supporting_claim_ids: list[str] | None = Field(default=None)
     supporting_chunk_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _at_least_one_supporting_surface(self) -> "FutureDirection":
+        if not self.supporting_claim_ids and not self.supporting_chunk_ids:
+            raise ValueError(
+                "FutureDirection needs at least one supporting surface: "
+                "supporting_claim_ids (LLM path) or supporting_chunk_ids "
+                "(deterministic path)."
+            )
+        return self
 
 
 class LiteratureReviewReport(BaseModel):
@@ -416,8 +439,9 @@ class LlmSynthesisDirection(BaseModel):
     """A future direction requested from an LLM during synthesis.
 
     C2c: the LLM cites ``supporting_claim_ids`` (claim tags, never chunk IDs);
-    the consumer expands the tags mechanically into the external
-    ``FutureDirection.supporting_chunk_ids``.
+    S1 (2026-09-12): the consumer copies the claim tags straight into the
+    external ``FutureDirection.supporting_claim_ids`` — no chunk expansion;
+    chunk tracing lives in the response-level ``claim_chunks`` lookup table.
     """
 
     title: str = Field(min_length=3)
@@ -460,9 +484,10 @@ class SynthesisResponse(BaseModel):
     global consecutive tags assigned in paper-summary document order; the
     mapping to supporting chunks lives in ``claim_chunks``, so the outer
     report surface switches from ``[chunk_id]`` to ``[claim-N]`` plus one
-    shared lookup table. ``FutureDirection`` keeps ``supporting_chunk_ids``
-    as the external field, filled mechanically from the LLM-level
-    ``supporting_claim_ids``.
+    shared lookup table (S1). ``FutureDirection`` carries both surfaces:
+    ``supporting_claim_ids`` is filled directly from the LLM-level direction
+    (no chunk expansion, chunk tracing via ``claim_chunks``), while the
+    deterministic path fills ``supporting_chunk_ids`` directly.
     """
 
     paper_sources: list[PaperSource] = Field(min_length=1)

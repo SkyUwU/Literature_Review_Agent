@@ -283,6 +283,19 @@ C2c 把報告生成從「逐 chunk marker」改成「claim-level marker」（設
 - README.md：marker 契約更新（`[chunk_id]` → `[claim-N]`）、key config 更新（key2=notes/scoring、key3=report）。
 - **Todo 5 真實 run 掛帳**（最終線路：評分 Gemini+B=8、notes key2、報告 key3；收集：claim marker 正確率、材料清單渲染、報告尾端中文瑕疵消失確認、claim→chunks 完整性、各 key call 次數統計）；指令 `printf 'literature review agent\n' | uv run --env-file .env python -m literature_review.main`；`data/papers/` 還原 21 檔基準。**待辦**：commit/push 由使用者親做（指令見計畫檔 Commit strategy，code 1 筆 + docs 1 筆 + push）。
 
+## S1-S5 — 評分線/輸出線調整（2026-09-13；真實 run 掛帳）
+
+S1-S5 四個小改動一次落地：輸出層統一 claim（S1）、top-2 取樣用 sub-query（S2）、論文分數 0.7×max+0.3×mean 聚合（S3）、功能性 prompt 三類支持+0 分錨點（S4）、aspect 編號合併（S5，觀察用）。
+
+- `literature_review/models.py`：`FutureDirection` 雙欄位並存——`supporting_claim_ids`（LLM 路徑）+ `supporting_chunk_ids`（deterministic 路徑），validator 至少一欄非空；`utility_score` 4 處 `ge=1`→`ge=0`（S4 0 分錨點）；`FunctionalScoringPolicy.max_weight = 0.7`（S3，`ge=0, le=1`）。
+- `literature_review/synthesis.py`：`_expand_claim_ids` 刪除（S1：LLM 路徑直接填 `supporting_claim_ids`，不再機械展開回 chunk）；`merge_numbered_section` 新增（S5：`2.1 X`→`2`，單段/無編號原樣保留）+ `_group_chunks_by_section` 每 chunk aspect 過 merge——清單層與 claim aspect 一致；deterministic 路徑維持 `supporting_chunk_ids`（逃生路徑舊行為不破）。
+- `literature_review/functional.py`：`sample_top_chunks_per_paper(..., query_map=None)`（S2：用下載該論文的 sub-query 做 embedding 取樣，`(query_map or {}).get(paper_id) or query` 缺省/空字串回退主 query）；`aggregate_functional(..., max_weight=0.7)`（S3：`max_weight×max + (1-max_weight)×mean`，`round(...,1)` 維持、n=1 不收斂）；`build_functional_prompt` 重寫（S4：`(0-10)`、三類支持檢查清單明示「舉例不限於此」、0 分錨點 = 純常識/泛泛而談/無關、「若給 0 分 rationale 說明」）。
+- `literature_review/pipeline.py`：傳 `query_map=paper_queries`（S2）、`max_weight=effective_functional_policy.max_weight`（S3）。
+- `literature_review/demo.py`：維持相容（`supporting_chunk_ids` 補丁）。
+- 測試遷移與新增：`test_models.py`（雙欄位 validator 兩路徑各一測試）；`test_functional.py`（query_map 有/無/空三路、[8,7]→7.8、[8,9]→8.8、[8,3]→7.2、max_weight 0/1 極值、n=1 collapse、prompt 三類/0 分、(0-10) 驗證通過）；`test_synthesis.py`（`merge_numbered_section` 四規則 + aspect 分組一致性 + FutureDirection 兩路徑）。**346 tests OK**（`s1s5-tests.log`，335→346、+11、零刪除）。fake e2e（test_main+test_pipeline）37 tests OK（`s1s5-fake-e2e.log`）。S3 離線重算對照 `s3-aggregation-compare.md`：mean 版入選 4/10 → 加權版 7/10，threshold 6.0 建議維持（標註待真實 run 複核）。
+- README.md：無需改動（功能性評分細節不屬 README 契約面）。
+- **真實 run 掛帳**（S1-S5 未跑；最終線路一次跑，涵蓋 S2 sub-query 取樣、S3 加權聚合分布、S4 0 分出現率、S5 aspect 碎片化觀察——無層級論文（全部 #）的 aspect 清單是否碎片化、編號合併能否解決）；commit/push 由使用者親做。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.

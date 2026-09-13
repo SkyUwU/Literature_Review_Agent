@@ -71,18 +71,28 @@ def build_functional_prompt(
         "Do not use outside knowledge and do not invent claims. Return exactly one JSON object, "
         "without Markdown code fences or any surrounding explanation. "
         "The object must contain an 'assessments' array. Each item must include chunk_id "
-        "(the chunk number), rationale, and utility_score (1-10). "
+        "(the chunk number), rationale, and utility_score (0-10). "
         "Write the rationale first, then assign the score consistent with it. "
         "The rationale must restate the chunk's core content in your own words and state "
         "how it advances the research idea. "
+        "Before scoring, check whether the chunk provides at least one of the following "
+        "kinds of concrete support — these are examples only, not an exhaustive list: "
+        "① problem-definition or pain-point support — evidence that a problem exists and "
+        "is not yet well solved; ② reusable technical mechanisms — concrete algorithms, "
+        "architectures, or implementation details; ③ experimental and evaluation grounding "
+        "— benchmark datasets, baselines, or evaluation metrics that can be compared "
+        "directly. "
         "Utility measures contribution to the research idea — NOT how literally the chunk "
         "matches the query wording. A chunk can match the wording yet add nothing new, "
         "and a chunk that reuses methods or reports comparable data can be highly useful "
         "without sharing the query's terms. "
-        "Scoring guide. utility_score: 10 directly provides a reusable method, dataset, or "
-        "benchmark that fills a gap in the idea; 7-9 substantively advances a core facet; "
-        "5-6 useful background that frames the idea; 3-4 tangentially related; "
-        "1-2 no contribution to the idea. "
+        "Scoring guide. utility_score: 10 directly provides one of the three support kinds "
+        "and fills a gap in the idea; 7-9 substantively advances a core facet; "
+        "5-6 useful background that frames the idea (indirect support, including surveys "
+        "or positioning); 3-4 tangentially related; 1-2 minimal contribution beyond noise; "
+        "0 pure common knowledge, generic statements, or descriptions unrelated to the "
+        "research idea. If you assign 0, state in the rationale why the chunk is common "
+        "knowledge or unrelated. "
         f"Research idea: {query}\nEvidence chunks:\n" + "\n\n".join(blocks)
     )
 
@@ -202,26 +212,33 @@ def sample_top_chunks_per_paper(
     *,
     top_n: int,
     encoder: Encoder,
+    query_map: dict[str, str] | None = None,
 ) -> dict[str, list[EvidenceChunk]]:
     """Blacklist-filter every paper's chunks, then keep the top-``top_n`` per paper.
 
     Sampling is strictly per-paper: the input chunks are grouped by paper,
     noise sections are dropped inside each paper, and the remaining chunks
-    compete only against the *same paper's* chunks by embedding similarity to
-    the main research query (never across papers, C2b). A paper left with no
-    chunks after blacklisting is excluded from scoring — it simply has no
-    entry in the returned dict, and the selector (Todo 3) records it.
+    compete only against the *same paper's* chunks by embedding similarity
+    (never across papers, C2b). The ranking query is the paper's own
+    sub-query when ``query_map`` says so (S2): the map binds a paper to the
+    search query that downloaded it, so a paper found by a specific
+    sub-query competes under that query's angle instead of the main query's;
+    absent mapping or an empty string falls back to the main ``query``. The
+    scoring stage still scores all sampled chunks against the main query.
+    A paper left with no chunks after blacklisting is excluded from scoring
+    — it simply has no entry in the returned dict.
     """
     by_paper: dict[str, list[EvidenceChunk]] = {}
     for chunk in paper_chunks:
         by_paper.setdefault(chunk.paper_id, []).append(chunk)
 
-    query_vector = encode_query(query, encoder)
     sampled: dict[str, list[EvidenceChunk]] = {}
     for paper_id in sorted(by_paper):
         filtered = drop_noise_sections(by_paper[paper_id])
         if not filtered:
             continue  # blacklisted away -> paper not scored
+        sampling_query = (query_map or {}).get(paper_id) or query
+        query_vector = encode_query(sampling_query, encoder)
         chunk_vectors = encode_chunks(filtered, encoder)
         ranked = sorted(
             zip(filtered, chunk_vectors),
@@ -234,11 +251,17 @@ def sample_top_chunks_per_paper(
 def aggregate_functional(
     assessments: list[LlmFunctionalAssessment],
     per_paper_chunks: dict[str, list[EvidenceChunk]],
+    *,
+    max_weight: float = 0.7,
 ) -> dict[str, FunctionalPaperScore]:
-    """Average per-chunk functional scores into per-paper score containers.
+    """Blend max and mean functional scores into per-paper score containers.
 
-    Each paper's score is the mean of its sampled chunks' utility scores,
-    rounded to one decimal, with the sample size and functional citations
+    Each paper's score is ``max_weight * max + (1 - max_weight) * mean`` of
+    its sampled chunks' utility scores, rounded to one decimal (S3): the max
+    keeps a single strong chunk from being diluted, the mean keeps one outlier
+    from dominating. ``max_weight`` mirrors ``FunctionalScoringPolicy.max_weight``
+    and defaults to 0.7; a single-chunk paper collapses to that chunk's score
+    regardless of the weight. Sample size and functional citations are
     preserved. No recommendation is set here (C2b Q1 fix): the container only
     carries the evidence; the include/exclude decision belongs to the
     quota/threshold selector (Todo 3).
@@ -259,10 +282,10 @@ def aggregate_functional(
 
     scores: dict[str, FunctionalPaperScore] = {}
     for paper_id, paper_assessments in by_paper.items():
-        mean = round(
-            sum(item.utility_score for item in paper_assessments) / len(paper_assessments),
-            1,
-        )
+        values = [item.utility_score for item in paper_assessments]
+        max_score = max(values)
+        mean_score = sum(values) / len(values)
+        combined = round(max_weight * max_score + (1 - max_weight) * mean_score, 1)
         evidence = [
             EvidenceCitation(
                 chunk_id=item.chunk_id,
@@ -275,7 +298,7 @@ def aggregate_functional(
         ]
         scores[paper_id] = FunctionalPaperScore(
             paper_id=paper_id,
-            utility_score=mean,
+            utility_score=combined,
             n_samples=len(paper_assessments),
             evidence=evidence,
         )
