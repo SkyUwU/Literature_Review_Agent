@@ -102,7 +102,7 @@ class FakeScreenClient:
 
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
         self.calls.append(prompt)
-        titles = re.findall(r"### \[\d+\] \d+ (.+)", prompt)
+        matches = re.findall(r"### \[(DOC_\d+)\] \d+ (.+)", prompt)
         first_call = len(self.calls) == 1
         follow_ups = []
         if first_call and self.follow_up_query:
@@ -116,8 +116,8 @@ class FakeScreenClient:
         return json.dumps(
             {
                 "decisions": [
-                    {"title": title, "priority": "keep", "reason": "Directly relevant evidence."}
-                    for title in titles
+                    {"doc_id": f"[{doc_id}]", "priority": "keep", "reason": "Directly relevant evidence."}
+                    for doc_id, _ in matches
                 ],
                 "covered_areas": ["core topic"],
                 "missing_pieces": ["benchmarks"] if follow_ups else [],

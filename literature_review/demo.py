@@ -47,6 +47,7 @@ def build_demo_report() -> LiteratureReviewReport:
             "can audit a generated future direction instead of trusting it blindly."
         ),
         supporting_paper_ids=[paper.paper_id],
+        supporting_chunk_ids=["arXiv:2412.13612-c1"],
     )
     return LiteratureReviewReport(
         idea=idea,

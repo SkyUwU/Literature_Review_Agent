@@ -56,3 +56,34 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(response.skipped_candidates, 1)
         self.assertEqual(response.papers[0].paper_id, "https://openalex.org/W123")
         self.assertEqual(response.papers[0].citation_count, 12)
+
+    def test_truncated_abstract_record_is_skipped_not_crash(self) -> None:
+        def fake_fetcher(_: str) -> dict:
+            return {
+                "meta": {"count": 1},
+                "results": [
+                    {
+                        "id": "https://openalex.org/W789",
+                        "title": "Truncated Abstract Paper",
+                        "authorships": [{"author": {"display_name": "Alan Turing"}}],
+                        "publication_year": 2025,
+                        "abstract_inverted_index": {"How": [0], "LLMs": [1]},
+                        "primary_location": {
+                            "landing_page_url": "https://example.org/truncated",
+                            "source": {"display_name": "TestConf"},
+                        },
+                        "cited_by_count": 3,
+                    },
+                ],
+            }
+
+        # "How LLMs" (9 chars) is shorter than Paper.abstract min_length=20;
+        # paper_from_openalex must skip it instead of raising at construction.
+        response = search_papers(
+            SearchRequest(query="literature review agent", limit=1),
+            json_fetcher=fake_fetcher,
+        )
+
+        self.assertEqual(response.total_candidates, 1)
+        self.assertEqual(response.skipped_candidates, 1)
+        self.assertEqual(response.papers, [])

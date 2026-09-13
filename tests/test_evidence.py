@@ -173,6 +173,36 @@ class ChapterChunkTests(unittest.TestCase):
                 ChunkPolicy(max_words=50, overlap_words=50),
             )
 
+    def test_watermark_short_text_is_dropped_before_construction(self) -> None:
+        markdown = (
+            "_ARTICLE_\n\n"
+            "# **Prospects of Retrieval-Augmented Generation**\n\n"
+            "This body paragraph explains the retrieval augmented generation pipeline."
+        )
+        chunks = chapter_chunk_document(self._document(markdown), ChunkPolicy(max_words=200, overlap_words=10))
+
+        # Pydantic text min_length=20 raises at build time, before the
+        # word-count drop in _prepare_documents can filter this group.
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].chunk_id, "paper-1-c1")
+        self.assertIn("retrieval augmented generation pipeline", chunks[0].text)
+
+    def test_short_noise_group_does_not_shift_subsequent_chunk_ids(self) -> None:
+        markdown = (
+            "## **1 Introduction**\n\n"
+            "This introduction paragraph gives the background for the whole paper.\n\n"
+            "2\n\n"
+            "## **2 Method**\n\n"
+            "This method paragraph explains the deterministic splitting strategy."
+        )
+        chunks = chapter_chunk_document(self._document(markdown), ChunkPolicy(max_words=200, overlap_words=10))
+
+        self.assertEqual(
+            [chunk.section for chunk in chunks],
+            ["1 Introduction", "2 Method"],
+        )
+        self.assertEqual([chunk.chunk_id for chunk in chunks], ["paper-1-c1", "paper-1-c2"])
+
 
 if __name__ == "__main__":
     unittest.main()

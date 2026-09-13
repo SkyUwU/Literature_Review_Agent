@@ -1,10 +1,13 @@
 """Tests for the M5e LLM screening layer: no real network, no API keys.
 
-Covers the single-call screening contract (copy-style title resolution, global
-gap analysis in the same call), the A/B/C diversity bucket sampling, the
-one-repair retry budget, and the follow-up cap of three queries.
+Covers the single-call screening contract (doc-id resolution, global gap
+analysis in the same call, unknown/hallucinated doc ids dropped with a warning),
+the A/B/C diversity bucket sampling, the one-repair retry budget, and the
+follow-up cap of three queries.
 """
 
+import contextlib
+import io
 import json
 import unittest
 from datetime import datetime
@@ -61,7 +64,7 @@ def _ranked(
 
 
 def _screening_payload(
-    titles: list[tuple[str, str]],
+    decisions: list[tuple[str, str]],
     *,
     covered: list[str] | None = None,
     missing: list[str] | None = None,
@@ -69,8 +72,8 @@ def _screening_payload(
 ) -> dict[str, object]:
     return {
         "decisions": [
-            {"title": title, "priority": priority, "reason": "Relevant evidence for the topic."}
-            for title, priority in titles
+            {"doc_id": doc_id, "priority": priority, "reason": "Relevant evidence for the topic."}
+            for doc_id, priority in decisions
         ],
         "covered_areas": covered or ["core topic"],
         "missing_pieces": missing or [],
@@ -135,14 +138,14 @@ class BucketSamplingTests(unittest.TestCase):
 
 
 class ScreeningContractTests(unittest.TestCase):
-    def test_screen_resolves_titles_to_ids_and_keeps_gap(self) -> None:
+    def test_screen_resolves_doc_ids_to_papers_and_keeps_gap(self) -> None:
         candidates = {
             "literature review agent": [_ranked("W1"), _ranked("W2", rank=2)],
         }
         payload = _screening_payload(
             [
-                ("Towards W1: automated literature review agents", "keep"),
-                ("Towards W2: automated literature review agents", "reject"),
+                ("[DOC_1]", "keep"),
+                ("[DOC_2]", "reject"),
             ],
             covered=["core topic"],
             missing=["evaluation benchmarks"],
@@ -177,12 +180,12 @@ class ScreeningContractTests(unittest.TestCase):
         self.assertIsInstance(result.screened_at, datetime)
 
     def test_screen_requires_every_candidate_and_repairs_once(self) -> None:
-        first = _screening_payload([("Towards W1: automated literature review agents", "keep")])
+        first = _screening_payload([("[DOC_1]", "keep")])
         del first["decisions"][0]  # drop one candidate -> resolution error
         repair = _screening_payload(
             [
-                ("Towards W1: automated literature review agents", "keep"),
-                ("Towards W2: automated literature review agents", "reject"),
+                ("[DOC_1]", "keep"),
+                ("[DOC_2]", "reject"),
             ]
         )
         client = FakeClipboardClient([json.dumps(first), json.dumps(repair)])
@@ -199,9 +202,9 @@ class ScreeningContractTests(unittest.TestCase):
         )
 
     def test_screen_raises_when_repair_still_misses_candidates(self) -> None:
-        incomplete = _screening_payload([("Towards W1: automated literature review agents", "keep")])
+        incomplete = _screening_payload([("[DOC_1]", "keep")])
         also_incomplete = _screening_payload(
-            [("Towards W1: automated literature review agents", "keep")]
+            [("[DOC_1]", "keep")]
         )
         client = FakeClipboardClient([json.dumps(incomplete), json.dumps(also_incomplete)])
         candidates = {
@@ -210,15 +213,32 @@ class ScreeningContractTests(unittest.TestCase):
         with self.assertRaises(ScreeningError):
             screen_candidates(candidates, client)
 
-    def test_screen_rejects_unknown_title_after_repair(self) -> None:
+    def test_screen_drops_unknown_doc_id_with_warning_and_keeps_known(self) -> None:
         candidates = {"literature review agent": [_ranked("W1")]}
-        wrong_title = _screening_payload([("Totally different paper title", "keep")])
-        re_wrong = _screening_payload([("Totally different paper title", "keep")])
-        client = FakeClipboardClient([json.dumps(wrong_title), json.dumps(re_wrong)])
+        payload = _screening_payload(
+            [
+                ("[DOC_1]", "keep"),
+                ("[DOC_99]", "keep"),  # hallucinated paper outside the list
+            ]
+        )
+        client = FakeClipboardClient([json.dumps(payload)])
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            result = screen_candidates(candidates, client)
+        self.assertEqual(
+            {d.paper_id: d.priority for d in result.decisions["literature review agent"]},
+            {"W1": "keep"},
+        )
+        self.assertIn("unknown document", buffer.getvalue())
+
+    def test_screen_unknown_doc_id_cannot_replace_a_missing_candidate(self) -> None:
+        candidates = {"literature review agent": [_ranked("W1")]}
+        only_unknown = _screening_payload([("[DOC_9]", "keep")])
+        client = FakeClipboardClient([json.dumps(only_unknown), json.dumps(only_unknown)])
         with self.assertRaises(ScreeningError):
             screen_candidates(candidates, client)
 
-    def test_build_prompt_hides_rank_and_score(self) -> None:
+    def test_build_prompt_lists_doc_ids_and_hides_rank_and_score(self) -> None:
         candidates = {
             "literature review agent": [
                 _ranked("W1", year=2024, title="Alpha paper on review agents", rank=7)
@@ -226,21 +246,24 @@ class ScreeningContractTests(unittest.TestCase):
         }
         prompt = build_screening_prompt(candidates)
         self.assertIn("Alpha paper on review agents", prompt)
+        self.assertIn("[DOC_1]", prompt)
         self.assertIn("## Query 1: literature review agent", prompt)
+        self.assertIn("doc_id", prompt)
+        self.assertIn("do not add or invent", prompt)
         self.assertNotIn("rank", prompt.lower())
         self.assertNotIn("score", prompt.lower())
 
     def test_follow_up_cap_of_three_queries(self) -> None:
         candidates = {"q": [_ranked("W1")]}
         too_many = _screening_payload(
-            [("Towards W1: automated literature review agents", "keep")],
+            [("[DOC_1]", "keep")],
             follow_ups=[
                 {"query": f"follow up {i}", "target_gap": f"gap {i}", "reason": f"reason {i}"}
                 for i in range(4)
             ],
         )
         repaired = _screening_payload(
-            [("Towards W1: automated literature review agents", "keep")],
+            [("[DOC_1]", "keep")],
             follow_ups=[
                 {"query": f"follow up {i}", "target_gap": f"gap {i}", "reason": f"reason {i}"}
                 for i in range(3)
@@ -257,9 +280,9 @@ class ScreeningContractTests(unittest.TestCase):
         }
         duplicated = _screening_payload(
             [
-                ("Towards W1: automated literature review agents", "keep"),
-                ("Towards W1: automated literature review agents", "keep"),
-                ("Towards W2: automated literature review agents", "keep"),
+                ("[DOC_1]", "keep"),
+                ("[DOC_1]", "keep"),
+                ("[DOC_2]", "keep"),
             ]
         )
         client = FakeClipboardClient([json.dumps(duplicated), json.dumps(duplicated)])

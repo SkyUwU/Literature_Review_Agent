@@ -4,13 +4,15 @@ The screening layer sits between embedding ranking and PDF download. Each query'
 top candidates are sampled into three diversity buckets (authority / frontier /
 cross-domain), then all sampled candidates are handed to the LLM in **one** call
 together with the gap analysis (``screen_candidates``). The LLM returns copy-style
-decisions keyed by the paper *title* (never by index), so the program composes the
-real ``paper_id`` provenance back — avoiding the index-tampering failure mode
-observed in the RCS stage (M5b/M5b.1 evidence).
+decisions keyed by the global document id (``[DOC_n]``) shown in the prompt, so the
+program composes the real ``paper_id`` provenance back. Unknown ids (hallucinated
+papers outside the candidate list) are dropped with a warning; missing or
+duplicated decisions for real candidates stay fatal.
 """
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -71,9 +73,9 @@ class ScreeningResult(BaseModel):
 
 
 class _LlmScreenDecision(BaseModel):
-    """LLM-facing decision keyed by the verbatim paper title (copy-style output)."""
+    """LLM-facing decision keyed by the document id shown in the prompt."""
 
-    title: str = Field(min_length=1)
+    doc_id: str = Field(min_length=1, pattern=r"^\[?DOC_\d+\]?$")
     priority: str = Field(pattern="^(keep|maybe|reject)$")
     reason: str = Field(min_length=5)
 
@@ -91,8 +93,29 @@ class ScreeningError(RuntimeError):
     """Raised when an LLM screening output cannot be resolved to the candidates."""
 
 
-def _normalize_title(title: str) -> str:
-    return " ".join(title.lower().split())
+def _normalize_doc_id(doc_id: str) -> str:
+    """Canonical document id: strip brackets/whitespace and uppercase.
+
+    Accepts both ``[DOC_1]`` (as shown in the prompt) and ``DOC_1``.
+    """
+    return doc_id.strip().upper().replace("[", "").replace("]", "")
+
+
+def _doc_id_map(
+    query_candidates: dict[str, list[RankedPaper]],
+) -> dict[str, tuple[str, RankedPaper]]:
+    """Assign one global ``DOC_n`` id per candidate, in prompt display order.
+
+    The numbering is sequential across all queries (query order, then ranked
+    order inside a query) so the id is unique regardless of query grouping.
+    """
+    mapping: dict[str, tuple[str, RankedPaper]] = {}
+    counter = 0
+    for query, ranked in query_candidates.items():
+        for item in ranked:
+            counter += 1
+            mapping[f"DOC_{counter}"] = (query, item)
+    return mapping
 
 
 def _rank_percentile(item: RankedPaper, count: int) -> float:
@@ -190,10 +213,11 @@ def sample_candidates(
 def build_screening_prompt(query_candidates: dict[str, list[RankedPaper]]) -> str:
     """Build the single-call screening prompt over every query's sampled candidates.
 
-    Each candidate is presented as ``### [n] year title`` + abstract — **no rank
-    or score** (avoiding relative-scoring bias, mirroring the RCS input
-    reduction spirit). The output contract is copy-style: decisions reference
-    papers by their exact title, which the program resolves back to paper ids.
+    Each candidate is presented as ``### [DOC_n] year title`` + abstract — **no rank
+    or score** (avoiding relative-scoring bias, mirroring the RCS input reduction
+    spirit). The output contract is id-style: decisions reference papers by their
+    document id ``[DOC_n]`` exactly as displayed, which the program resolves back
+    to paper ids. Unknown ids (papers outside this list) are dropped downstream.
     """
     blocks: list[str] = [
         "You are a scholarly screening reviewer. Below are candidate papers grouped "
@@ -206,24 +230,29 @@ def build_screening_prompt(query_candidates: dict[str, list[RankedPaper]]) -> st
         "too small to fill the review.\n"
         '- "reject": off-topic, redundant, or low-quality; reject it explicitly.\n'
         "- Every candidate must receive exactly one decision. Base each decision on "
-        "the paper's title, abstract, and year only.\n",
+        "the paper's title, abstract, and year only.\n"
+        "- Make decisions only about the papers listed below — do not add or invent "
+        "papers outside this list, and never output a document id that is not "
+        "shown above.\n",
         "Then produce a global gap analysis over ALL candidates: name the areas the "
         "pool already covers, the key pieces still missing (e.g. a missing benchmark "
         "or methodology family), and at most 3 follow-up queries that would fill the "
         "missing pieces. If the pool is already sufficient, return an empty "
         "follow-up list.\n",
         "Return exactly one JSON object matching the provided schema. In every "
-        'decision, set "title" to the candidate\'s EXACT title as listed below '
-        "(copy it word for word).",
+        'decision, set "doc_id" to the candidate\'s exact document id as listed '
+        'above (e.g. "[DOC_1]", copy it word for word).',
     ]
 
+    counter = 0
     for query_index, (query, ranked) in enumerate(query_candidates.items(), start=1):
         blocks.append(f"## Query {query_index}: {query}")
-        for index, item in enumerate(ranked, start=1):
+        for item in ranked:
+            counter += 1
             paper = item.paper
             title = " ".join(paper.title.split())
             abstract = " ".join(paper.abstract.split())
-            blocks.append(f"### [{index}] {paper.year} {title}\n{abstract}")
+            blocks.append(f"### [DOC_{counter}] {paper.year} {title}\n{abstract}")
     return "\n\n".join(blocks)
 
 
@@ -233,15 +262,17 @@ def _build_screening_repair_prompt(
     query_candidates: dict[str, list[RankedPaper]],
 ) -> str:
     """Ask the model to repair a screening output that cannot be resolved."""
-    expected = sorted(
-        {_normalize_title(item.paper.title) for ranked in query_candidates.values() for item in ranked}
+    doc_map = _doc_id_map(query_candidates)
+    lines = "\n".join(
+        f"- [{doc_id}] ({item.paper.year}) {item.paper.title}"
+        for doc_id, (query, item) in doc_map.items()
     )
-    title_lines = "\n".join(f"- {title}" for title in expected)
     return (
         "The previous screening output could not be resolved. "
         f"{error} Return a repaired JSON object with the same schema, where every "
-        "decision copies its paper title EXACTLY from the candidate list below:\n"
-        f"{title_lines}\n"
+        "decision copies its document id EXACTLY from the candidate list below "
+        "(e.g. [DOC_1]):\n"
+        f"{lines}\n"
         "Include decisions for ALL candidates and keep the covered/missing/follow-up "
         "analysis. No Markdown or explanation.\n"
         f"Previous output:\n{raw_output}"
@@ -252,30 +283,34 @@ def _resolve_output(
     output: _LlmScreeningOutput,
     query_candidates: dict[str, list[RankedPaper]],
 ) -> ScreeningResult:
-    """Resolve title-keyed LLM decisions back to paper ids and group them per query."""
-    title_index: dict[str, tuple[str, RankedPaper]] = {}
-    expected_titles: set[str] = set()
-    for query, ranked in query_candidates.items():
-        for item in ranked:
-            normalized = _normalize_title(item.paper.title)
-            title_index[normalized] = (query, item)
-            expected_titles.add(normalized)
+    """Resolve doc-id-keyed LLM decisions back to paper ids, grouped per query.
+
+    Unknown doc ids (hallucinated papers outside the candidate list) are dropped
+    with a warning instead of aborting the run; missing and duplicated decisions
+    for real candidates stay fatal.
+    """
+    doc_map = _doc_id_map(query_candidates)
+    expected_ids: set[str] = set(doc_map)
 
     resolved: dict[str, list[ScreenDecision]] = {query: [] for query in query_candidates}
-    seen_titles: set[str] = set()
+    seen_ids: set[str] = set()
     for decision in output.decisions:
-        normalized = _normalize_title(decision.title)
-        if normalized in seen_titles:
+        doc_id = _normalize_doc_id(decision.doc_id)
+        if doc_id in seen_ids:
             raise ScreeningError(
-                f"Duplicate decision for paper {decision.title!r}; every candidate "
+                f"Duplicate decision for document {decision.doc_id!r}; every candidate "
                 "must receive exactly one decision."
             )
-        hit = title_index.get(normalized)
+        hit = doc_map.get(doc_id)
         if hit is None:
-            raise ScreeningError(
-                f"Unknown paper title {decision.title!r} in the screening output."
+            print(
+                f"WARNING: screening output references unknown document "
+                f"{decision.doc_id!r}; dropping this decision (not in the "
+                "candidate list).",
+                file=sys.stderr,
             )
-        seen_titles.add(normalized)
+            continue
+        seen_ids.add(doc_id)
         query, item = hit
         resolved[query].append(
             ScreenDecision(
@@ -286,7 +321,7 @@ def _resolve_output(
             )
         )
 
-    missing = expected_titles - seen_titles
+    missing = expected_ids - seen_ids
     if missing:
         raise ScreeningError(
             f"Screening output is missing {len(missing)} candidate paper(s); "
@@ -314,7 +349,8 @@ def screen_candidates(
     ``query_candidates`` maps a query string to its sampled ``RankedPaper`` list.
     Uses the shared call-once-parse-repair helper: one initial call, and a single
     repair retry when the output fails Pydantic validation **or cannot be resolved**
-    back to the supplied paper titles (missing / duplicated / unknown titles).
+    back to the supplied candidate document ids (missing / duplicated). Unknown
+    doc ids (hallucinated papers outside the list) are dropped with a warning.
     ``parse`` may be injected for tests and must return a ``ScreeningResult``.
     """
     prompt = build_screening_prompt(query_candidates)

@@ -97,6 +97,10 @@ def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
 
     if not all([paper_id, title, abstract, year]) or not authors:
         return None
+    if len(abstract.strip()) < 20:
+        # Paper.abstract min_length=20 raises at construction; skip truncated
+        # OpenAlex abstracts here instead of crashing the whole search.
+        return None
 
     best_oa = record.get("best_oa_location") or {}
     pdf_url = best_oa.get("pdf_url")

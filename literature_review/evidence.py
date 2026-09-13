@@ -13,6 +13,10 @@ _HEADER_KEYS = ("Header 1", "Section", "Subsection")
 #: line breaks (two trailing spaces + newline); restore them for grouping.
 _HARD_BREAK_REGEX = re.compile(r"[ \t]{2,}\n")
 
+#: EvidenceChunk.text enforces min_length=20 at Pydantic build time; watermark
+#: noise (e.g. ``_ARTICLE_``) must be filtered here, before construction.
+_MIN_CHUNK_CHARS = 20
+
 
 def chunk_document(document: FullTextDocument, policy: ChunkPolicy) -> list[EvidenceChunk]:
     """Create overlapping chunks while retaining the inclusive page range."""
@@ -74,6 +78,10 @@ def chapter_chunk_document(
     for section_doc in splitter.split_text(markdown_text):
         section = _heading_path(section_doc.metadata)
         for text in _split_section_paragraphs(section_doc.page_content, policy):
+            if len(text.strip()) < _MIN_CHUNK_CHARS:
+                # Pydantic raises at construction before _prepare_documents'
+                # min_words drop can run; filter watermark noise here instead.
+                continue
             chunks.append(
                 EvidenceChunk(
                     chunk_id=f"{document.paper_id}-c{len(chunks) + 1}",
