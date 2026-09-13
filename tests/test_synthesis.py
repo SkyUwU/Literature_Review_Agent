@@ -852,6 +852,56 @@ class TopLevelSectionTests(unittest.TestCase):
             "7 Method",
         )
 
+    def test_journal_prefix_title_is_skipped(self) -> None:
+        # C2d 誤判 B:標題帶「Article 」前綴 → 剝前綴後才與 paper_title 比對
+        # 多段路徑 → drop 標題,aspect = 下一段
+        self.assertEqual(
+            top_level_section(
+                "Article Synthesizing scientific literature > 2 Related Work",
+                paper_title="Synthesizing scientific literature",
+            ),
+            "2 Related Work",
+        )
+        # 單段 → drop 後無剩餘 → None(caller 給 other)
+        self.assertIsNone(
+            top_level_section(
+                "Article Synthesizing scientific literature",
+                paper_title="Synthesizing scientific literature",
+            )
+        )
+        # 其他前綴變體
+        self.assertEqual(
+            top_level_section("Research Article X > 1 Intro", paper_title="X"),
+            "1 Intro",
+        )
+
+    def test_author_line_is_skipped(self) -> None:
+        # C2d 誤判 A:首頁作者列 <sup> 標記 ≥2 → metadata → drop
+        self.assertEqual(
+            top_level_section("Fran B<sup>1</sup> · Ana S<sup>1</sup> > Abstract"),
+            "Abstract",
+        )
+        self.assertIsNone(top_level_section("Fran B<sup>1</sup> · Ana S<sup>1</sup>"))
+
+    def test_copyright_line_is_skipped(self) -> None:
+        # © The Author 版權行 → metadata → drop
+        self.assertEqual(
+            top_level_section("© The Author(s) 2024 > Abstract"),
+            "Abstract",
+        )
+        self.assertIsNone(top_level_section("© The Author(s) 2024"))
+
+    def test_metadata_check_only_applies_to_first_segment(self) -> None:
+        # metadata 判別只作用於第一段:第二段的 <sup>/© 字樣不誤傷
+        self.assertEqual(
+            top_level_section("Title > © The Author(s) 2024", paper_title="Title"),
+            "© The Author(s) 2024",
+        )
+        self.assertEqual(
+            top_level_section("Title > Abstract and <sup>1</sup> note", paper_title="Title"),
+            "Abstract and <sup>1</sup> note",
+        )
+
 
 class MergeNumberedSectionTests(unittest.TestCase):
     """merge_numbered_section: dotted sub-headings collapse to their top number (S5)."""

@@ -59,6 +59,15 @@ _MARKER_REGEX: Final[re.Pattern[str]] = re.compile(r"\[([^\[\]]+)\]")
 _EXCLUDED_SUMMARIES_LIMITATION: Final[str] = (
     "{count} excluded paper evidence summaries not included in synthesis"
 )
+_JOURNAL_TITLE_PREFIXES: Final[tuple[str, ...]] = (
+    "article ",
+    "research article ",
+    "journal article ",
+    "full length article ",
+    "original article ",
+    "review article ",
+)
+_METADATA_COPYRIGHT_RE: Final[re.Pattern[str]] = re.compile(r"©\s+the\s+author", re.IGNORECASE)
 _MODEL_T = TypeVar("_MODEL_T", bound=BaseModel)
 
 
@@ -420,6 +429,11 @@ def top_level_section(section: str | None, paper_title: str | None = None) -> st
     possible title position. When it is judged the title, drop it and take the
     first remaining segment; when nothing remains, return ``None`` (the caller
     maps it to ``other``).
+
+    C2d (2026-09-13): a first-page author/copyright metadata line (``<sup>``
+    affiliation markers or ``© The Author``) is dropped before the title check,
+    and journal-article prefixes ("Article …") are stripped from the title
+    comparison only.
     """
     if not section:
         return None
@@ -427,9 +441,43 @@ def top_level_section(section: str | None, paper_title: str | None = None) -> st
     parts = [part for part in parts if part]
     if not parts:
         return None
-    if _is_title_segment(parts[0], parts, paper_title):
+    if _is_metadata_line(parts[0]):
+        parts = parts[1:]
+    if parts and _is_title_segment(parts[0], parts, paper_title):
         parts = parts[1:]
     return parts[0] if parts else None
+
+
+def _strip_journal_prefix(text: str) -> str:
+    """Strip a leading journal-article prefix from a markdown heading.
+
+    pymupdf4llm sometimes emits headings like "Article Synthesizing X" where
+    the actual title is "Synthesizing X" (C2d, misjudgment B). Only the
+    comparison input is affected; every other judgment keeps the raw text.
+    """
+    lower = text.lower()
+    for prefix in _JOURNAL_TITLE_PREFIXES:
+        if lower.startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+
+def _is_metadata_line(text: str) -> bool:
+    """Detect first-page metadata lines masquerading as headings (C2d, misjudgment A).
+
+    pymupdf4llm renders PDF first-page author/copyright blocks as headings.
+    Such lines are not sections and must never become an aspect. Signals are
+    conservative to avoid killing real section titles: two or more ``<sup>``
+    affiliation markers, a single ``<sup>`` marker together with a ``·``/``,``
+    token separator (author-string signature), or a ``© The Author`` copyright
+    line (which cannot be a section).
+    """
+    sup_count = len(re.findall(r"<sup>\d+(?:,\d+)*</sup>", text))
+    if sup_count >= 2:
+        return True
+    if sup_count >= 1 and re.search(r"[·,]", text):
+        return True
+    return bool(_METADATA_COPYRIGHT_RE.search(text))
 
 
 def _normalize_title(text: str) -> str:
@@ -453,7 +501,8 @@ def _is_title_segment(first: str, parts: list[str], paper_title: str | None) -> 
     """Judge whether the first path segment is the document title, not a section.
 
     Three signals (C2c design A): ① the normalized ``paper_title`` equals the
-    segment or starts with it (a truncated path); ② position — the first segment
+    segment or starts with it (a truncated path) — compared against the
+    journal-prefix-stripped segment (C2d); ② position — the first segment
     of a multi-level path sits where a title prefix would be; ③ numbered segments
     are never treated as titles. The misjudgment bias favors keeping segments:
     only signals ① or ② may skip, and a single-segment path is always kept.
@@ -461,7 +510,7 @@ def _is_title_segment(first: str, parts: list[str], paper_title: str | None) -> 
     if re.match(r"^\d", first):
         return False
     if paper_title:
-        normalized = _normalize_title(first)
+        normalized = _normalize_title(_strip_journal_prefix(first))
         normalized_title = _normalize_title(paper_title)
         if normalized and (
             normalized == normalized_title or normalized_title.startswith(normalized)
