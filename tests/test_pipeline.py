@@ -192,6 +192,19 @@ class SynthesisFakeClient:
                 if f"Paper ID: {paper_id}\n" in prompt:
                     self.note_paper_ids.append(paper_id)
                     return json.dumps(note_payload(paper_id))
+        if prompt.startswith("Plan a thematic outline"):
+            real_claim_ids = re.findall(r'"claim_id": "(claim-\d+)"', prompt)
+            return json.dumps(
+                {
+                    "sections": [
+                        {
+                            "title": "Evidence and scope",
+                            "purpose": "groups the supplied claims about evidence-cited review agents.",
+                            "supporting_claim_ids": real_claim_ids,
+                        }
+                    ]
+                }
+            )
         if prompt.startswith("Write a fluent literature-review"):
             real_claim_ids = re.findall(r'"claim_id": "(claim-\d+)"', prompt)
             self.cited_claim_ids.extend(real_claim_ids)
@@ -203,10 +216,10 @@ class SynthesisFakeClient:
                     for claim_id in real_claim_ids
                 )
             )
+            return json.dumps({"report": report})
+        if prompt.startswith("Propose future research directions"):
             claim_id = f"claim-{self.note_paper_ids.index('paper-2') + 1}"
-            return json.dumps(
-                {"report": report, "future_directions": [direction_payload("paper-2", claim_id)]}
-            )
+            return json.dumps({"future_directions": [direction_payload("paper-2", claim_id)]})
         indexes = re.findall(r"## Chunk (\d+)", prompt)
         return json.dumps({"assessments": [assessment_payload(index) for index in indexes]})
 
@@ -221,6 +234,19 @@ class PaperDropFakeClient(SynthesisFakeClient):
         if prompt.startswith("Summarize this single paper") and "Paper ID: paper-1\n" in prompt:
             self.note_paper_ids.append("paper-1")
             return json.dumps(note_payload("paper-1"))
+        if prompt.startswith("Plan a thematic outline"):
+            real_claim_ids = re.findall(r'"claim_id": "(claim-\d+)"', prompt)
+            return json.dumps(
+                {
+                    "sections": [
+                        {
+                            "title": "Evidence and scope",
+                            "purpose": "groups the supplied claims about evidence-cited review agents.",
+                            "supporting_claim_ids": real_claim_ids,
+                        }
+                    ]
+                }
+            )
         if prompt.startswith("Write a fluent literature-review"):
             real_claim_ids = re.findall(r'"claim_id": "(claim-\d+)"', prompt)
             report = (
@@ -231,10 +257,10 @@ class PaperDropFakeClient(SynthesisFakeClient):
                     for claim_id in real_claim_ids
                 )
             )
+            return json.dumps({"report": report})
+        if prompt.startswith("Propose future research directions"):
             claim_id = f"claim-{self.note_paper_ids.index('paper-1') + 1}"
-            return json.dumps(
-                {"report": report, "future_directions": [direction_payload("paper-1", claim_id)]}
-            )
+            return json.dumps({"future_directions": [direction_payload("paper-1", claim_id)]})
         blocks = re.findall(
             r"## Chunk (\d+)\nPaper: [^\n]*\| Section: [^\n]*\n(.*?)(?=\n## Chunk |\Z)",
             prompt,

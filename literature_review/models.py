@@ -457,6 +457,41 @@ class LlmSynthesisBatch(BaseModel):
     future_directions: list[LlmSynthesisDirection] = Field(min_length=1)
 
 
+class LlmOutlineSection(BaseModel):
+    """One thematic section of the two-stage synthesis outline (C2e, call 1).
+
+    ``supporting_claim_ids`` are claim tags copied verbatim from the supplied
+    note claims; the outline stage (``build_outline_prompt``) drives 2-4 such
+    sections, and the report stage writes each section from its own claims.
+    """
+
+    title: str = Field(min_length=3)
+    purpose: str = Field(min_length=10)
+    supporting_claim_ids: list[str] = Field(min_length=1)
+
+
+class LlmSynthesisOutline(BaseModel):
+    """The JSON object an LLM must return for the two-stage outline call."""
+
+    sections: list[LlmOutlineSection] = Field(min_length=1)
+
+
+class LlmSynthesisReportBatch(BaseModel):
+    """The JSON object an LLM must return for the two-stage report call (call 2).
+
+    Unlike the legacy ``LlmSynthesisBatch``, the report call carries no
+    ``future_directions``: they are generated independently by a third call.
+    """
+
+    report: str = Field(min_length=100)
+
+
+class LlmSynthesisDirectionsBatch(BaseModel):
+    """The JSON object an LLM must return for the independent directions call (call 3)."""
+
+    future_directions: list[LlmSynthesisDirection] = Field(min_length=1)
+
+
 class PaperSource(BaseModel):
     """Local file provenance for one paper used in synthesis."""
 

@@ -16,6 +16,8 @@ from literature_review.models import (
     EvidenceRerankResponse,
     EvidenceRetrievalResponse,
     EvidenceSummary,
+    LlmOutlineSection,
+    LlmSynthesisOutline,
     PaperAssessment,
     PaperSource,
     PaperSummary,
@@ -30,7 +32,10 @@ from literature_review.synthesis import (
     build_coverage_packs,
     build_deterministic_paper_notes,
     build_deterministic_synthesis,
+    build_directions_prompt,
+    build_outline_prompt,
     build_paper_notes_prompt,
+    build_report_prompt,
     detect_limitation_chunks,
     merge_numbered_section,
     summarize_paper_notes,
@@ -494,11 +499,38 @@ class ChunkRepairNoteClient:
 
 
 class FakeSynthesisClient:
-    def __init__(self, report: str, directions: list[dict[str, object]]) -> None:
-        self.payload: dict[str, object] = {"report": report, "future_directions": directions}
+    def __init__(self, responses: list[dict[str, object]]) -> None:
+        self.responses = list(responses)
+        self.prompts: list[str] = []
 
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
-        return json.dumps(self.payload)
+        self.prompts.append(prompt)
+        return json.dumps(self.responses.pop(0))
+
+
+def valid_outline_payload() -> dict[str, object]:
+    return {
+        "sections": [
+            {
+                "title": "Background and scope",
+                "purpose": "situates evidence-cited synthesis among review-agent studies.",
+                "supporting_claim_ids": ["claim-1", "claim-2"],
+            },
+            {
+                "title": "Mechanisms and tools",
+                "purpose": "explains how bounded retrieved chunks compose grounded prose.",
+                "supporting_claim_ids": ["claim-3", "claim-4"],
+            },
+        ]
+    }
+
+
+def valid_report_payload(report: str) -> dict[str, object]:
+    return {"report": report}
+
+
+def valid_directions_payload() -> dict[str, object]:
+    return {"future_directions": [valid_direction_payload()]}
 
 
 def valid_note_payload() -> dict[str, object]:
@@ -616,7 +648,18 @@ class LlmSynthesisReportTests(unittest.TestCase):
             "[claim-1].\n\n"
         )
 
-        result = synthesize_report(response, packs, [note], FakeSynthesisClient(report, [valid_direction_payload()]))
+        result = synthesize_report(
+            response,
+            packs,
+            [note],
+            FakeSynthesisClient(
+                [
+                    valid_outline_payload(),
+                    valid_report_payload(report),
+                    valid_directions_payload(),
+                ]
+            ),
+        )
 
         self.assertEqual(result.generated_by, "llm")
         self.assertNotIn("材料來源清單", result.report)
@@ -638,6 +681,57 @@ class LlmSynthesisReportTests(unittest.TestCase):
         self.assertEqual([item.paper_id for item in result.paper_summaries], ["p1"])
         self.assertEqual(result.paper_sources[0].paper_id, "p1")
 
+    def test_synthesize_report_outline_unknown_claim_id_repair(self) -> None:
+        response, packs, note = llm_synthesis_fixture()
+        bad_outline = {
+            "sections": [
+                {
+                    "title": "Background and scope",
+                    "purpose": "situates evidence-cited synthesis among review-agent studies.",
+                    "supporting_claim_ids": ["claim-99"],
+                }
+            ]
+        }
+        report = (
+            "The reviewed study proposes evidence-cited synthesis for literature review agents "
+            "[claim-1]. A second grounded sentence keeps the report long enough to validate."
+        )
+
+        client = FakeSynthesisClient(
+            [
+                bad_outline,
+                valid_outline_payload(),
+                valid_report_payload(report),
+                valid_directions_payload(),
+            ]
+        )
+        result = synthesize_report(response, packs, [note], client)
+
+        self.assertEqual(result.generated_by, "llm")
+        self.assertEqual(len(client.prompts), 4)
+        self.assertIn("claim-99", client.prompts[1])
+        self.assertEqual(result.future_directions[0].supporting_claim_ids, ["claim-4"])
+
+    def test_synthesize_report_outline_unknown_claim_id_rejected(self) -> None:
+        response, packs, note = llm_synthesis_fixture()
+        bad_outline = {
+            "sections": [
+                {
+                    "title": "Background and scope",
+                    "purpose": "situates evidence-cited synthesis among review-agent studies.",
+                    "supporting_claim_ids": ["claim-99"],
+                }
+            ]
+        }
+
+        with self.assertRaises(SynthesisError):
+            synthesize_report(
+                response,
+                packs,
+                [note],
+                FakeSynthesisClient([bad_outline, bad_outline]),
+            )
+
     def test_synthesize_report_unknown_marker(self) -> None:
         response, packs, note = llm_synthesis_fixture()
         report = (
@@ -646,7 +740,18 @@ class LlmSynthesisReportTests(unittest.TestCase):
         )
 
         with self.assertRaises(SynthesisError):
-            synthesize_report(response, packs, [note], FakeSynthesisClient(report, [valid_direction_payload()]))
+            synthesize_report(
+                response,
+                packs,
+                [note],
+                FakeSynthesisClient(
+                    [
+                        valid_outline_payload(),
+                        valid_report_payload(report),
+                        valid_report_payload(report),
+                    ]
+                ),
+            )
 
     def test_synthesize_report_no_markers(self) -> None:
         response, packs, note = llm_synthesis_fixture()
@@ -656,7 +761,17 @@ class LlmSynthesisReportTests(unittest.TestCase):
         )
 
         with self.assertRaises(SynthesisError):
-            synthesize_report(response, packs, [note], FakeSynthesisClient(report, [valid_direction_payload()]))
+            synthesize_report(
+                response,
+                packs,
+                [note],
+                FakeSynthesisClient(
+                    [
+                        valid_outline_payload(),
+                        valid_report_payload(report),
+                    ]
+                ),
+            )
 
     def test_synthesize_report_unknown_claim_marker_repair_retry(self) -> None:
         response, packs, note = llm_synthesis_fixture()
@@ -669,27 +784,150 @@ class LlmSynthesisReportTests(unittest.TestCase):
             "[claim-99]. A second grounded sentence keeps the report long enough to validate."
         )
 
-        class RepairingClient:
-            def __init__(self) -> None:
-                self.prompts: list[str] = []
-                self.responses: list[dict[str, object]] = [
-                    {"report": bad_report, "future_directions": [valid_direction_payload()]},
-                    {"report": good_report, "future_directions": [valid_direction_payload()]},
-                ]
-
-            def generate_json(self, prompt: str, schema: dict | None = None) -> str:
-                self.prompts.append(prompt)
-                return json.dumps(self.responses.pop(0))
-
-        client = RepairingClient()
+        client = FakeSynthesisClient(
+            [
+                valid_outline_payload(),
+                valid_report_payload(bad_report),
+                valid_report_payload(good_report),
+                valid_directions_payload(),
+            ]
+        )
 
         result = synthesize_report(response, packs, [note], client)
 
-        self.assertEqual(len(client.prompts), 2)
-        self.assertIn("claim-99", client.prompts[1])
+        self.assertEqual(len(client.prompts), 4)
+        self.assertIn("claim-99", client.prompts[2])
         direction = result.future_directions[0]
         self.assertEqual(direction.supporting_claim_ids, ["claim-4"])
         self.assertEqual(direction.supporting_chunk_ids, [])
+
+    def test_synthesize_report_directions_call_gets_no_outline(self) -> None:
+        response, packs, note = llm_synthesis_fixture()
+        report = (
+            "The reviewed study proposes evidence-cited synthesis for literature review agents "
+            "[claim-1]. A second grounded sentence keeps the report long enough to validate."
+        )
+
+        client = FakeSynthesisClient(
+            [
+                valid_outline_payload(),
+                valid_report_payload(report),
+                valid_directions_payload(),
+            ]
+        )
+        synthesize_report(response, packs, [note], client)
+
+        self.assertEqual(len(client.prompts), 3)
+        self.assertNotIn("Background and scope", client.prompts[2])
+        self.assertNotIn("Mechanisms and tools", client.prompts[2])
+
+    def test_synthesize_report_prompts_exclude_assessments(self) -> None:
+        response, packs, note = llm_synthesis_fixture()
+        report = (
+            "The reviewed study proposes evidence-cited synthesis for literature review agents "
+            "[claim-1]. A second grounded sentence keeps the report long enough to validate."
+        )
+
+        client = FakeSynthesisClient(
+            [
+                valid_outline_payload(),
+                valid_report_payload(report),
+                valid_directions_payload(),
+            ]
+        )
+        synthesize_report(response, packs, [note], client)
+
+        for prompt in client.prompts:
+            self.assertNotIn("utility_score", prompt)
+
+    def test_synthesize_report_query_reaches_outline_and_directions(self) -> None:
+        response, packs, note = llm_synthesis_fixture()
+        report = (
+            "The reviewed study proposes evidence-cited synthesis for literature review agents "
+            "[claim-1]. A second grounded sentence keeps the report long enough to validate."
+        )
+
+        client = FakeSynthesisClient(
+            [
+                valid_outline_payload(),
+                valid_report_payload(report),
+                valid_directions_payload(),
+            ]
+        )
+        synthesize_report(
+            response,
+            packs,
+            [note],
+            client,
+            query="literature review agents",
+        )
+
+        self.assertEqual(len(client.prompts), 3)
+        self.assertIn("literature review agents", client.prompts[0])
+        self.assertIn("literature review agents", client.prompts[2])
+
+
+class TwoStagePromptTests(unittest.TestCase):
+    """Direct content checks for the three two-stage prompt builders."""
+
+    def _notes(self) -> list[dict[str, object]]:
+        return [
+            {
+                "paper_id": "p1",
+                "claims": [
+                    {"claim_id": "claim-1", "text": "The paper studies evidence-cited synthesis for review agents.", "aspect": "abstract"},
+                    {"claim_id": "claim-2", "text": "The method composes paragraph prose from bounded chunks.", "aspect": "method"},
+                ],
+            }
+        ]
+
+    def _outline(self) -> LlmSynthesisOutline:
+        return LlmSynthesisOutline(
+            sections=[
+                LlmOutlineSection(
+                    title="Background and scope",
+                    purpose="situates evidence-cited synthesis among review-agent studies.",
+                    supporting_claim_ids=["claim-1", "claim-2"],
+                ),
+                LlmOutlineSection(
+                    title="Mechanisms and tools",
+                    purpose="explains how bounded retrieved chunks compose grounded prose.",
+                    supporting_claim_ids=["claim-1"],
+                ),
+            ]
+        )
+
+    def test_build_outline_prompt_contains_claims_and_query_no_assessments(self) -> None:
+        prompt = build_outline_prompt("literature review agents", self._notes(), 2)
+
+        self.assertIn("literature review agents", prompt)
+        self.assertIn("claim-1", prompt)
+        self.assertIn("claim-2", prompt)
+        self.assertNotIn("utility_score", prompt)
+        self.assertNotIn("assessment", prompt)
+        self.assertNotIn("assessed", prompt)
+
+    def test_build_report_prompt_contains_outline_and_claims_no_assessments(self) -> None:
+        prompt = build_report_prompt(self._outline(), self._notes())
+
+        self.assertIn("Background and scope", prompt)
+        self.assertIn("Mechanisms and tools", prompt)
+        self.assertIn("claim-1", prompt)
+        self.assertIn("claim-2", prompt)
+        self.assertNotIn("utility_score", prompt)
+        self.assertNotIn("assessment", prompt)
+        self.assertNotIn("assessed", prompt)
+
+    def test_build_directions_prompt_excludes_outline_no_assessments(self) -> None:
+        prompt = build_directions_prompt("literature review agents", self._notes())
+
+        self.assertIn("literature review agents", prompt)
+        self.assertIn("claim-1", prompt)
+        self.assertNotIn("Background and scope", prompt)
+        self.assertNotIn("Mechanisms and tools", prompt)
+        self.assertNotIn("utility_score", prompt)
+        self.assertNotIn("assessment", prompt)
+        self.assertNotIn("assessed", prompt)
 
 
 class SectionClassificationTests(unittest.TestCase):
@@ -1149,7 +1387,39 @@ class ClaimChunksTests(unittest.TestCase):
 
         with self.assertRaises(SynthesisError):
             synthesize_report(
-                response, packs, [note], FakeSynthesisClient(report, [direction])
+                response,
+                packs,
+                [note],
+                FakeSynthesisClient(
+                    [
+                        valid_outline_payload(),
+                        valid_report_payload(report),
+                        {"future_directions": [direction]},
+                    ]
+                ),
+            )
+
+    def test_direction_unknown_paper_id_rejected(self) -> None:
+        response, packs, note = llm_synthesis_fixture()
+        report = (
+            "The reviewed study proposes evidence-cited synthesis for literature review agents "
+            "[claim-1]. A second grounded sentence keeps the report long enough to validate."
+        )
+        direction = valid_direction_payload()
+        direction["supporting_paper_ids"] = ["ghost-paper"]
+
+        with self.assertRaises(SynthesisError):
+            synthesize_report(
+                response,
+                packs,
+                [note],
+                FakeSynthesisClient(
+                    [
+                        valid_outline_payload(),
+                        valid_report_payload(report),
+                        {"future_directions": [direction]},
+                    ]
+                ),
             )
 
 

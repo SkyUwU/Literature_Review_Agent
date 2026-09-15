@@ -283,7 +283,7 @@ def run_synthesis_pipeline(
             )
         )
     result = synthesize_report(
-        None, coverage_packs, paper_summaries, client_report or client, paper_assessments=assessments
+        None, coverage_packs, paper_summaries, client_report or client, paper_assessments=assessments, query=query
     )
     source_paths = {document.paper_id: document.source_path for document, _ in prepared}
     resolved_sources = [
