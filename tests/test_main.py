@@ -359,9 +359,21 @@ class MainEntryTests(unittest.TestCase):
         report = result["report"]
         self.assertIsInstance(report, SynthesisResponse)
         self.assertEqual(len(report.paper_sources), 2)
+        self.assertEqual(
+            {source.paper_id for source in report.paper_sources},
+            {"W1", "W2"},
+        )
+        self.assertTrue(
+            all(source.claim_ids for source in report.paper_sources),
+            "every resolved paper source carries claim-N tags",
+        )
+        self.assertEqual(
+            {claim for source in report.paper_sources for claim in source.claim_ids},
+            set(report.claim_chunks),
+        )
         self.assertTrue(len(synth_client.prompts) >= 2)
         self.assertIn("[claim-", report.report)
-        self.assertIn("## 材料來源清單", report.report)
+        self.assertNotIn("## 材料來源清單", report.report)
 
     # -- scenario 5: target_n follows ceil(TOTAL_TARGET / query count) ------
 

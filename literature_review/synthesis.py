@@ -327,6 +327,7 @@ def build_deterministic_synthesis(
     if not directions:
         raise SynthesisError("Could not derive any deterministic future direction.")
     source_paths = {source.paper_id: source.source_path for source in paper_sources}
+    _tag_claim_ids(notes, {assessment.paper_id for assessment in assessments})
     return SynthesisResponse(
         paper_sources=paper_sources,
         evidence_assessment_response=evidence_assessment_response,
@@ -753,6 +754,29 @@ def _claim_paper_map(
     return claim_paper
 
 
+def _tag_claim_ids(
+    paper_summaries: list[PaperSummary],
+    usable_ids: set[str],
+) -> None:
+    """Write the global ``claim-N`` tags onto the usable notes' claims in place.
+
+    Uses the exact same numbering order as ``_claim_paper_map`` and
+    ``_build_notes_payload`` (usable notes in input order, claim 流水號
+    ``claim-1..N``), so the ids on the output ``PaperSummaryClaim`` objects line
+    up with the notes payload and the report's inline markers without any LLM
+    input. Non-usable notes keep their default empty ``claim_id``.
+    """
+    claim_counter = 0
+    for note in paper_summaries:
+        if note.paper_id not in usable_ids:
+            continue
+        for index, claim in enumerate(note.claims):
+            claim_counter += 1
+            note.claims[index] = claim.model_copy(
+                update={"claim_id": f"claim-{claim_counter}"}
+            )
+
+
 def build_outline_prompt(query: str, notes: list[dict], claim_counter_total: int) -> str:
     """Ask the model for a thematic outline of the synthesis report (two-stage call 1).
 
@@ -1024,6 +1048,7 @@ def synthesize_report(
         raise SynthesisError("Synthesis needs at least one include paper assessment.")
     usable_ids = {assessment.paper_id for assessment in assessments}
     usable_notes = [note for note in paper_summaries if note.paper_id in usable_ids]
+    _tag_claim_ids(paper_summaries, usable_ids)
     claim_chunks = build_claim_chunks(usable_notes)
     allowed_ids = _allowed_marker_ids(paper_summaries, usable_ids)
     notes_dicts, claim_counter_total = _build_notes_payload(paper_summaries, usable_ids)

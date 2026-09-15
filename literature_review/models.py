@@ -407,6 +407,7 @@ class ChunkReference(BaseModel):
 class PaperSummaryClaim(BaseModel):
     """One claim in a per-paper summary, tied to cited evidence chunks."""
 
+    claim_id: str = Field(default="", min_length=1)
     text: str = Field(min_length=20)
     aspect: str = Field(min_length=3)
     evidence: list[ChunkReference] = Field(min_length=1)
@@ -499,6 +500,7 @@ class PaperSource(BaseModel):
 
     paper_id: str
     source_path: str = Field(min_length=1)
+    claim_ids: list[str] = Field(default_factory=list)  # the global claim tags (claim-N) owned by this paper
 
 
 class CoveragePackPolicy(BaseModel):

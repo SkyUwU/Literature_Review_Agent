@@ -191,7 +191,7 @@ def chunk_reference() -> ChunkReference:
 
 
 def summary_claim() -> PaperSummaryClaim:
-    return PaperSummaryClaim(text="A" * 20, aspect="abs", evidence=[chunk_reference()])
+    return PaperSummaryClaim(claim_id="claim-1", text="A" * 20, aspect="abs", evidence=[chunk_reference()])
 
 
 def paper_summary() -> PaperSummary:

@@ -40,7 +40,6 @@ from literature_review.models import (
 from literature_review.synthesis import (
     SynthesisError,
     build_coverage_packs,
-    render_materials_section,
     summarize_paper_notes,
     synthesize_report,
 )
@@ -200,9 +199,9 @@ def run_synthesis_pipeline(
     the ``NOTES_PACING_SECONDS`` env value, ~4s; see ``_notes_pacing_seconds``);
     passing 0 disables the pacing for tests.
     ``client_report`` (C2c, key3) generates the final synthesis report; when
-    omitted, ``client`` serves the report too, and the programmatic 材料來源清單
-    section (A5) is appended to the report by this layer after the real source
-    paths are resolved.
+    omitted, ``client`` serves the report too, and the report prose is kept
+    pure: consumers assemble the 材料來源清單 (materials list) themselves from
+    the resolved sources / summaries via ``render_materials_section``.
     """
     effective_functional_policy = functional_policy or FunctionalScoringPolicy()
     prepared = _prepare_documents(
@@ -287,23 +286,25 @@ def run_synthesis_pipeline(
         None, coverage_packs, paper_summaries, client_report or client, paper_assessments=assessments, query=query
     )
     source_paths = {document.paper_id: document.source_path for document, _ in prepared}
+    paper_id_to_claims: dict[str, list[str]] = {}
+    for summary in result.paper_summaries:
+        paper_id_to_claims[summary.paper_id] = [claim.claim_id for claim in summary.claims]
     resolved_sources = [
-        source.model_copy(update={"source_path": source_paths[source.paper_id]})
+        source.model_copy(
+            update={
+                "source_path": source_paths[source.paper_id],
+                "claim_ids": paper_id_to_claims.get(source.paper_id, []),
+            }
+        )
         for source in result.paper_sources
     ]
-    report_text = result.report
-    if result.generated_by == "llm":
-        # C2c A5: the LLM report prose is a pure claim-cited narrative; the
-        # deterministic baseline already embeds its own 材料來源清單 block, so the
-        # programmatic section is appended only on the LLM path.
-        materials = render_materials_section(
-            resolved_sources, result.paper_summaries, result.claim_chunks
-        )
-        report_text = report_text.rstrip() + "\n\n" + materials
+    # The report prose is pure; consumers assemble the 材料來源清單 from the
+    # resolved sources / summaries when they need it (deterministic baseline
+    # embeds its own copy and is untouched).
     return result.model_copy(
         update={
             "paper_sources": resolved_sources,
-            "report": report_text,
+            "report": result.report,
         }
     )
 

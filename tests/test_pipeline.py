@@ -334,11 +334,15 @@ class SynthesisPipelineTests(unittest.TestCase):
             {source.source_path for source in result.paper_sources},
             {"data/papers/paper-1.pdf", "data/papers/paper-2.pdf"},
         )
+        self.assertEqual(
+            {source.paper_id: source.claim_ids for source in result.paper_sources},
+            {"paper-1": ["claim-1"], "paper-2": ["claim-2"]},
+        )
         self.assertGreaterEqual(len(result.future_directions), 1)
         markers = re.findall(r"\[([^\[\]]+)\]", result.report)
         self.assertGreaterEqual(len(markers), 1)
         self.assertTrue(set(markers).issubset(set(result.claim_chunks)))
-        self.assertIn("## 材料來源清單", result.report)
+        self.assertNotIn("## 材料來源清單", result.report)
 
     def test_synthesis_pipeline_same_paper_id(self) -> None:
         with self.assertRaises(ValueError):

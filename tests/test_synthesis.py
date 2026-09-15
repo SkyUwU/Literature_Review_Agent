@@ -30,6 +30,7 @@ from literature_review.synthesis import (
     _build_notes_payload,
     _claim_paper_map,
     _group_chunks_by_section,
+    _tag_claim_ids,
     build_claim_chunks,
     build_coverage_packs,
     build_deterministic_paper_notes,
@@ -452,6 +453,7 @@ class DeterministicSynthesisTests(unittest.TestCase):
         self.assertTrue(serialized.startswith("{"))
         self.assertEqual(result.generated_by, "deterministic")
         self.assertEqual([note.paper_id for note in result.paper_summaries], ["p1"])
+        self.assertEqual(result.paper_summaries[0].claims[0].claim_id, "claim-1")
         self.assertEqual(result.paper_sources[0].source_path, "data/papers/p1.pdf")
         self.assertEqual(result.limitations[0], "Section-sampled coverage, not a full-text reading.")
         self.assertEqual(
@@ -681,6 +683,7 @@ class LlmSynthesisReportTests(unittest.TestCase):
             },
         )
         self.assertEqual([item.paper_id for item in result.paper_summaries], ["p1"])
+        self.assertEqual(result.paper_summaries[0].claims[0].claim_id, "claim-1")
         self.assertEqual(result.paper_sources[0].paper_id, "p1")
 
     def test_synthesize_report_outline_unknown_claim_id_repair(self) -> None:
@@ -1349,6 +1352,37 @@ def make_note(paper_id: str, claim_chunks: list[list[str]]) -> PaperSummary:
         claims=claims,
         coverage_chunk_ids=coverage_chunk_ids,
     )
+
+
+class TagClaimIdsTests(unittest.TestCase):
+    """Output traceability: claim-N tags written onto the output surface in place."""
+
+    def test_global_sequence_written_across_usable_notes(self) -> None:
+        notes = [
+            make_note("p-a", [["p-a-c1"], ["p-a-c2", "p-a-c3"]]),
+            make_note("p-b", [["p-b-c4"]]),
+        ]
+
+        _tag_claim_ids(notes, {"p-a", "p-b"})
+
+        self.assertEqual(
+            [claim.claim_id for note in notes for claim in note.claims],
+            ["claim-1", "claim-2", "claim-3"],
+        )
+        self.assertEqual(notes[0].claims[0].claim_id, "claim-1")
+        self.assertEqual(notes[0].claims[1].claim_id, "claim-2")
+        self.assertEqual(notes[1].claims[0].claim_id, "claim-3")
+
+    def test_non_usable_notes_keep_default_id(self) -> None:
+        notes = [
+            make_note("p-a", [["p-a-c1"]]),
+            make_note("p-x", [["p-x-c9"]]),
+        ]
+
+        _tag_claim_ids(notes, {"p-a"})
+
+        self.assertEqual(notes[0].claims[0].claim_id, "claim-1")
+        self.assertEqual(notes[1].claims[0].claim_id, "")
 
 
 class ClaimChunksTests(unittest.TestCase):
