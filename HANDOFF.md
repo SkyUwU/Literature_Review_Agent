@@ -297,6 +297,16 @@ S1-S5 四個小改動一次落地：輸出層統一 claim（S1）、top-2 取樣
 - README.md：無需改動（功能性評分細節不屬 README 契約面）。
 - **真實 run 掛帳**（S1-S5 未跑；最終線路一次跑，涵蓋 S2 sub-query 取樣、S3 加權聚合分布、S4 0 分出現率、S5 aspect 碎片化觀察——無層級論文（全部 #）的 aspect 清單是否碎片化、編號合併能否解決）；commit/push 由使用者親做。
 
+## C2e — 兩階段報告生成：outline → report → directions（2026-09-13）
+
+C2e 把合成報告從「單一 LLM call（一包 `{report, future_directions}`）」改成**三 call 兩階段流程**（2026-09-13 使用者定案）：call 1 請 LLM 先規劃主題式大綱（2-4 節、每節 title/purpose/`supporting_claim_ids`），call 2 依大綱寫報告正文，call 3 **獨立**產出未來方向（只看 query+claims，不看大綱，避免報告框架窄化方向）。三次呼叫共用報告金鑰（key3＝`client_report or client`）。對外輸出契約（`SynthesisResponse`/`FutureDirection`/`[claim-N]` marker/材料來源清單）**完全不變**。
+
+- `literature_review/models.py`：新增 4 個 LLM 契約模型——`LlmOutlineSection`（title≥3、purpose≥10、supporting_claim_ids≥1）、`LlmSynthesisOutline`（sections≥1）、`LlmSynthesisReportBatch`（只有 report≥100）、`LlmSynthesisDirectionsBatch`（future_directions≥1）；legacy `LlmSynthesisBatch` 保留（逃生路徑/測試用）。
+- `literature_review/synthesis.py`：`_build_notes_payload(paper_summaries, usable_ids)`（notes 精簡版，claim id 與 `build_claim_chunks` 完全同序）＋ `build_outline_prompt(query, notes, claim_counter_total)` / `build_report_prompt(outline, notes)` / `build_directions_prompt(query, notes)`；`build_synthesis_prompt` **刪除**（由 `build_report_prompt` 取代，`__all__` 同步）。`synthesize_report(..., query=None)` 改三 call：`_outline_call`（name="synthesis_outline"）→ `_repair_outline_markers`（unknown claim id 修復一輪、仍未知 raise）→ `_report_call`（name="synthesis_report_writing"）→ `_repair_claim_markers`（既有語意保留）→ `_directions_call`（name="synthesis_directions"）→ 方向 paper/claim id 驗證（outside supplied evidence → raise）。三 call prompt 皆不含 assessments 摘要（候選 E 落地）與 utility_score。
+- `literature_review/pipeline.py`：`synthesize_report(..., query=query)` 傳 query。
+- 測試遷移與新增：`test_synthesis.py` — `FakeSynthesisClient` 改序列回應（三 call 依序 pop）、新增 `TwoStagePromptTests`（三 prompt 內容：含全部 claim_id／含大綱節標題／不含 assessments／query 進 call 1+3）、大綱 unknown claim repair→reject、方向 paper/claim unknown reject；`test_pipeline.py`/`test_main.py` — `SynthesisFakeClient`/`PaperDropFakeClient` 遷移三 call（outline/report/directions 分支、`future_directions` 移出 report call）。**363 tests OK**（`two-stage-report-generation-tests.log`，354→363、+9、零刪除）。fake e2e 三 call 依序驗證 `two-stage-report-generation-smoke.log`（outline→report→directions prefix、report 來自 call 2、directions 來自 call 3、unknown paper direction rejection OK）。
+- **真實 run 掛帳**（與 S1-S5 同批；最終線路一次跑）；commit/push 由使用者親做。
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.
