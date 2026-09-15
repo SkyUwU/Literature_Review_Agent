@@ -161,6 +161,7 @@ class FunctionalPromptTests(unittest.TestCase):
         self.assertIn("rationale first", prompt)
         self.assertIn("(0-10)", prompt)  # S4: 0 分錨點放寬下限
         self.assertIn("NOT how literally", prompt)
+        self.assertIn("The 'Section' field", prompt)  # LLM Input Hygiene §3
         self.assertIn("10 directly provides one of the three support kinds", prompt)
         self.assertIn("5-6 useful background", prompt)
 
@@ -644,6 +645,48 @@ class FunctionalSamplingTests(unittest.TestCase):
             [item.chunk_id for item in empty["paper-b"]],
             ["paper-b-c1", "paper-b-c2"],
         )
+
+    def test_sample_wraps_text_with_top_level_section_prefix(self) -> None:
+        """T1: encode_chunks receives '2 Method | <text>' when paper_titles resolves."""
+        recorded_texts: list[str] = []
+
+        def recording_encoder(texts: list[str]) -> list[list[float]]:
+            recorded_texts.extend(texts)
+            return [[1.0] for _ in texts]
+
+        chunks = [
+            EvidenceChunk(
+                chunk_id="p1-c1", paper_id="p1", section="2 Method",
+                page_start=1, page_end=1,
+                text="Method detail chunk with enough words for validation.",
+            ),
+        ]
+        sample_top_chunks_per_paper(
+            chunks, "q", top_n=1, encoder=recording_encoder,
+            paper_titles={"p1": "A Title"},
+        )
+        # encode_query adds a prefixed query string before encode_chunks, so last entry is the chunk.
+        self.assertTrue(recorded_texts[-1].startswith("2 Method | "), recorded_texts[-1])
+
+    def test_sample_prefixes_other_when_no_paper_titles(self) -> None:
+        """T1: without paper_titles, section=None yields 'other | <text>'."""
+        recorded_texts: list[str] = []
+
+        def recording_encoder(texts: list[str]) -> list[list[float]]:
+            recorded_texts.extend(texts)
+            return [[1.0] for _ in texts]
+
+        chunks = [
+            EvidenceChunk(
+                chunk_id="p1-c1", paper_id="p1", section=None,
+                page_start=1, page_end=1,
+                text="Anonymous section chunk with enough words for validation.",
+            ),
+        ]
+        sample_top_chunks_per_paper(
+            chunks, "q", top_n=1, encoder=recording_encoder,
+        )
+        self.assertTrue(recorded_texts[-1].startswith("other | "), recorded_texts[-1])
 
 
 class FunctionalAggregationTests(unittest.TestCase):

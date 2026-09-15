@@ -27,6 +27,8 @@ from literature_review.coverage import classify_chunk, drop_noise_sections
 from literature_review.synthesis import (
     SynthesisError,
     _bounded_chunks_for_llm,
+    _build_notes_payload,
+    _claim_paper_map,
     _group_chunks_by_section,
     build_claim_chunks,
     build_coverage_packs,
@@ -559,7 +561,6 @@ def valid_direction_payload() -> dict[str, object]:
     return {
         "title": "Harden extraction for scanned low-resource papers",
         "rationale": "The stated limitation on scanned low-resource papers directly motivates extraction research.",
-        "supporting_paper_ids": ["p1"],
         "supporting_claim_ids": ["claim-4"],
     }
 
@@ -668,6 +669,7 @@ class LlmSynthesisReportTests(unittest.TestCase):
         self.assertTrue(set(markers).issubset(set(result.claim_chunks)))
         direction = result.future_directions[0]
         self.assertEqual(direction.supporting_claim_ids, ["claim-4"])
+        self.assertEqual(direction.supporting_paper_ids, ["p1"])
         self.assertEqual(direction.supporting_chunk_ids, [])
         self.assertEqual(
             result.claim_chunks,
@@ -1241,6 +1243,8 @@ class SectionAwareNotesInputTests(unittest.TestCase):
         self.assertIn("Never use a subsection name", prompt)
         for chunk in chunks:
             self.assertIn(chunk.chunk_id, prompt)
+        self.assertNotIn("page_start", prompt)
+        self.assertNotIn("page_end", prompt)
         self.assertNotIn("sections_by_aspect", prompt)
         self.assertNotIn("contribution", prompt)  # _NOTE_ASPECTS 白名單退役
 
@@ -1376,6 +1380,42 @@ class ClaimChunksTests(unittest.TestCase):
     def test_empty_summaries_returns_empty_table(self) -> None:
         self.assertEqual(build_claim_chunks([]), {})
 
+    def test_claim_paper_map_assigns_owner_in_document_order(self) -> None:
+        mapping = _claim_paper_map(
+            [
+                make_note("p-a", [["p-a-c1"], ["p-a-c2", "p-a-c3"]]),
+                make_note("p-b", [["p-b-c4"]]),
+                make_note("p-x", [["p-x-c5"]]),
+            ],
+            usable_ids={"p-a", "p-b"},
+        )
+
+        self.assertEqual(
+            mapping,
+            {
+                "claim-1": "p-a",
+                "claim-2": "p-a",
+                "claim-3": "p-b",
+            },
+        )
+
+    def test_claim_paper_map_alignment_with_notes_payload(self) -> None:
+        notes_a = make_note("p-a", [["p-a-c1"], ["p-a-c2"]])
+        notes_b = make_note("p-b", [["p-b-c3"]])
+        paper_summaries = [notes_a, notes_b]
+        usable_ids = {"p-a", "p-b"}
+
+        mapping = _claim_paper_map(paper_summaries, usable_ids)
+        payload, _total = _build_notes_payload(paper_summaries, usable_ids)
+
+        payload_claims: list[tuple[str, str]] = []
+        claim_counter = 0
+        for block in payload:
+            for _claim in block["claims"]:
+                claim_counter += 1
+                payload_claims.append((f"claim-{claim_counter}", block["paper_id"]))
+        self.assertEqual(mapping, dict(payload_claims))
+
     def test_direction_unknown_claim_id_rejected(self) -> None:
         response, packs, note = llm_synthesis_fixture()
         report = (
@@ -1399,14 +1439,14 @@ class ClaimChunksTests(unittest.TestCase):
                 ),
             )
 
-    def test_direction_unknown_paper_id_rejected(self) -> None:
+    def test_direction_unknown_claim_id_rejected_ghost(self) -> None:
         response, packs, note = llm_synthesis_fixture()
         report = (
             "The reviewed study proposes evidence-cited synthesis for literature review agents "
             "[claim-1]. A second grounded sentence keeps the report long enough to validate."
         )
         direction = valid_direction_payload()
-        direction["supporting_paper_ids"] = ["ghost-paper"]
+        direction["supporting_claim_ids"] = ["ghost-claim"]
 
         with self.assertRaises(SynthesisError):
             synthesize_report(

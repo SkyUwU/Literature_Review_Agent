@@ -220,6 +220,7 @@ def run_synthesis_pipeline(
         top_n=effective_functional_policy.top_chunks_per_paper,
         encoder=effective_encoder,
         query_map=paper_queries,
+        paper_titles=paper_titles,
     )
     sampled_flat = [chunk for chunks in sampled.values() for chunk in chunks]
     functional_assessments = score_chunks_functionally(

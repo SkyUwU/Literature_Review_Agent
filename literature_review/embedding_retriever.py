@@ -55,9 +55,19 @@ def encode_query(query: str, encoder: Encoder) -> list[float]:
     return encoder([QUERY_PREFIX + query])[0]
 
 
-def encode_chunks(chunks: Sequence[EvidenceChunk], encoder: Encoder) -> list[list[float]]:
-    """Encode every chunk's text once (query-independent). Call once per real run."""
-    texts = [chunk.text for chunk in chunks]
+def encode_chunks(
+    chunks: Sequence[EvidenceChunk],
+    encoder: Encoder,
+    *,
+    text_for: Callable[[EvidenceChunk], str] | None = None,
+) -> list[list[float]]:
+    """Encode every chunk once (query-independent). Call once per real run.
+
+    ``text_for`` optionally rewrites the text fed to the encoder (e.g. prefixing
+    a top-level section label); when ``None`` (default) the raw ``chunk.text``
+    is used, preserving the original behavior.
+    """
+    texts = [text_for(chunk) if text_for is not None else chunk.text for chunk in chunks]
     return encoder(texts) if texts else []
 
 

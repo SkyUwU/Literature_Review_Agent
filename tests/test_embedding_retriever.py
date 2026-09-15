@@ -1,7 +1,7 @@
 import unittest
 from collections import Counter
 
-from literature_review.embedding_retriever import QUERY_PREFIX, retrieve_evidence_embedding, _score_ranked
+from literature_review.embedding_retriever import QUERY_PREFIX, retrieve_evidence_embedding, _score_ranked, encode_chunks
 from literature_review.models import EvidenceChunk, EvidenceRetrievalPolicy, EvidenceRetrievalResponse
 from literature_review.assessment import aggregate_evidence_assessments
 
@@ -88,6 +88,18 @@ class EmbeddingRetrieverTests(unittest.TestCase):
             encoder=encoder,
         )
         self.assertEqual(response.ranked_chunks, [])
+
+    def test_encode_chunks_default_passes_raw_chunk_text(self) -> None:
+        encoder = RecordingEncoder()
+        chunks = [chunk("c1", "raw evidence chunk text that is long enough to validate")]
+        encode_chunks(chunks, encoder)
+        self.assertEqual(encoder._inputs, ["raw evidence chunk text that is long enough to validate"])
+
+    def test_encode_chunks_text_for_rewrites_encoded_text(self) -> None:
+        encoder = RecordingEncoder()
+        chunks = [chunk("c1", "some evidence chunk text that is long enough to validate")]
+        encode_chunks(chunks, encoder, text_for=lambda c: f"[wrapped] {c.text}")
+        self.assertEqual(encoder._inputs, ["[wrapped] some evidence chunk text that is long enough to validate"])
 
 
 def rerank_scores(response: EvidenceRetrievalResponse, texts_by_chunk: dict[str, list[int]]) -> object:

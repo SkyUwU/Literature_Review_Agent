@@ -218,12 +218,10 @@ def build_pairwise_prompt(
 
 
 def _chunk_context(chunk: EvidenceChunk) -> dict[str, object]:
-    """Expose the same provenance fields the pipeline uses for grounded evidence."""
+    """Expose the identity fields the judge needs (chunk id, paper id, text)."""
     return {
         "chunk_id": chunk.chunk_id,
         "paper_id": chunk.paper_id,
-        "page_start": chunk.page_start,
-        "page_end": chunk.page_end,
         "text": chunk.text,
     }
 

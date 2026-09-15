@@ -442,11 +442,13 @@ class LlmSynthesisDirection(BaseModel):
     S1 (2026-09-12): the consumer copies the claim tags straight into the
     external ``FutureDirection.supporting_claim_ids`` — no chunk expansion;
     chunk tracing lives in the response-level ``claim_chunks`` lookup table.
+    LLM Input Hygiene (2026-09-15): the LLM only returns
+    ``supporting_claim_ids``; ``supporting_paper_ids`` is expanded
+    programmatically from the claim-to-paper mapping.
     """
 
     title: str = Field(min_length=3)
     rationale: str = Field(min_length=20)
-    supporting_paper_ids: list[str] = Field(min_length=1)
     supporting_claim_ids: list[str] = Field(min_length=1)
 
 

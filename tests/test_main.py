@@ -160,7 +160,6 @@ def direction_payload(paper_id: str, claim_id: str) -> dict[str, object]:
     return {
         "title": "Harden multilingual evaluation coverage",
         "rationale": "Both studies state evaluation restrictions that motivate broader multilingual benchmarks.",
-        "supporting_paper_ids": [paper_id],
         "supporting_claim_ids": [claim_id],
     }
 

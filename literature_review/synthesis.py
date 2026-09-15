@@ -400,8 +400,8 @@ def _build_claim_repair_prompt(raw_output: str, unknown_claims: list[str], valid
         f"{json.dumps(unknown_claims)}. "
         f"The only valid claim ids are: {json.dumps(valid_claims)}. "
         "Never invent, guess, or modify claim ids. Only use the exact ids from this set. "
-        "Return a repaired version of the previous JSON, preserving all other content (report, text, "
-        "aspect, supporting_paper_ids) but correcting every [claim-N] marker and every "
+        "Return a repaired version of the previous JSON, preserving the rest of the report text "
+        "but correcting every [claim-N] marker and every "
         "supporting_claim_ids value to use only valid claim ids. "
         "Return exactly one JSON object, without Markdown code fences or surrounding explanation. "
         f"Previous response:\n{raw_output}"
@@ -597,8 +597,6 @@ def build_paper_notes_prompt(
             "chunks": [
                 {
                     "chunk_id": chunk.chunk_id,
-                    "page_start": chunk.page_start,
-                    "page_end": chunk.page_end,
                     "text": chunk.text,
                 }
                 for chunk in group
@@ -734,6 +732,27 @@ def _build_notes_payload(
     return notes, claim_counter
 
 
+def _claim_paper_map(
+    paper_summaries: list[PaperSummary],
+    usable_ids: set[str],
+) -> dict[str, str]:
+    """Map every global claim tag to its owning paper id.
+
+    Uses the exact same document order as ``_build_notes_payload`` (usable
+    notes in input order, claim 流水號 ``claim-1..N``), so the ids line up with
+    the notes payload and the report's inline markers without any LLM input.
+    """
+    claim_paper: dict[str, str] = {}
+    claim_counter = 0
+    for note in paper_summaries:
+        if note.paper_id not in usable_ids:
+            continue
+        for claim in note.claims:
+            claim_counter += 1
+            claim_paper[f"claim-{claim_counter}"] = note.paper_id
+    return claim_paper
+
+
 def build_outline_prompt(query: str, notes: list[dict], claim_counter_total: int) -> str:
     """Ask the model for a thematic outline of the synthesis report (two-stage call 1).
 
@@ -813,8 +832,8 @@ def build_directions_prompt(query: str, notes: list[dict]) -> str:
         "research avenue, not a summary of the report prose. "
         "Return exactly one JSON object, without Markdown code fences or surrounding "
         "explanation, shaped as {'future_directions': <array>}; each direction must contain "
-        "'title', 'rationale', 'supporting_paper_ids', and 'supporting_claim_ids', where "
-        "every id is copied exactly from the supplied material. "
+        "'title', 'rationale', and 'supporting_claim_ids', where every claim id is copied "
+        "exactly from the supplied material. "
         f"Research query: {query}\n"
         f"Per-paper notes: {json.dumps(notes, ensure_ascii=False)}"
     )
@@ -1008,6 +1027,7 @@ def synthesize_report(
     claim_chunks = build_claim_chunks(usable_notes)
     allowed_ids = _allowed_marker_ids(paper_summaries, usable_ids)
     notes_dicts, claim_counter_total = _build_notes_payload(paper_summaries, usable_ids)
+    claim_paper_map = _claim_paper_map(paper_summaries, usable_ids)
     query_text = query or ""
     outline = _outline_call(client, query_text, notes_dicts, claim_counter_total)
     outline = _repair_outline_markers(outline, client, set(claim_chunks))
@@ -1015,11 +1035,6 @@ def synthesize_report(
     batch = _repair_claim_markers(batch, client, allowed_ids)
     directions = _directions_call(client, query_text, notes_dicts)
     for direction in directions.future_directions:
-        unknown_papers = sorted(set(direction.supporting_paper_ids) - usable_ids)
-        if unknown_papers:
-            raise SynthesisError(
-                f"LLM direction cites papers outside the supplied evidence: {', '.join(unknown_papers)}."
-            )
         unknown_claims = sorted(set(direction.supporting_claim_ids) - set(claim_chunks))
         if unknown_claims:
             raise SynthesisError(
@@ -1050,7 +1065,9 @@ def synthesize_report(
             FutureDirection(
                 title=direction.title,
                 rationale=direction.rationale,
-                supporting_paper_ids=direction.supporting_paper_ids,
+                supporting_paper_ids=sorted(
+                    {claim_paper_map[cid] for cid in direction.supporting_claim_ids}
+                ),
                 supporting_claim_ids=direction.supporting_claim_ids,
             )
             for direction in directions.future_directions

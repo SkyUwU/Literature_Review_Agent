@@ -300,8 +300,8 @@ class DeterminismTests(unittest.TestCase):
         self.assertIn("c1", prompt)
         self.assertIn("c2", prompt)
         self.assertIn("paper-1", prompt)
-        self.assertIn('"page_start": 1', prompt)
-        self.assertIn('"page_end": 1', prompt)
+        self.assertNotIn('"page_start": 1', prompt)
+        self.assertNotIn('"page_end": 1', prompt)
 
 
 class AggregateQueryTests(unittest.TestCase):

@@ -16,6 +16,7 @@ from literature_review.embedding_retriever import (
     encode_chunks,
     encode_query,
 )
+from literature_review.synthesis import top_level_section
 from literature_review.llm_evidence import (
     JsonGenerationClient,
     LlmEvidenceError,
@@ -86,6 +87,9 @@ def build_functional_prompt(
         "matches the query wording. A chunk can match the wording yet add nothing new, "
         "and a chunk that reuses methods or reports comparable data can be highly useful "
         "without sharing the query's terms. "
+        "The 'Section' field shows the chunk's location in the paper (e.g. '2 Method', "
+        "'Appendix'); use it to judge the evidence type — appendix or References chunks "
+        "rarely contribute utility. "
         "Scoring guide. utility_score: 10 directly provides one of the three support kinds "
         "and fills a gap in the idea; 7-9 substantively advances a core facet; "
         "5-6 useful background that frames the idea (indirect support, including surveys "
@@ -213,6 +217,7 @@ def sample_top_chunks_per_paper(
     top_n: int,
     encoder: Encoder,
     query_map: dict[str, str] | None = None,
+    paper_titles: dict[str, str] | None = None,
 ) -> dict[str, list[EvidenceChunk]]:
     """Blacklist-filter every paper's chunks, then keep the top-``top_n`` per paper.
 
@@ -239,7 +244,8 @@ def sample_top_chunks_per_paper(
             continue  # blacklisted away -> paper not scored
         sampling_query = (query_map or {}).get(paper_id) or query
         query_vector = encode_query(sampling_query, encoder)
-        chunk_vectors = encode_chunks(filtered, encoder)
+        _section_wrapped_text = lambda chunk: f"{top_level_section(chunk.section, paper_titles.get(chunk.paper_id) if paper_titles else None) or 'other'} | {chunk.text}"
+        chunk_vectors = encode_chunks(filtered, encoder, text_for=_section_wrapped_text)
         ranked = sorted(
             zip(filtered, chunk_vectors),
             key=lambda item: (-_cosine(query_vector, item[1]), item[0].chunk_id),

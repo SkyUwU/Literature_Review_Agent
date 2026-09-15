@@ -210,7 +210,6 @@ def llm_synthesis_direction() -> LlmSynthesisDirection:
     return LlmSynthesisDirection(
         title="abc",
         rationale="A" * 20,
-        supporting_paper_ids=["p1"],
         supporting_claim_ids=["claim-1"],
     )
 
@@ -430,7 +429,6 @@ class SynthesisModelTests(unittest.TestCase):
             LlmSynthesisDirection(
                 title="abc",
                 rationale="A" * 20,
-                supporting_paper_ids=["p1"],
                 supporting_claim_ids=[],
             )
 
