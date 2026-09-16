@@ -35,8 +35,21 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | Evidence-based paper assessment | `assessment.py`, `models.py` | Done; deterministic aggregation retains chunk IDs and page ranges |
 | Evidence-cited synthesis and future directions | `synthesis.py`, `pipeline.py`, `models.py`, `assessment.py` | Done; three-layer traceability from chunks to report |
 | Search-plan query-only + LLM planner | `planning.py`, `llm_evidence.py`, `models.py` | Done; rule-based fallback + `create_llm_plan` |
+| M4 — RCS 1-10 scoring rework | `llm_evidence.py`, `models.py`, `assessment.py` | Done; anchored 1-10 scores, float aggregation, chunk recommendation removed |
+| M5a — planner prompt diversification | `planning.py`, `main.py` | Done; distinct facets, overlap check+repair, purpose log |
+| M5b — RCS calibration | `models.py`, `llm_evidence.py`, `pipeline.py` | Done; dual rationale, A9 bands, index input, B=4 |
+| M5e — candidate pool upgrade | `screening.py`, `main.py`, `pdf_downloader.py` | Done; bucket sampling + LLM screening + gap follow-ups |
+| M6 — RCS on local Ollama | `ollama_client.py`, `llm_evidence.py` | Done; qwen3:8b batch loop, Gemini fallback |
+| C2a — pymupdf4llm extraction + chapter chunking | `extraction.py`, `evidence.py`, `models.py` | Done; markdown tables, section-aware chunks |
+| C2b — functional scoring | `functional.py`, `models.py`, `pipeline.py` | Done; single 1-10 utility, quota∩threshold selection |
+| C2c — claim-level markers + key3 | `synthesis.py`, `models.py`, `main.py` | Done; [claim-N] markers + programmatic materials |
+| C2d — aspect metadata filters | `synthesis.py`, `coverage.py` | Done; journal-prefix/metadata-line filtering |
+| C2e — three-call two-stage report generation | `synthesis.py`, `models.py`, `pipeline.py` | Done; outline → report → directions |
+| S1-S5 — scoring/output-line adjustments | `synthesis.py`, `functional.py`, `models.py` | Done; 0.7×max+0.3×mean, sub-query sampling |
+| LLM Input Hygiene | `functional.py`, `synthesis.py`, `pairwise_eval.py` | Done; no page numbers in LLM inputs |
+| Output Traceability | `models.py`, `synthesis.py`, `pipeline.py` | Done; claim_id/claim_ids in external outputs |
 
-The current suite has 74 tests. Do not replace tests with only live API checks.
+The current suite has 374 tests. Do not replace tests with only live API checks.
 
 ## Important design decisions
 
@@ -58,8 +71,8 @@ The current suite has 74 tests. Do not replace tests with only live API checks.
 - Because top-k is corpus-wide, a paper whose chunks never enter the top-k receives no assessment, no per-paper notes, and no place in the report (PaperQA2 semantics; the dry-run path always behaved this way).
 - Aggregate paper scores use deterministic shrunk means; each retained `PaperAssessment.evidence` item keeps the chunk ID, page range, summary, scores, and original chunk recommendation.
 - Per-paper notes are generated only for papers whose aggregated recommendation is include or consider; exclude papers contribute no synthesized claims.
-- Future directions are anchored in explicit limitations found in the retrieved evidence, with deterministic convergence and fallback sources. LLM output is validated with `model_validate_json()` against Pydantic schemas; unknown chunk IDs or missing/invalid inline citation markers raise `SynthesisError`.
-- The report is direct prose with inline `[chunk_id]` citation markers validated against the supplied evidence set; deterministic and fake-client tests cover the path without a live API call.
+- Future directions are proposed by a third call that sees the query and the claims only — they are not limited to explicit limitations found in the retrieved evidence, and the deterministic fallback is unchanged. LLM output is validated with `model_validate_json()` against Pydantic schemas; unknown claim IDs or missing/invalid inline citation markers raise `SynthesisError`.
+- The report is direct prose with inline `[claim-N]` citation markers validated against the supplied evidence set; deterministic and fake-client tests cover the path without a live API call.
 
 ## Latest: Langfuse observability (2026-08-31)
 
@@ -69,8 +82,6 @@ Added Langfuse SDK (4.15.1) observability with Plan B tree tracing:
 - Dashboard at `http://localhost:3000` shows per-stage tree traces (rcs / paper_notes / synthesis_report), each wrapping an `llm_call` child layer (Plan B tree structure).
 - 74 tests still green; `@observe` is a no-op in the test env (no keys), so no insurance code was needed (YAGNI).
 - Requires a self-hosted Langfuse (`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST`) and Gemini for the LLM stage; confirm the server is up via `curl http://localhost:3000/api/public/health`.
-
-The next milestone is report assembly driven by search convergence; see the suggested sequence below.
 
 ## Latest milestone: lexical-vs-embedding retrieval comparison (2026-09-01)
 
@@ -323,11 +334,11 @@ C2e 把合成報告從「單一 LLM call（一包 `{report, future_directions}`�
 - These are two independent Git working copies. Clone only once; do not repeatedly copy or re-clone after every handoff. The private GitHub remote `origin` is now configured. Choose one as the active copy for a milestone, commit there, run `git push`, then run `git pull --ff-only` in the other copy before editing. A configured local bare repository could also serve this role, but do not use either checked-out working directory as an informal bidirectional remote.
 - Do not copy `.venv`, PDFs, or uncommitted source files between copies. For a one-time WSL setup on this same private machine, copying the ignored `.env` from Windows is acceptable; alternatively create it from `.env.example`. Never commit, paste, or upload `.env`. If Gemini is needed in WSL, ensure that the WSL clone has its own local `.env`.
 
-Suggested sequence after the evidence-cited synthesis step:
+Suggested sequence for the next milestones (track the current one in `.omo/STATE.md`; each plan lives in `.omo/plans/`):
 
-1. report assembly (search convergence);
-2. aspect-coverage gap analysis;
-3. automatic PDF acquisition and GROBID pre-processing for real papers (the LLM planner and embedding-stage upgrades are already done).
+1. Semantic Scholar API + DOI merge discussion (2026-09-16; apply for a free SS API key first — it arrives by email and enables the `x-api-key` header);
+2. Unpaywall no-OA backfill for papers without an OpenAlex OA link;
+3. smaller candidates tracked in `.omo/STATE.md` (e.g. functional-prompt Section interpretation, M5f embedding query representation, `data/papers/` accumulation strategy).
 
 ## API and operational notes
 
@@ -347,7 +358,7 @@ Suggested sequence after the evidence-cited synthesis step:
 ## Handoff prompt for another coding agent
 
 ```text
-Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDOFF.md first. Inspect git status and preserve user changes. Implement only the current next milestone in HANDOFF.md (report assembly/search convergence). Do not request or print API keys; use .env/environment variables. Keep Pydantic contracts, add tests where needed, run the full test suite, and report the exact PowerShell or WSL commands for the user to commit. Reply in Traditional Chinese and keep explanations concise.
+Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDOFF.md first, then `.omo/STATE.md` for the current milestone and `.omo/plans/<slug>.md` as the authoritative plan. Inspect git status and preserve user changes. Implement only the current next milestone tracked in `.omo/STATE.md`. Do not request or print API keys; use .env/environment variables. Keep Pydantic contracts, add tests where needed, run the full test suite, and report the exact PowerShell or WSL commands for the user to commit. Reply in Traditional Chinese and keep explanations concise.
 ```
 
 ## New Codex session starter prompt
@@ -355,5 +366,5 @@ Work in this repository on ADSL summer-project Task 1A. Read AGENTS.md and HANDO
 Use this prompt when starting a fresh Codex task for this repository. It intentionally delegates details to the tracked documents instead of replaying long chat history:
 
 ```text
-Continue the ADSL Summer Project Task 1A in C:\Users\User\Desktop\Literature_Review_Agent. Read AGENTS.md and HANDOFF.md before taking action. The Gemini PDF evidence smoke test, provenance-preserving PaperAssessment aggregation, and evidence-cited synthesis with future directions are complete; implement only the current next milestone: report assembly (search convergence). Inspect git status first, do not commit Summer_Project.pdf or data/papers/, add tests, run the full suite, and give exact PowerShell commit commands. Reply concisely in Traditional Chinese. Do not ask for or print API keys.
+Continue the ADSL Summer Project Task 1A in C:\Users\User\Desktop\Literature_Review_Agent. Read AGENTS.md and HANDOFF.md before taking action, then `.omo/STATE.md` for the current milestone and `.omo/plans/` for the authoritative plan. The LLM planner, PDF acquisition, end-to-end `main.py`, functional scoring, claim-level note/report markers, and JSON report output are complete; implement only the current next milestone tracked in `.omo/STATE.md`. Inspect git status first, do not commit Summer_Project.pdf, data/papers/, or data/outputs/, add tests, run the full suite, and give exact PowerShell commit commands. Reply concisely in Traditional Chinese. Do not ask for or print API keys.
 ```
