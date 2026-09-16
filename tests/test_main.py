@@ -1,12 +1,15 @@
 """Tests for the M3C end-to-end entry: no real network, no API keys, no encoder build."""
 
 import argparse
+import contextlib
+import io
 import json
 import math
 import os
 import re
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -14,7 +17,14 @@ from unittest import mock
 import literature_review.main as main_module
 from literature_review.embedding_retriever import QUERY_PREFIX
 from literature_review.main import TOTAL_TARGET, run_end_to_end
-from literature_review.models import SynthesisResponse
+from literature_review.models import (
+    ChunkReference,
+    FutureDirection,
+    PaperSource,
+    PaperSummary,
+    PaperSummaryClaim,
+    SynthesisResponse,
+)
 from literature_review.pdf_downloader import PdfDownloadError
 from literature_review.planning import create_rule_based_plan
 
@@ -749,6 +759,128 @@ class MainEntryTests(unittest.TestCase):
         kwargs = m_run.call_args.kwargs
         self.assertIs(kwargs["use_llm_plan"], False)
         self.assertIsNone(kwargs["client_plan"])
+
+    def test_main_full_run_saves_report_json(self) -> None:
+        plan = create_rule_based_plan("literature review agent")
+        report = fake_report()
+        fake_result = {
+            "plan": plan,
+            "downloads": [{"paper_id": "W1", "path": str(self.dest / "W1.pdf")}],
+            "stats_per_query": [],
+            "failed_extractions": [],
+            "report": report,
+            "screening": None,
+            "follow_ups": [],
+            "dry_run": False,
+        }
+        real_save = main_module.save_report_output
+        saved_path: str | None = None
+
+        def save_to_tmp(rpt: object) -> str | None:
+            nonlocal saved_path
+            saved_path = real_save(rpt, output_dir=self.dest)
+            return saved_path
+
+        with mock.patch.dict(
+            os.environ,
+            {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "GEMINI_API_KEY_3": "AIza000", "OLLAMA_BASE_URL": ""},
+            clear=False,
+        ):
+            with mock.patch("builtins.input", return_value="literature review agent"):
+                with mock.patch.object(sys, "argv", ["literature_review.main"]):
+                    with mock.patch("literature_review.main.run_end_to_end", return_value=fake_result) as m_run:
+                        with mock.patch("literature_review.main.save_report_output", side_effect=save_to_tmp):
+                            with contextlib.redirect_stdout(io.StringIO()) as captured:
+                                main_module.main()
+
+        self.assertIsNotNone(saved_path)
+        path = Path(saved_path)
+        self.assertTrue(path.exists())
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+        self.assertEqual(payload["generated_by"], "llm")
+        self.assertEqual(len(payload["paper_sources"]), 1)
+        self.assertIn(f"Report saved to: {saved_path}", captured.getvalue())
+
+
+def fake_report() -> SynthesisResponse:
+    return SynthesisResponse(
+        paper_sources=[PaperSource(paper_id="W1", source_path="data/papers/W1.pdf")],
+        paper_summaries=[
+            PaperSummary(
+                paper_id="W1",
+                claims=[
+                    PaperSummaryClaim(
+                        claim_id="claim-1",
+                        text="W1 reports evidence selection results for review agents.",
+                        aspect="contribution",
+                        evidence=[
+                            ChunkReference(
+                                chunk_id="W1-c1",
+                                paper_id="W1",
+                                quote="Evidence selection results for review agents.",
+                            )
+                        ],
+                    )
+                ],
+                coverage_chunk_ids=["W1-c1"],
+            )
+        ],
+        claim_chunks={"claim-1": ["W1-c1"]},
+        report=(
+            "W1 is retained because its evidence directly advances the literature review "
+            "agent research idea: retrieved chunks supply page-level provenance that "
+            "supports evidence-cited synthesis."
+        ),
+        future_directions=[
+            FutureDirection(
+                title="Harden multilingual evaluation coverage",
+                rationale="The retained study states evaluation restrictions that motivate broader multilingual benchmarks.",
+                supporting_paper_ids=["W1"],
+                supporting_claim_ids=["claim-1"],
+            )
+        ],
+        limitations=[],
+        generated_by="llm",
+    )
+
+
+class SaveReportOutputTests(unittest.TestCase):
+    """Unit tests for main.save_report_output: file creation and failure fallback."""
+
+    def test_save_report_output_creates_file(self) -> None:
+        report = fake_report()
+        ts = datetime(2026, 9, 16, 12, 0, 0, 123456)
+        with TemporaryDirectory() as tmp:
+            saved = main_module.save_report_output(
+                report, output_dir=Path(tmp), timestamp=ts
+            )
+
+            self.assertIsNotNone(saved)
+            self.assertTrue(saved.startswith(str(Path(tmp))))
+            path = Path(saved)
+            self.assertTrue(path.exists())
+            with open(path, encoding="utf-8") as f:
+                payload = json.load(f)
+            self.assertEqual(payload, report.model_dump(mode="json"))
+            self.assertEqual(path.name, "report_20260916_120000_123456.json")
+
+    def test_save_report_output_returns_none_on_error(self) -> None:
+        report = fake_report()
+        with TemporaryDirectory() as tmp:
+            # A file occupying the intended output directory path forces OSError
+            blocker = Path(tmp) / "not-a-directory"
+            blocker.write_text("", encoding="utf-8")
+            with mock.patch("sys.stderr") as stderr:
+                saved = main_module.save_report_output(
+                    report,
+                    output_dir=blocker,
+                    timestamp=datetime(2026, 9, 16, 12, 0, 0, 123456),
+                )
+            written = "".join(call.args[0] for call in stderr.write.call_args_list)
+            self.assertIn("Failed to save report JSON", written)
+
+        self.assertIsNone(saved)
 
 
 if __name__ == "__main__":

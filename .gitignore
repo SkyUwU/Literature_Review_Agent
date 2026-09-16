@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 .venv/
 data/papers/
+data/outputs/
 
 # Secrets: never commit API keys
 .env

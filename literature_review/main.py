@@ -24,6 +24,7 @@ import json
 import math
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from literature_review import pipeline, search
@@ -36,6 +37,7 @@ from literature_review.models import (
     FullTextDocument,
     RankedPaper,
     SearchRequest,
+    SynthesisResponse,
 )
 from literature_review.pdf_downloader import Fetcher, default_fetcher, download_and_backfill
 from literature_review.planning import create_llm_plan, create_rule_based_plan
@@ -406,6 +408,31 @@ def _build_clients(
     return client_plan, client_synth, client_rcs, client_report
 
 
+def save_report_output(
+    report: SynthesisResponse,
+    *,
+    output_dir: str | Path = "data/outputs",
+    timestamp: datetime | None = None,
+) -> str | None:
+    """Serialize *report* to a timestamped JSON file under *output_dir*.
+
+    Returns the written file path on success, or ``None`` when the write
+    fails (a warning is printed to stderr; the pipeline never crashes).
+    """
+    try:
+        payload = report.model_dump(mode="json")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        ts = timestamp if timestamp is not None else datetime.now()
+        filename = f"report_{ts.strftime('%Y%m%d_%H%M%S_%f')}.json"
+        path = Path(output_dir) / filename
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return str(path)
+    except OSError as error:
+        print(f"Failed to save report JSON: {error}", file=sys.stderr)
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="End-to-end literature review from an interactive query."
@@ -462,6 +489,25 @@ def main() -> None:
         )
     else:
         print(result["report"].model_dump_json(indent=2))
+        print(
+            json.dumps(
+                {
+                    "query": query,
+                    "plan": result["plan"].model_dump(mode="json"),
+                    "downloads": result["downloads"],
+                    "stats_per_query": result["stats_per_query"],
+                    "failed_extractions": result["failed_extractions"],
+                    "screening": result["screening"],
+                    "follow_ups": result["follow_ups"],
+                    "dry_run": False,
+                },
+                ensure_ascii=True,
+                indent=2,
+            )
+        )
+        saved_path = save_report_output(result["report"])
+        if saved_path:
+            print(f"Report saved to: {saved_path}")
         pipeline._flush_langfuse()
 
 
