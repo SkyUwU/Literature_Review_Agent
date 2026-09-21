@@ -18,8 +18,10 @@ data/outputs/
 .omo/evidence/
 
 # opencode work artifacts (not for sync)
-.omo/evidence/
 .omo/notepads/
 .omo/notes/
 .omo/boulder.json
 .omo/start-work/
+
+# Local archives (packed work products; keep out of git)
+.omo_archive_*.tar.gz

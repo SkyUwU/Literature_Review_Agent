@@ -1,5 +1,12 @@
 # Collaboration Guide
 
+## 計畫與執行分工（Sisyphus 鐵則）
+
+- Plan agent 官方問題期間，由 Sisyphus 兼任計畫與執行。
+- 使用者說「討論計畫」「規劃」「分解步驟」「計畫」等語 → 只能計畫：最多寫計畫文件（`.omo/plans/*.md`），嚴禁建立、編輯、刪除任何程式碼或設定檔。
+- 使用者說「執行」「開始做」「實作」等語 → 可以動程式碼，但動手前必須先向使用者確認再執行。
+- 此規則寫在 AGENTS.md，每次對話都會自動載入，即使上下文壓縮或開新 session 也不會遺忘。
+
 ## User and communication
 
 - The user is a new CS master's student working on ADSL summer-project Task 1A, a Literature Review Agent.
@@ -30,8 +37,9 @@ uv run python -m literature_review.retrieval_eval data/papers "literature review
 uv run python -m literature_review.pairwise_eval data/papers --top-k 16 --judge-model gemini-3.6-flash
 uv run python -m literature_review.main --dry-run
 uv run python -m literature_review.main --rule-based
+uv run --env-file .env python -m literature_review.main
 ```
-`literature_review.main` is the end-to-end entry (M3C): it interactively asks one query, plans with the LLM planner by default (`--rule-based` forces the deterministic fallback; `--dry-run` always uses it, so a dry run needs no key), searches/ranks/downloads each planned query independently, then extracts and synthesizes the report. `--dry-run` stops after downloads (no key). Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `TOP_K_CHUNKS=32`; `target_n = ceil(20 / query_count)`); planning uses `GEMINI_API_KEY`, the synthesis stage uses `GEMINI_API_KEY_2`.
+`literature_review.main` is the end-to-end entry (M3C): it interactively asks one query, plans with the LLM planner by default (`--rule-based` forces the deterministic fallback; `--dry-run` always uses it, so a dry run needs no key), searches/ranks/downloads each planned query independently, then extracts and synthesizes the report. `--dry-run` stops after downloads (no key). Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `target_n = ceil(20 / query_count)`). Key wiring (C2c): `GEMINI_API_KEY` = planner + screening (missing → rule-based fallback, no abort), `GEMINI_API_KEY_2` = functional scoring + per-paper notes, `GEMINI_API_KEY_3` = report (three calls); a missing key2 or key3 exits with code 1. `.env` handling: `GeminiJsonClient` / `OllamaJsonClient` call `load_local_env()` in their constructor, so the stage CLIs (`pipeline`, `pairwise_eval`) read a local `.env` automatically; `main.py` calls it at the start of `_build_clients` as well, so `uv run python -m literature_review` works without `--env-file` (which still works and wins, since `load_local_env` never overwrites an already-set variable).
 
 Langfuse observability: confirm the self-hosted server is up with `curl http://localhost:3000/api/public/health` before a full run; traces appear in the dashboard at `http://localhost:3000`.
 
@@ -50,7 +58,7 @@ ResearchIdea -> SearchPlan -> OpenAlex retrieval -> metadata filter/rank/select
 -> per-paper claim notes -> synthesis report with [claim-N] markers / future directions
 ```
 
-The pipeline now retrieves evidence with semantic (embedding) ranking by default — `literature_review.embedding_retriever.retrieve_evidence_embedding` replaced the lexical baseline for `pipeline.py`; the lexical `evidence_ranking.retrieve_evidence` is retained as compare/legacy only. The formal scoring layer is the C2b functional scoring (`literature_review.functional`: a single 1-10 utility per sampled chunk, per-paper top-2 sampling, batches of 5, quota∩threshold selection); the LLM contextual-summary/re-ranking interface (`summarize_and_rerank`) is retained as compare/legacy only. Synthesis output cites claims as `[claim-N]` with `claim_chunks` / `claim_id` / `claim_ids` tagging (C2c / Output Traceability). Langfuse observability (tree tracing on every LLM call, flushed before CLI exit) is implemented.
+The pipeline now retrieves evidence with semantic (embedding) ranking by default — `literature_review.embedding_retriever.retrieve_evidence_embedding` replaced the lexical baseline for `pipeline.py`; the lexical `evidence_ranking.retrieve_evidence` is retained as compare/legacy only. The formal scoring layer is the C2b functional scoring (`literature_review.functional`: a single 1-10 utility per sampled chunk, per-paper top-2 sampling from the sub-query that pulled the paper in, batches of 5, quota∩threshold selection); the per-paper score blends max and mean (`0.7×max + 0.3×mean`, S3). The LLM contextual-summary/re-ranking interface (`summarize_and_rerank`) is retained as compare/legacy only. Synthesis output cites claims as `[claim-N]` with `claim_chunks` / `claim_id` / `claim_ids` tagging (C2c / Output Traceability). Langfuse observability (tree tracing on every LLM call, flushed before CLI exit) is implemented.
 
 PDF acquisition (M3B): `literature_review.pdf_downloader` fetches open-access PDFs from the OpenAlex `best_oa_location.pdf_url` recorded by `search.py` into `Paper.open_access_pdf_url`. `download_pdf(paper, dest_dir)` writes into a caller-chosen directory (real runs use `data/papers/`, smoke runs use a temp dir) with collision-resistant file names; missing OA links raise `NoOpenAccessError`, network/HTTP failures raise `PdfDownloadError`. `download_and_backfill(ranked_papers, dest_dir, target_n, *, already_downloaded=None)` keeps the top-N selection: failing papers are replaced by the next ranked candidates, and the pass reports OA coverage ratios (`oa_ratio_candidates`, `oa_ratio_attempted`, `shortfall`, `duplicate_reused`) with optional JSON stats output. `already_downloaded` is a shared set that deduplicates across multi-query runs (M3C): a paper id already in the set counts as satisfied (`duplicate_reused`) without writing a new file and without backfilling.
 
@@ -72,7 +80,7 @@ The `SearchPlan` contract is query-only: `SearchPlan.idea` is optional. The LLM 
 - 未來方向 / FutureDirection: an evidence-anchored research direction carrying its own provenance.
 - 收縮平均 / shrunk mean: aggregate score blending the sample mean toward a prior when few chunks support a paper (`round((n*mean + m*prior)/(n+m), 1)`, m=1; kept for the metadata initial assessment, retired from the formal functional path by C2b).
 - include/exclude（推薦等級）: recommendation levels (the consider band was retired by C2b); only include papers receive per-paper notes and enter the synthesis report.
-- 功能性評分 / functional scoring: the C2b formal scoring layer — a single 1-10 utility per sampled chunk (`literature_review.functional`), per-paper top-2 sampling, batches of 5, quota∩threshold selection (≥ `FUNCTIONAL_THRESHOLD`).
+- 功能性評分 / functional scoring: the C2b formal scoring layer — a single 1-10 utility per sampled chunk (`literature_review.functional`), per-paper top-2 sampling, batches of 5, quota∩threshold selection (≥ `FUNCTIONAL_THRESHOLD`); the per-paper score is `0.7×max + 0.3×mean` of its sampled chunks (S3).
 - Claim 標註 / claim tagging: `[claim-N]` markers in the report plus `claim_chunks` / `claim_id` / `claim_ids` fields mapping every claim to its source chunks and papers (C2c / Output Traceability).
 - LLM 篩選 / screening: the M5e candidate-filtering call that assigns keep/maybe/exclude to bucket-sampled OpenAlex candidates before PDF download, with optional gap follow-up queries.
 - bounded evidence（有限證據集）: every generated claim may rely only on the supplied chunk set, never on external knowledge.
