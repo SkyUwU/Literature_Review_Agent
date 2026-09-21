@@ -31,7 +31,7 @@ SS_FIELDS = (
     "venue",
     "url",
 )
-SS_PACE_SECONDS = 1.1
+SS_PACE_SECONDS = 2.0  # 2x the keyed 1 RPS limit, so a 429 stays rare
 SS_MAX_RETRIES = 3
 SS_USER_AGENT = "LiteratureReviewAgent/0.1 (academic-project)"
 ABSTRACT_PLACEHOLDER = "Abstract not available for this paper."
