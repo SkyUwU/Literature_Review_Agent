@@ -26,7 +26,7 @@ OPENALEX_SEARCH_URL = "https://api.openalex.org/works"
 USER_AGENT = "LiteratureReviewAgent/0.1 (academic-project)"
 REQUESTED_FIELDS = (
     "id,title,authorships,publication_year,abstract_inverted_index,"
-    "primary_location,cited_by_count,best_oa_location"
+    "primary_location,cited_by_count,best_oa_location,doi"
 )
 
 
@@ -83,6 +83,21 @@ def reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str | N
     return " ".join(positions[position] for position in range(max(positions) + 1) if position in positions)
 
 
+def norm_doi(raw: object) -> str | None:
+    """Normalise a DOI to its bare lowercase form (no URL prefix), or None.
+
+    Shared by the OpenAlex and Semantic Scholar adapters so cross-source dedup
+    keys compare equal for the same paper.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+    return value or None
+
+
 def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
     """Normalize one provider record; skip records without usable abstract evidence."""
     paper_id = record.get("id")
@@ -107,6 +122,7 @@ def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
 
     return Paper(
         paper_id=paper_id,
+        doi=norm_doi(record.get("doi")),
         title=title,
         authors=authors,
         year=year,

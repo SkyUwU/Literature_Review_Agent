@@ -45,6 +45,10 @@ class Paper(BaseModel):
     """Metadata and available evidence for one candidate paper."""
 
     paper_id: str = Field(description="A stable identifier, such as an arXiv ID or DOI.")
+    doi: str | None = Field(
+        default=None,
+        description="Normalised bare DOI, e.g. 10.1145/xxx (no URL prefix, lowercase).",
+    )
     title: str = Field(min_length=1)
     authors: list[str] = Field(min_length=1)
     year: int = Field(ge=1900, le=2100)
