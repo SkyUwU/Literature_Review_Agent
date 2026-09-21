@@ -17,7 +17,7 @@
 - OpenAlex adapter 補抓 DOI（`REQUESTED_FIELDS` + `paper_from_openalex`）
 - 去重鍵改為正規化 DOI → 備援正規化 title+year
 - `literature_review/ss_search.py`：SS adapter，回傳 `SearchResponse(provider="semantic_scholar")`
-- SS 速率控制：1.1s 間隔 + 429 指數退避（尊重 `Retry-After`，最多 3 次）
+- SS 速率控制：2.0s 間隔 + 429 指數退避（尊重 `Retry-After`，最多 3 次）
 - SS adapter 填 `citation_count`，現有三成分 ranking 不改
 - `main.py` 以 SS 為主搜尋（key 存在時），fallback 回 OpenAlex（key 缺失時）
 - abstract 不足的論文用 DOI 對回 OpenAlex 補摘要（`reconstruct_abstract` from `search.py:78`）
@@ -173,8 +173,8 @@ Todo 5 (smoke/tests)    ← 依賴全部
 
   **Implementation**
   1. 新建 `literature_review/ss_search.py`：
-     - 常數：`SS_SEARCH_URL`、`SS_FIELDS`（title,abstract,year,authors,externalIds,citationCount,openAccessPdf,venue,url）、`ABSTRACT_PLACEHOLDER`（`"Abstract not available for this paper."`）、`SS_PACE_SECONDS = 1.1`、`SS_MAX_RETRIES = 3`、`SS_USER_AGENT`
-     - `ss_get_json(url, api_key) -> dict`：每次 ≥1.1s pacing（含第一次）；429 指數退避（2^attempt + random 0–0.5 jitter），尊重 `Retry-After` header（`error.headers.get("Retry-After")`），最多 3 次，超過 raise `RuntimeError`
+     - 常數：`SS_SEARCH_URL`、`SS_FIELDS`（title,abstract,year,authors,externalIds,citationCount,openAccessPdf,venue,url）、`ABSTRACT_PLACEHOLDER`（`"Abstract not available for this paper."`）、`SS_PACE_SECONDS = 2.0`（實作後由使用者裁定由 1.1 提高：1.1s 曾連續撞 429）、`SS_MAX_RETRIES = 3`、`SS_USER_AGENT`
+     - `ss_get_json(url, api_key) -> dict`：每次 ≥2.0s pacing（含第一次）；429 指數退避（2^attempt + random 0–0.5 jitter），尊重 `Retry-After` header（`error.headers.get("Retry-After")`），最多 3 次，超過 raise `RuntimeError`
      - `paper_from_ss(record) -> Paper | None`：normalise 一筆 SS 記錄。`paper_id = record["paperId"]`（40字元 hex，slug 用）；`doi` = `(record.get("externalIds") or {}).get("DOI")` 正規化；`citation_count = record.get("citationCount")`；`open_access_pdf_url` guard null/空字串；**abstract 缺失/過短 → 填 `ABSTRACT_PLACEHOLDER`（不能留 None/空——`Paper.abstract` 是 required `min_length=20`（models.py:51），None 或空字串建構直接 crash）**；`url = record.get("url")`（SS 有；缺則 fallback `https://www.semanticscholar.org/paper/{paper_id}`）；`authors` 從 list of `{name}` 取。Return None **僅**在 `paperId` 或 `title` 或 `year` 缺失、或 `authors` 為空（與 OpenAlex adapter 同 pattern，`search.py:98`——這幾欄 Paper 都是必填，無救）。
      - `search_ss(request: SearchRequest, *, api_key: str) -> SearchResponse`：組 URL → `ss_get_json` → normalize papers → `SearchResponse(provider="semantic_scholar", ...)`
   2. 新建 `tests/test_ss_search.py`：
@@ -200,7 +200,7 @@ Todo 5 (smoke/tests)    ← 依賴全部
   - Happy：mock 10 筆中 1 筆 null abstract → 回傳 10 個 Paper（1 筆 abstract=placeholder），不跳過、不 crash
   - Happy：mock record 缺 `url` → fallback paper URL 生效
   - Happy：mock `externalIds: {}` → `paper.doi is None`
-  - Happy：mock 429 → 200 → paper 成功返回；`time.sleep` 被呼叫 ≥2 次（1.1s + backoff）
+  - Happy：mock 429 → 200 → paper 成功返回；`time.sleep` 被呼叫 ≥2 次（2.0s + backoff）
   - Failure：mock 429 × 3 → raise `RuntimeError`
 
   **Commit**：`feat(ss): add Semantic Scholar adapter with rate-limit safety`
@@ -220,7 +220,7 @@ Todo 5 (smoke/tests)    ← 依賴全部
   1. `main.py` `_search_and_rank_one_query`：加入 `ss_api_key: str | None = None` 參數，有 key 時呼叫 `ss_search.search_ss(request, api_key=ss_api_key)`，無 key 時 fallback 到 `search.search_papers(request, json_fetcher=json_fetcher)`
   2. `main.py` 新增 `backfill_abstracts(papers: list[Paper]) -> list[Paper]`：
      - 對每篇 abstract 為 `ABSTRACT_PLACEHOLDER`（或長度 <20 字）且 `doi` 不為 None 的 paper，用 OpenAlex DOI lookup 拿 `abstract_inverted_index`，用 `search.reconstruct_abstract()` 重建摘要，**取代 placeholder** 更新 `paper.abstract`
-     - OpenAlex 請求限流：每請求間 ≥0.2s（OpenAlex polite pool 寬鬆，不需 1.1s）
+     - OpenAlex 請求限流：每請求間 ≥0.2s（OpenAlex polite pool 寬鬆，不需 2.0s）
      - DOI lookup 失敗或仍無 abstract → paper 維持 placeholder，log 警告
    3. `main.py` `run_end_to_end`：從 `os.environ.get("SEMANTIC_SCHOLAR_API_KEY")` 讀 key，傳入 `_search_and_rank_one_query`；搜尋後呼叫 `backfill_abstracts`，然後**過濾掉 abstract 仍為 placeholder 的 papers**（backfill 失敗 + 無 DOI 的那些）——過濾後才進 `filter_and_rank`
    4. `main.py` SS fallback：若 SS 回傳 0 筆 paper（key 有但搜尋失敗），自動 fallback 到 OpenAlex，log 警告
