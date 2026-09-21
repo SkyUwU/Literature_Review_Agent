@@ -34,6 +34,7 @@
 | LLM Input Hygiene | ✅ | LLM 輸入零頁碼（對外由程式組裝） |
 | Output Traceability | ✅ | `claim_id` / `claim_ids` 進對外輸出 |
 | JSON 輸出 | ✅ | `save_report_output` → `data/outputs/report_*.json` |
+| main.py `.env` 自動載入 | ✅ | `_build_clients` 呼叫 `load_local_env()`，完整 run 免 `--env-file`（376 tests） |
 
 ## 下一步：M5c（Semantic Scholar 為主檢索）
 
