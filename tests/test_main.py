@@ -631,7 +631,7 @@ class MainEntryTests(unittest.TestCase):
     def test_main_missing_key2_exits_before_synthesis(self) -> None:
         with mock.patch("builtins.input", return_value="literature review agent"):
             with mock.patch.object(sys, "argv", ["literature_review.main"]):
-                with mock.patch.dict(os.environ, {"GEMINI_API_KEY_2": ""}, clear=False):
+                with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": ""}, clear=False):
                     with self.assertRaises(SystemExit) as ctx:
                         main_module.main()
         self.assertEqual(ctx.exception.code, 1)
@@ -734,6 +734,48 @@ class MainEntryTests(unittest.TestCase):
                     )
         self.assertEqual(ctx.exception.code, 1)
         self.assertEqual(client_cls.call_count, 1)  # 只建了 key2 synth，就因缺 key3 提早退出
+
+    def test_build_clients_loads_dotenv_when_shell_has_no_keys(self) -> None:
+        """乾淨環境 + 只有 .env → _build_clients 先載入 .env，key2/key3 讀得到、不 exit。"""
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / ".env").write_text(
+                "GEMINI_API_KEY=from_dotenv_1\n"
+                "GEMINI_API_KEY_2=from_dotenv_2\n"
+                "GEMINI_API_KEY_3=from_dotenv_3\n",
+                encoding="utf-8",
+            )
+            previous = os.getcwd()
+            try:
+                os.chdir(tmp)
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
+                        client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
+                            argparse.Namespace(rule_based=False, dry_run=False)
+                        )
+                    self.assertEqual(os.environ.get("GEMINI_API_KEY_2"), "from_dotenv_2")
+            finally:
+                os.chdir(previous)
+        self.assertEqual(client_cls.call_count, 3)
+        self.assertIsNotNone(client_plan)
+        self.assertIsNotNone(client_synth)
+        self.assertIsNone(client_rcs)
+        self.assertIsNotNone(client_report)
+        api_keys_used = [call.kwargs.get("api_key") for call in client_cls.call_args_list]
+        self.assertIn("from_dotenv_2", api_keys_used)
+        self.assertIn("from_dotenv_3", api_keys_used)
+
+    def test_build_clients_dry_run_skips_dotenv_load(self) -> None:
+        """--dry-run 完全不碰 key（docstring 保證），連 .env 都不載入。"""
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / ".env").write_text("GEMINI_API_KEY=from_dotenv_1\n", encoding="utf-8")
+            previous = os.getcwd()
+            try:
+                os.chdir(tmp)
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    main_module._build_clients(argparse.Namespace(rule_based=False, dry_run=True))
+                    self.assertNotIn("GEMINI_API_KEY", os.environ)
+            finally:
+                os.chdir(previous)
 
     def test_main_dry_run_forces_rule_based(self) -> None:
         plan = create_rule_based_plan("literature review agent")

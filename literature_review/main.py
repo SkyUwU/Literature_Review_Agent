@@ -31,7 +31,12 @@ from literature_review import pipeline, search
 from literature_review import embedding_retriever
 from literature_review.embedding_retriever import Encoder
 from literature_review.extraction import extract_pdf_text
-from literature_review.llm_evidence import GeminiJsonClient, JsonGenerationClient, LlmEvidenceError
+from literature_review.llm_evidence import (
+    GeminiJsonClient,
+    JsonGenerationClient,
+    LlmEvidenceError,
+    load_local_env,
+)
 from literature_review.ollama_client import OllamaJsonClient
 from literature_review.models import (
     FullTextDocument,
@@ -360,6 +365,11 @@ def _build_clients(
 ]:
     """Build the stage clients: planning uses key1, RCS may use local Ollama, synthesis uses key2, report uses key3.
 
+    ``load_local_env()`` runs first for a real run (skipped on ``--dry-run``), so
+    the keys may come from a local ``.env`` even when the shell has not exported
+    them — matching the ``pipeline`` / ``pairwise_eval`` entry points, whose
+    clients load the env from their constructor already.
+
     The LLM planner is the default for a full run; it is skipped on ``--dry-run``
     (zero keys) and on ``--rule-based`` (escape hatch). A missing ``GEMINI_API_KEY``
     prints a warning and keeps ``client_plan`` as ``None``, letting
@@ -372,6 +382,8 @@ def _build_clients(
     ``client_report`` (C2c) uses the dedicated ``GEMINI_API_KEY_3``: a full run
     without it exits with code 1 (the report has no fallback, mirroring key2).
     """
+    if not arguments.dry_run:
+        load_local_env()
     client_plan: JsonGenerationClient | None = None
     if not arguments.dry_run and not arguments.rule_based:
         api_key_1 = os.getenv("GEMINI_API_KEY")
