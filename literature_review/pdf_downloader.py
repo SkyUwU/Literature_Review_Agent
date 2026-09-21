@@ -53,6 +53,19 @@ def _safe_filename(paper: Paper) -> str:
     return f"{slug or 'paper'}.pdf"
 
 
+def dedup_key(paper: Paper) -> str:
+    """Build a provider-independent dedup key for cross-source paper identity.
+
+    Prefers the normalised DOI so the same work found via OpenAlex and Semantic
+    Scholar collapses to one key even though the provider ids differ. Falls back
+    to a punctuation/case-insensitive ``title:...:year`` when no DOI is present.
+    """
+    if paper.doi:
+        return f"doi:{paper.doi}"
+    norm_title = re.sub(r"[^a-z0-9]", "", paper.title.lower())
+    return f"title:{norm_title}:{paper.year}"
+
+
 def download_pdf(
     paper: Paper,
     dest_dir: Path,
@@ -165,27 +178,29 @@ def download_and_backfill(
     stats.requested = target_n
 
     def _attempt(ranked: RankedPaper) -> None:
-        if already_downloaded is not None and ranked.paper.paper_id in already_downloaded:
+        key = dedup_key(ranked.paper)
+        if already_downloaded is not None and key in already_downloaded:
             stats.duplicate_reused += 1
             return
         if ranked.paper.open_access_pdf_url is None:
             result.failed_paper_ids.append(ranked.paper.paper_id)
             stats.failed_no_oa += 1
-            return
-        stats.attempted += 1
-        try:
-            path = download_pdf(ranked.paper, dest_dir, fetcher=fetcher)
-            result.downloaded_paths.append(path)
-            result.downloaded_paper_ids.append(ranked.paper.paper_id)
-            stats.downloaded += 1
-            if already_downloaded is not None:
-                already_downloaded.add(ranked.paper.paper_id)
-        except PdfDownloadError as error:
-            result.failed_paper_ids.append(ranked.paper.paper_id)
-            stats.failed_network += 1
-        except Exception as error:
-            result.failed_paper_ids.append(ranked.paper.paper_id)
-            stats.failed_other += 1
+        else:
+            stats.attempted += 1
+            try:
+                path = download_pdf(ranked.paper, dest_dir, fetcher=fetcher)
+            except PdfDownloadError:
+                result.failed_paper_ids.append(ranked.paper.paper_id)
+                stats.failed_network += 1
+            except Exception:
+                result.failed_paper_ids.append(ranked.paper.paper_id)
+                stats.failed_other += 1
+            else:
+                result.downloaded_paths.append(path)
+                result.downloaded_paper_ids.append(ranked.paper.paper_id)
+                stats.downloaded += 1
+        if already_downloaded is not None:
+            already_downloaded.add(key)
 
     if priority_groups is None:
         stats.candidates_available = len(ranked_papers)
