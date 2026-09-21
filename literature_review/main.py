@@ -24,10 +24,12 @@ import json
 import math
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
-from literature_review import pipeline, search
+from literature_review import pipeline, search, ss_search
 from literature_review import embedding_retriever
 from literature_review.embedding_retriever import Encoder
 from literature_review.extraction import extract_pdf_text
@@ -40,8 +42,10 @@ from literature_review.llm_evidence import (
 from literature_review.ollama_client import OllamaJsonClient
 from literature_review.models import (
     FullTextDocument,
+    Paper,
     RankedPaper,
     SearchRequest,
+    SearchResponse,
     SynthesisResponse,
 )
 from literature_review.pdf_downloader import Fetcher, default_fetcher, download_and_backfill
@@ -55,6 +59,8 @@ MIN_YEAR = 2021
 TOTAL_TARGET = 20
 TOP_K_CHUNKS = 32  # legacy: C2b per-paper sampling uses FunctionalScoringPolicy.top_chunks_per_paper
 DEST_DIR = Path("data/papers")
+OPENALEX_DOI_LOOKUP_URL = "https://api.openalex.org/works/doi:"
+BACKFILL_PACE_SECONDS = 0.2
 
 
 def _make_plan(
@@ -92,20 +98,107 @@ def _print_plan(plan: object) -> None:
     )
 
 
+def _needs_abstract(paper: Paper) -> bool:
+    """True when a paper carries no usable abstract (placeholder or too short)."""
+    return (
+        paper.abstract == ss_search.ABSTRACT_PLACEHOLDER
+        or len(paper.abstract.strip()) < 20
+    )
+
+
+def backfill_abstracts(
+    papers: list[Paper],
+    *,
+    json_fetcher: search.JsonFetcher = search.fetch_json,
+) -> list[Paper]:
+    """Replace placeholder abstracts by looking each paper up in OpenAlex by DOI.
+
+    Semantic Scholar sometimes returns records without an abstract, but the
+    OpenAlex DOI endpoint usually still has one. Papers without a DOI, or whose
+    lookup fails, keep the placeholder so the caller can filter them out.
+    """
+    last_request_at = 0.0
+    for paper in papers:
+        if paper.doi is None or not _needs_abstract(paper):
+            continue
+        elapsed = time.monotonic() - last_request_at
+        if elapsed < BACKFILL_PACE_SECONDS:
+            time.sleep(BACKFILL_PACE_SECONDS - elapsed)
+        last_request_at = time.monotonic()
+        url = (
+            f"{OPENALEX_DOI_LOOKUP_URL}{quote(paper.doi, safe='')}"
+            "?select=abstract_inverted_index"
+        )
+        try:
+            payload = json_fetcher(url)
+        except Exception as error:
+            print(f"Abstract backfill failed for {paper.doi}: {error}", file=sys.stderr)
+            continue
+        abstract = search.reconstruct_abstract(payload.get("abstract_inverted_index"))
+        if abstract is not None and len(abstract.strip()) >= 20:
+            paper.abstract = abstract
+        else:
+            print(f"No OpenAlex abstract for {paper.doi}", file=sys.stderr)
+    return papers
+
+
+def _search_candidates(
+    query_text: str,
+    *,
+    json_fetcher: search.JsonFetcher,
+    ss_api_key: str | None,
+) -> SearchResponse:
+    """Search one query through Semantic Scholar, falling back to OpenAlex.
+
+    With ``ss_api_key`` Semantic Scholar is primary; its placeholder abstracts are
+    backfilled from OpenAlex and any paper still lacking an abstract is dropped.
+    A missing key, an empty Semantic Scholar result, or a failed request (for
+    example repeated HTTP 429) falls back to OpenAlex unchanged.
+    """
+    request = SearchRequest(query=query_text, limit=LIMIT, year_from=MIN_YEAR)
+    if not ss_api_key:
+        return search.search_papers(request, json_fetcher=json_fetcher)
+    try:
+        response = ss_search.search_ss(request, api_key=ss_api_key)
+    except ss_search.SsSearchError as error:
+        print(
+            f"Semantic Scholar search failed; falling back to OpenAlex: {error}",
+            file=sys.stderr,
+        )
+        return search.search_papers(request, json_fetcher=json_fetcher)
+    if not response.papers:
+        print(
+            "Semantic Scholar returned no candidates; falling back to OpenAlex.",
+            file=sys.stderr,
+        )
+        return search.search_papers(request, json_fetcher=json_fetcher)
+    papers = backfill_abstracts(response.papers, json_fetcher=json_fetcher)
+    papers = [paper for paper in papers if not _needs_abstract(paper)]
+    return response.model_copy(
+        update={
+            "papers": papers,
+            "skipped_candidates": response.total_candidates - len(papers),
+        }
+    )
+
+
 def _search_and_rank(
     query_text: str,
     *,
     json_fetcher: search.JsonFetcher,
     encoder: Encoder | None,
     paper_meta: dict[str, tuple[int | None, str | None]],
+    ss_api_key: str | None = None,
 ) -> list[RankedPaper]:
     """Search one query and rank its candidates, recording paper metadata.
 
     Returns the ranked paper list; shared by the legacy per-query download path,
-    the M5e bucket-sampling path, and the gap follow-up round.
+    the M5e bucket-sampling path, and the gap follow-up round. With ``ss_api_key``
+    the search is served by Semantic Scholar, otherwise by OpenAlex.
     """
-    request = SearchRequest(query=query_text, limit=LIMIT, year_from=MIN_YEAR)
-    response = search.search_papers(request, json_fetcher=json_fetcher)
+    response = _search_candidates(
+        query_text, json_fetcher=json_fetcher, ss_api_key=ss_api_key
+    )
     ranked = filter_and_rank(
         response, FilterPolicy(min_year=MIN_YEAR), encoder=encoder
     )
@@ -132,6 +225,7 @@ def run_end_to_end(
     json_fetcher: search.JsonFetcher = search.fetch_json,
     pdf_fetcher: Fetcher | None = None,
     encoder: Encoder | None = None,
+    ss_api_key: str | None = None,
 ) -> dict[str, object]:
     """Run one full literature-review cycle for a bare query.
 
@@ -150,6 +244,11 @@ def run_end_to_end(
     the default local encoder is built once and shared across planned queries.
     All external I/O (OpenAlex JSON, PDF bytes, LLM) is injectable so tests never
     touch the real network or an API key.
+
+    ``ss_api_key`` selects the primary search provider: when set, planned queries
+    are searched through Semantic Scholar, placeholder abstracts are backfilled
+    from OpenAlex by DOI, and papers still lacking an abstract are dropped before
+    ranking; when ``None`` or empty the search uses OpenAlex directly.
 
     When ``client_screen`` is provided (M5e, reuse the key1 planner client): every
     planned query is bucket-sampled (``sample_candidates``), all samples go into
@@ -189,6 +288,7 @@ def run_end_to_end(
                     json_fetcher=json_fetcher,
                     encoder=effective_encoder,
                     paper_meta=paper_meta,
+                    ss_api_key=ss_api_key,
                 )
             )
         screening_result = screen_candidates(query_candidates, client_screen)
@@ -279,6 +379,7 @@ def run_end_to_end(
                 json_fetcher=json_fetcher,
                 encoder=effective_encoder,
                 paper_meta=paper_meta,
+                ss_api_key=ss_api_key,
             )
             result = download_and_backfill(
                 ranked_papers,
@@ -469,6 +570,12 @@ def main() -> None:
 
     client_plan, client_synth, client_rcs, client_report = _build_clients(arguments)
 
+    ss_api_key = (
+        None
+        if arguments.dry_run
+        else (os.getenv("SEMANTIC_SCHOLAR_API_KEY") or None)
+    )
+
     try:
         result = run_end_to_end(
             query,
@@ -480,6 +587,7 @@ def main() -> None:
             client_report=client_report,
             use_llm_plan=not arguments.rule_based and not arguments.dry_run,
             dry_run=arguments.dry_run,
+            ss_api_key=ss_api_key,
         )
     except (LlmEvidenceError, SynthesisError, ValueError) as error:
         print(f"Pipeline failed: {error}", file=sys.stderr)

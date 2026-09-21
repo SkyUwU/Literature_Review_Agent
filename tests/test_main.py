@@ -20,13 +20,17 @@ from literature_review.main import TOTAL_TARGET, run_end_to_end
 from literature_review.models import (
     ChunkReference,
     FutureDirection,
+    Paper,
     PaperSource,
     PaperSummary,
     PaperSummaryClaim,
+    SearchRequest,
+    SearchResponse,
     SynthesisResponse,
 )
 from literature_review.pdf_downloader import PdfDownloadError
 from literature_review.planning import create_rule_based_plan
+from literature_review.ss_search import ABSTRACT_PLACEHOLDER, SsSearchError
 
 # ---------------------------------------------------------------------------
 # Fake OpenAlex / PDF / LLM plumbing (mirrors tests/test_pipeline.py conventions)
@@ -923,6 +927,198 @@ class SaveReportOutputTests(unittest.TestCase):
             self.assertIn("Failed to save report JSON", written)
 
         self.assertIsNone(saved)
+
+
+def ss_paper(
+    paper_id: str,
+    *,
+    doi: str | None = None,
+    abstract: str | None = None,
+    oa: bool = True,
+) -> Paper:
+    """One Semantic-Scholar-style Paper with an optional placeholder abstract."""
+    return Paper(
+        paper_id=paper_id,
+        doi=doi,
+        title=f"Towards {paper_id}: automated literature review agents",
+        authors=["A. Author"],
+        year=2023,
+        abstract=(
+            abstract
+            if abstract is not None
+            else "This paper studies automated literature review generation with evidence selection."
+        ),
+        url=f"https://www.semanticscholar.org/paper/{paper_id}",
+        citation_count=10,
+        open_access_pdf_url=f"https://example.org/{paper_id}.pdf" if oa else None,
+    )
+
+
+def ss_response(*papers: Paper) -> SearchResponse:
+    return SearchResponse(
+        provider="semantic_scholar",
+        request=SearchRequest(query="literature review agent", limit=100, year_from=2021),
+        total_candidates=len(papers),
+        papers=list(papers),
+        skipped_candidates=0,
+    )
+
+
+class SemanticScholarSearchTests(unittest.TestCase):
+    """M5c: SS-primary search, OpenAlex abstract backfill, OpenAlex fallback."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.dest = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _rank(self, fetcher: FakeJsonFetcher, *, ss_api_key: str | None) -> list:
+        return main_module._search_and_rank(
+            "literature review agent",
+            json_fetcher=fetcher,
+            encoder=None,
+            paper_meta={},
+            ss_api_key=ss_api_key,
+        )
+
+    def test_search_and_rank_uses_semantic_scholar_with_key(self) -> None:
+        fetcher = FakeJsonFetcher([])
+        with mock.patch(
+            "literature_review.main.ss_search.search_ss",
+            return_value=ss_response(ss_paper("S1")),
+        ) as search_ss:
+            ranked = self._rank(fetcher, ss_api_key="secret")
+
+        search_ss.assert_called_once()
+        self.assertEqual([item.paper.paper_id for item in ranked], ["S1"])
+        self.assertEqual(fetcher.calls, [])
+
+    def test_search_and_rank_uses_openalex_without_key(self) -> None:
+        fetcher = FakeJsonFetcher([results_payload(record_for("W1"))])
+        with mock.patch("literature_review.main.ss_search.search_ss") as search_ss:
+            ranked = self._rank(fetcher, ss_api_key=None)
+
+        search_ss.assert_not_called()
+        self.assertEqual([item.paper.paper_id for item in ranked], ["W1"])
+
+    def test_search_and_rank_falls_back_when_ss_returns_no_papers(self) -> None:
+        fetcher = FakeJsonFetcher([results_payload(record_for("W1"))])
+        with (
+            mock.patch(
+                "literature_review.main.ss_search.search_ss", return_value=ss_response()
+            ),
+            mock.patch("sys.stderr"),
+        ):
+            ranked = self._rank(fetcher, ss_api_key="secret")
+
+        self.assertEqual([item.paper.paper_id for item in ranked], ["W1"])
+        self.assertEqual(len(fetcher.calls), 1)
+
+    def test_search_and_rank_falls_back_when_ss_search_raises(self) -> None:
+        fetcher = FakeJsonFetcher([results_payload(record_for("W1"))])
+        with (
+            mock.patch(
+                "literature_review.main.ss_search.search_ss",
+                side_effect=SsSearchError("Semantic Scholar returned HTTP 429."),
+            ),
+            mock.patch("sys.stderr"),
+        ):
+            ranked = self._rank(fetcher, ss_api_key="secret")
+
+        self.assertEqual([item.paper.paper_id for item in ranked], ["W1"])
+        self.assertEqual(len(fetcher.calls), 1)
+
+    def test_search_and_rank_backfills_placeholder_abstract_via_doi(self) -> None:
+        fetcher = FakeJsonFetcher(
+            [
+                {
+                    "abstract_inverted_index": _inverted(
+                        "Recovered evidence about automated literature review agents from OpenAlex."
+                    )
+                }
+            ]
+        )
+        papers = [
+            ss_paper("S1"),
+            ss_paper("S2", doi="10.1145/abc.def", abstract=ABSTRACT_PLACEHOLDER),
+        ]
+        with (
+            mock.patch(
+                "literature_review.main.ss_search.search_ss", return_value=ss_response(*papers)
+            ),
+            mock.patch("literature_review.main.time.sleep"),
+        ):
+            ranked = self._rank(fetcher, ss_api_key="secret")
+
+        recovered = [item for item in ranked if item.paper.paper_id == "S2"]
+        self.assertEqual(len(recovered), 1)
+        self.assertIn("Recovered", recovered[0].paper.abstract)
+        self.assertEqual(
+            fetcher.calls,
+            [
+                "https://api.openalex.org/works/doi:10.1145%2Fabc.def"
+                "?select=abstract_inverted_index"
+            ],
+        )
+
+    def test_search_and_rank_drops_unrecoverable_placeholder(self) -> None:
+        fetcher = FakeJsonFetcher([])
+        papers = [ss_paper("S1", doi=None, abstract=ABSTRACT_PLACEHOLDER)]
+        with (
+            mock.patch(
+                "literature_review.main.ss_search.search_ss", return_value=ss_response(*papers)
+            ),
+            mock.patch("literature_review.main.time.sleep"),
+        ):
+            ranked = self._rank(fetcher, ss_api_key="secret")
+
+        self.assertEqual(ranked, [])
+
+    def test_backfill_abstracts_keeps_placeholder_on_lookup_failure(self) -> None:
+        paper = ss_paper("S1", doi="10.1/abc", abstract=ABSTRACT_PLACEHOLDER)
+
+        def failing_fetcher(url: str) -> dict:
+            raise RuntimeError("OpenAlex unavailable")
+
+        with mock.patch("literature_review.main.time.sleep"), mock.patch("sys.stderr"):
+            result = main_module.backfill_abstracts([paper], json_fetcher=failing_fetcher)
+
+        self.assertEqual(result[0].abstract, ABSTRACT_PLACEHOLDER)
+
+    def test_run_end_to_end_uses_ss_primary_and_backfills(self) -> None:
+        fetcher = FakeJsonFetcher(
+            [
+                {
+                    "abstract_inverted_index": _inverted(
+                        "Backfilled evidence about automated literature review agents."
+                    )
+                }
+            ]
+        )
+        papers = [
+            ss_paper("S1"),
+            ss_paper("S2", doi="10.1145/xyz", abstract=ABSTRACT_PLACEHOLDER),
+        ]
+        with (
+            mock.patch(
+                "literature_review.main.ss_search.search_ss", return_value=ss_response(*papers)
+            ),
+            mock.patch("literature_review.main.time.sleep"),
+        ):
+            result = run_end_to_end(
+                "literature review agent",
+                dest_dir=self.dest,
+                client_plan=FakePlanClient(1),
+                use_llm_plan=True,
+                dry_run=True,
+                json_fetcher=fetcher,
+                pdf_fetcher=pdf_bytes,
+                ss_api_key="secret",
+            )
+
+        self.assertEqual(
+            {entry["paper_id"] for entry in result["downloads"]}, {"S1", "S2"}
+        )
 
 
 if __name__ == "__main__":
