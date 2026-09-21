@@ -43,6 +43,23 @@
 - 設計要點：SS 為主（key 存在時）、OpenAlex 雙角色（搜尋 fallback + DOI 補摘要 backfill）；**adapter 不過濾無摘要論文**（過濾移到 backfill 之後、`filter_and_rank` 之前）；`Paper.abstract` 必填 → 用 `ABSTRACT_PLACEHOLDER` 佔位（backfill 取代、救不回才在 pipeline 過濾）。
 - 環境：`SEMANTIC_SCHOLAR_API_KEY` 已在 WSL `.env`（勿再提醒）。
 
+## 2026-09-22 討論紀錄（使用者休息前交付；明日提醒）
+
+使用者今晚提出 4 點，明日逐項提醒、確認後才動：
+
+1. **寫計畫的 skill 目前不存在**。本專案只有 `plan-review`（審核、唯讀）、`project-context`、`review-progress`——皆 route-B 相容（主代理執行、不 spawn 子代理）。openCode 全域的 `plan-write` 類 skill 會 spawn 子代理 → 不符合本專案 route B，不可用。**本專案目標 = 建立 route-B 相容的 `plan-write` skill**（主代理直接寫 `.omo/plans/*.md`、不 spawn 子代理、寫前先與使用者確認計畫內容）。已授權建立、尚未建立。
+2. **多 query 偏離已閉合**：SS pacing 1.1→2.0（code + 計畫同步，已 commit）。此為修我自己的幻覺衍生物，非使用者要求的需求。
+3. **系統運作模式（使用者問我答、已確認）**：
+   - 基礎篩選先做（OpenAlex URL filter `from_publication_date` / SS `year`）→ `FilterPolicy(min_year)` 於 ranking 前統一後衛（provider 間語意不同，故用統一 FilterPolicy 後衛）。
+   - FilterPolicy + SelectionPolicy → SelectedPaperSet。
+   - 每 query 各自搜尋；第二輪補搜在 LLM screening 後（gap follow_up_queries，≤3）。
+   - LLM 一次接收所有 query 分桶取樣結果（單一 call）；第二輪 follow-up 補搜尋也在同 screening 流程。
+   - dedup / 孤兒進 archive / W4416209823 已移 8 檔 archive。
+   - EvidenceCitation = functional score 的證據出處（chunk + 頁碼範圍 + rationale）。
+4. **使用者偏好（未成計畫、待討論）**：每輪 run 輸出一份獨立資料夾（下載/產出落點），避免累積混雜。非已批准 code 變更，明天再議。
+
+**幻覺更正（2026-09-22）**：我先前捏造「把多個 query 的條件在 OpenAlex 一次查詢中同時給定」是使用者需求——**使用者從未提出**，純屬我的幻覺。多 query 是系統既有設計（`SearchPlan.queries`），各 query 獨立搜尋/排名/下載配額。已自行更正，不得再當成使用者需求。
+
 ## 掛帳（仍開放）
 
 1. **key call 統計未納 log**（S1-S5 final run）→ 由 Langfuse dashboard 補查，或接受缺項。
