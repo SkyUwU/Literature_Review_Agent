@@ -628,6 +628,29 @@ class MainEntryTests(unittest.TestCase):
         )
         self.assertEqual(papers.run["follow_ups"], [])
         self.assertEqual(papers.run["failed_extractions"], [])
+        self.assertEqual(papers.run["warnings"], [])
+
+    def test_make_papers_output_reports_missing_records(self) -> None:
+        plan = create_rule_based_plan("literature review agent")
+        downloads = [
+            {"paper_id": "W1", "path": "/tmp/W1.pdf"},
+            {"paper_id": "W2", "path": "/tmp/W2.pdf"},
+        ]
+        papers = main_module._make_papers_output(
+            "literature review agent",
+            plan,
+            [],
+            [],
+            [],
+            downloads,
+            downloaded_papers={"W1": ss_paper("W1")},
+            paper_queries={"W1": plan.queries[0].query},
+            paper_priority={},
+        )
+
+        self.assertEqual(len(papers.papers), 1)
+        self.assertEqual(papers.papers[0].paper.paper_id, "W1")
+        self.assertEqual(papers.run["warnings"], ["missing record for W2"])
 
     def test_run_end_to_end_papers_records_screening_priority(self) -> None:
         screen_client = MaybeFirstScreenClient()

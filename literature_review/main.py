@@ -566,20 +566,24 @@ def _make_papers_output(
     One entry per actually-written download, in download order, carrying the full
     ``Paper`` metadata, the query that pulled it in, the on-disk path, and (for the
     screening path) the keep/maybe decision. Entries whose paper or query is
-    missing are defensively skipped; they never occur in the normal flow.
+    missing are defensively skipped and reported in ``run.warnings``; they never
+    occur in the normal flow.
     """
     entries: list[DownloadedPaperEntry] = []
+    warnings: list[str] = []
     for entry in downloads:
-        paper = downloaded_papers.get(entry["paper_id"])
-        query_text = paper_queries.get(entry["paper_id"])
+        paper_id = entry["paper_id"]
+        paper = downloaded_papers.get(paper_id)
+        query_text = paper_queries.get(paper_id)
         if paper is None or query_text is None:
+            warnings.append(f"missing record for {paper_id}")
             continue
         entries.append(
             DownloadedPaperEntry(
                 paper=paper,
                 query=query_text,
                 local_path=entry["path"],
-                priority=paper_priority.get(entry["paper_id"]),
+                priority=paper_priority.get(paper_id),
             )
         )
     return PapersOutput(
@@ -589,6 +593,7 @@ def _make_papers_output(
             "follow_ups": follow_ups,
             "stats_per_query": stats_per_query,
             "failed_extractions": failed_extractions,
+            "warnings": warnings,
         },
         papers=entries,
     )

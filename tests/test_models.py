@@ -7,6 +7,7 @@ from literature_review.models import (
     AssessmentPolicy,
     ChunkReference,
     CoveragePackPolicy,
+    DownloadedPaperEntry,
     EvidenceAggregationPolicy,
     EvidenceAssessmentResponse,
     EvidenceChunk,
@@ -21,6 +22,7 @@ from literature_review.models import (
     LlmPaperSummaryNote,
     LlmSynthesisBatch,
     LlmSynthesisDirection,
+    Paper,
     PaperAssessment,
     PaperSource,
     PaperSummary,
@@ -35,6 +37,22 @@ class ModelTests(unittest.TestCase):
     def test_demo_report_is_valid(self) -> None:
         report = build_demo_report()
         self.assertEqual(report.assessments[0].recommendation, "include")
+
+    def test_papers_entry_priority_rejects_exclude(self) -> None:
+        with self.assertRaises(ValidationError):
+            DownloadedPaperEntry(
+                paper=Paper(
+                    paper_id="P1",
+                    title="A paper",
+                    authors=["A. Author"],
+                    year=2025,
+                    abstract="This abstract supplies enough words for the twenty-character minimum.",
+                    url="https://example.org/P1.pdf",
+                ),
+                query="literature review agent",
+                local_path="/tmp/P1.pdf",
+                priority="exclude",
+            )
 
     def test_score_must_be_between_one_and_ten(self) -> None:
         with self.assertRaises(ValidationError):

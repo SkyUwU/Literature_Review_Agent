@@ -5,8 +5,8 @@
 
 ## 現況快照
 
-- 測試 **447 全綠**（2026-09-22 papers-output 收尾複跑，442 → 447；log `.omo/evidence/papers-output-todo4.log`）。
-- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出、run-folder-and-policy、venues-by-name；未 commit 待確認：**papers-output**（下載論文清單 JSON 輸出）。
+- 測試 **449 全綠**（2026-09-22 papers-output 三項小修收尾複跑，447 → 449）。
+- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出、run-folder-and-policy、venues-by-name、papers-output（`d6d78d9`+`1c00de7`）。
 - **所有里程碑已完成；下一步＝候選里程碑，動工前先討論**（見「下一步：候選里程碑」與「未動工候選」）。
 
 ## 里程碑一覽
@@ -37,7 +37,7 @@
 | main.py `.env` 自動載入 | ✅ | `_build_clients` 呼叫 `load_local_env()`，完整 run 免 `--env-file`（376 tests） |
 | Run folder & 研究政策 | ✅ | `data/run/` 每跑重建、`YEAR_WINDOW=3` 三年窗、頂會白名單硬濾（`FilterPolicy.venues`）、`--dest-dir/--year-from/--year-to/--venues` |
 | Venues by name | ✅ 已 commit | `--venues` 按會議名對應別名表（`resolve_venues`：key/別名→展開全別名、未知→警告＋raw、`none`→不濾、全未知→警告＋不濾）|
-| Papers output JSON | ⏳ 待使用者 commit | 真實 run 另寫 `data/outputs/papers_*.json`（完整 Paper metadata＋query＋priority＋路徑＋run 概覽），與 report 同 ts 同資料夾、累積；dry-run 不產檔 |
+| Papers output JSON | ✅ `d6d78d9`+`1c00de7` | 真實 run 另寫 `data/outputs/papers_*.json`（完整 Paper metadata＋query＋priority＋路徑＋run 概覽），與 report 同 ts 同資料夾、累積；dry-run 不產檔 |
 
 ## 下一步：候選里程碑（動工前先討論）
 

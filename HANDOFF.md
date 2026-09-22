@@ -53,7 +53,7 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | `--venues` by conference name | `ranking.py`, `main.py`, `search.py` | Done; alias-table name resolution (`resolve_venues`), `none` disables, unknown names warn+raw token |
 | Papers output JSON | `models.py`, `main.py`, `test_main.py` | Done; non-dry runs also write `data/outputs/papers_*.json` (downloaded-paper list + run overview, shared timestamp with report) |
 
-The current suite has 447 tests. Do not replace tests with only live API checks.
+The current suite has 449 tests. Do not replace tests with only live API checks.
 
 ## Important design decisions
 
