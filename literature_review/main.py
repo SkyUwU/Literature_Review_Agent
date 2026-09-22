@@ -23,9 +23,10 @@ import argparse
 import json
 import math
 import os
+import shutil
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -52,15 +53,39 @@ from literature_review.pdf_downloader import Fetcher, default_fetcher, download_
 from literature_review.planning import create_llm_plan, create_rule_based_plan
 from literature_review.screening import ScreeningResult, sample_candidates, screen_candidates
 from literature_review.synthesis import SynthesisError
-from literature_review.ranking import FilterPolicy, filter_and_rank
+from literature_review.ranking import (
+    FilterPolicy,
+    default_venues,
+    filter_and_rank,
+    normalize_venue,
+)
 
 LIMIT = 100
-MIN_YEAR = 2021
+YEAR_WINDOW = 3
 TOTAL_TARGET = 20
 TOP_K_CHUNKS = 32  # legacy: C2b per-paper sampling uses FunctionalScoringPolicy.top_chunks_per_paper
-DEST_DIR = Path("data/papers")
+DEST_DIR = Path("data/run")
 OPENALEX_DOI_LOOKUP_URL = "https://api.openalex.org/works/doi:"
 BACKFILL_PACE_SECONDS = 0.2
+
+
+def default_min_year(today: date | None = None) -> int:
+    """Inclusive lower bound of the last ``YEAR_WINDOW`` years (2026 → 2024)."""
+    return (today or date.today()).year - YEAR_WINDOW + 1
+
+
+def _resolve_venues(raw: str | None) -> tuple[str, ...]:
+    """Parse a ``--venues`` value into normalized whitelist tokens.
+
+    ``None`` selects the built-in top-venue default; an empty string disables
+    the venue restriction entirely; anything else is split on commas and
+    normalized like a provider venue string.
+    """
+    if raw is None:
+        return default_venues()
+    if raw == "":
+        return ()
+    return tuple(token for token in (normalize_venue(part) for part in raw.split(",")) if token)
 
 
 def _make_plan(
@@ -147,15 +172,20 @@ def _search_candidates(
     *,
     json_fetcher: search.JsonFetcher,
     ss_api_key: str | None,
+    year_from: int,
+    year_to: int | None = None,
 ) -> SearchResponse:
     """Search one query through Semantic Scholar, falling back to OpenAlex.
 
     With ``ss_api_key`` Semantic Scholar is primary; its placeholder abstracts are
     backfilled from OpenAlex and any paper still lacking an abstract is dropped.
     A missing key, an empty Semantic Scholar result, or a failed request (for
-    example repeated HTTP 429) falls back to OpenAlex unchanged.
+    example repeated HTTP 429) falls back to OpenAlex unchanged. ``year_from``
+    and ``year_to`` bound the search window on the provider request itself.
     """
-    request = SearchRequest(query=query_text, limit=LIMIT, year_from=MIN_YEAR)
+    request = SearchRequest(
+        query=query_text, limit=LIMIT, year_from=year_from, year_to=year_to
+    )
     if not ss_api_key:
         return search.search_papers(request, json_fetcher=json_fetcher)
     try:
@@ -189,18 +219,31 @@ def _search_and_rank(
     encoder: Encoder | None,
     paper_meta: dict[str, tuple[int | None, str | None]],
     ss_api_key: str | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    venues: tuple[str, ...] = (),
 ) -> list[RankedPaper]:
     """Search one query and rank its candidates, recording paper metadata.
 
     Returns the ranked paper list; shared by the legacy per-query download path,
     the M5e bucket-sampling path, and the gap follow-up round. With ``ss_api_key``
-    the search is served by Semantic Scholar, otherwise by OpenAlex.
+    the search is served by Semantic Scholar, otherwise by OpenAlex. ``year_from``
+    defaults to the current ``YEAR_WINDOW`` and is used both for the provider
+    request and as the min-year backstop, so the window stays consistent; a
+    non-empty ``venues`` whitelist hard-filters candidates after retrieval.
     """
+    effective_year_from = year_from if year_from is not None else default_min_year()
     response = _search_candidates(
-        query_text, json_fetcher=json_fetcher, ss_api_key=ss_api_key
+        query_text,
+        json_fetcher=json_fetcher,
+        ss_api_key=ss_api_key,
+        year_from=effective_year_from,
+        year_to=year_to,
     )
     ranked = filter_and_rank(
-        response, FilterPolicy(min_year=MIN_YEAR), encoder=encoder
+        response,
+        FilterPolicy(min_year=effective_year_from, venues=venues),
+        encoder=encoder,
     )
     paper_meta.update(
         {
@@ -226,6 +269,9 @@ def run_end_to_end(
     pdf_fetcher: Fetcher | None = None,
     encoder: Encoder | None = None,
     ss_api_key: str | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    venues: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Run one full literature-review cycle for a bare query.
 
@@ -289,6 +335,9 @@ def run_end_to_end(
                     encoder=effective_encoder,
                     paper_meta=paper_meta,
                     ss_api_key=ss_api_key,
+                    year_from=year_from,
+                    year_to=year_to,
+                    venues=venues,
                 )
             )
         screening_result = screen_candidates(query_candidates, client_screen)
@@ -312,6 +361,9 @@ def run_end_to_end(
                         json_fetcher=json_fetcher,
                         encoder=effective_encoder,
                         paper_meta=paper_meta,
+                        year_from=year_from,
+                        year_to=year_to,
+                        venues=venues,
                     )
                 )
             follow_up_screening = screen_candidates(follow_up_candidates, client_screen)
@@ -380,6 +432,9 @@ def run_end_to_end(
                 encoder=effective_encoder,
                 paper_meta=paper_meta,
                 ss_api_key=ss_api_key,
+                year_from=year_from,
+                year_to=year_to,
+                venues=venues,
             )
             result = download_and_backfill(
                 ranked_papers,
@@ -560,7 +615,36 @@ def main() -> None:
         action="store_true",
         help="Stop after downloads; no extraction, no embedding encoder, no LLM, no key",
     )
+    parser.add_argument(
+        "--dest-dir",
+        type=Path,
+        help="Download folder override; when set it is NOT cleared before the run",
+    )
+    parser.add_argument(
+        "--year-from",
+        type=int,
+        help="Escape hatch: override the lower bound of the year window",
+    )
+    parser.add_argument(
+        "--year-to",
+        type=int,
+        help="Escape hatch: override the upper bound of the year window",
+    )
+    parser.add_argument(
+        "--venues",
+        help="Comma-separated venue whitelist; default is the built-in top venues; empty string disables the filter",
+    )
     arguments = parser.parse_args()
+
+    env_dest_dir = os.getenv("DEST_DIR")
+    explicit_dest = arguments.dest_dir is not None or bool(env_dest_dir)
+    dest_dir = arguments.dest_dir or Path(env_dest_dir or DEST_DIR)
+    if not explicit_dest:
+        # The default download folder is rebuilt for every system run so the
+        # outputs reflect exactly one run; explicitly chosen folders belong to
+        # the caller and are left untouched.
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        dest_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         query = input("請輸入 research query：")
@@ -579,7 +663,7 @@ def main() -> None:
     try:
         result = run_end_to_end(
             query,
-            dest_dir=DEST_DIR,
+            dest_dir=dest_dir,
             client_plan=client_plan,
             client_synth=client_synth,
             client_rcs=client_rcs,
@@ -588,6 +672,9 @@ def main() -> None:
             use_llm_plan=not arguments.rule_based and not arguments.dry_run,
             dry_run=arguments.dry_run,
             ss_api_key=ss_api_key,
+            year_from=arguments.year_from,
+            year_to=arguments.year_to,
+            venues=_resolve_venues(arguments.venues),
         )
     except (LlmEvidenceError, SynthesisError, ValueError) as error:
         print(f"Pipeline failed: {error}", file=sys.stderr)

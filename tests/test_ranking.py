@@ -3,8 +3,11 @@ from collections.abc import Sequence
 
 from literature_review.models import FilterPolicy, Paper, SearchRequest, SearchResponse
 from literature_review.ranking import (
+    TOP_VENUE_ALIASES,
+    default_venues,
     filter_and_rank,
     filter_papers,
+    normalize_venue,
     rank_papers,
     rank_papers_embedding,
 )
@@ -163,3 +166,89 @@ class RankingTests(unittest.TestCase):
         result = filter_and_rank(response, FilterPolicy(min_year=2024))
         self.assertIn("Matched", result.ranked_papers[0].rationale)
         self.assertNotEqual(result.ranked_papers[0].matched_terms, [])
+
+
+def venue_paper(venue: str | None, title: str = "Venue Test") -> Paper:
+    item = paper(title, 2025, 10)
+    item.venue = venue
+    return item
+
+
+class VenueWhitelistTests(unittest.TestCase):
+    def test_normalize_venue_strips_case_and_punctuation(self) -> None:
+        self.assertEqual(
+            normalize_venue("Proceedings of the International Conference on Learning Representations (ICLR)"),
+            "proceedingsoftheinternationalconferenceonlearningrepresentationsiclr",
+        )
+        self.assertEqual(normalize_venue("NeurIPS"), "neurips")
+        self.assertEqual(normalize_venue("  "), "")
+
+    def test_default_venues_span_keys_and_aliases_without_empties(self) -> None:
+        tokens = default_venues()
+        self.assertIn("neurips", tokens)
+        self.assertIn("iclr", tokens)
+        self.assertIn("internationalconferenceonlearningrepresentations", tokens)
+        self.assertIn("aaai", tokens)
+        self.assertIn("ijcai", tokens)
+        for token in tokens:
+            self.assertTrue(token)
+        for key in TOP_VENUE_ALIASES:
+            self.assertIn(normalize_venue(key), tokens)
+
+    def test_whitelist_keeps_alias_and_full_name_variants(self) -> None:
+        whitelist = default_venues()
+        kept = filter_papers(
+            [
+                venue_paper("NeurIPS", title="One NIPS paper"),
+                venue_paper("International Conference on Learning Representations", title="Another ICLR paper"),
+                venue_paper("ACL", title="Third ACL paper"),
+            ],
+            FilterPolicy(venues=whitelist),
+        )
+        self.assertEqual(len(kept), 3)
+
+    def test_whitelist_keeps_long_proceedings_string_by_containment(self) -> None:
+        kept = filter_papers(
+            [
+                venue_paper("Proceedings of the International Conference on Learning Representations (ICLR)")
+            ],
+            FilterPolicy(venues=default_venues()),
+        )
+        self.assertEqual(len(kept), 1)
+
+    def test_whitelist_matches_mixed_case_and_punctuation(self) -> None:
+        kept = filter_papers(
+            [venue_paper("PROC. IEEE CONF. ON COMPUTER VISION AND PATTERN RECOGNITION (CVPR)")],
+            FilterPolicy(venues=default_venues()),
+        )
+        self.assertEqual(len(kept), 1)
+
+    def test_whitelist_drops_unlisted_and_missing_venues(self) -> None:
+        filtered = filter_papers(
+            [
+                venue_paper("Journal of Test Cases"),
+                venue_paper(None),
+            ],
+            FilterPolicy(venues=("icml",)),
+        )
+        self.assertEqual(filtered, [])
+
+    def test_empty_whitelist_is_a_noop(self) -> None:
+        kept = filter_papers(
+            [
+                venue_paper("Journal of Anything", title="Journal Paper"),
+                venue_paper(None, title="Missing Venue Paper"),
+            ],
+            FilterPolicy(),
+        )
+        self.assertEqual(len(kept), 2)
+
+    def test_custom_whitelist_tokens_match_exactly(self) -> None:
+        kept = filter_papers(
+            [
+                venue_paper("ICLR workshop on learning representations"),
+                venue_paper("Something else"),
+            ],
+            FilterPolicy(venues=("iclr",)),
+        )
+        self.assertEqual([item.venue for item in kept], ["ICLR workshop on learning representations"])

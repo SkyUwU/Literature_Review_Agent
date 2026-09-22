@@ -9,7 +9,7 @@ import os
 import re
 import sys
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -52,7 +52,7 @@ def record_for(paper_id: str, oa: bool = True) -> dict[str, object]:
         "abstract_inverted_index": _inverted(
             "This paper studies automated literature review generation with evidence selection."
         ),
-        "publication_year": 2023,
+        "publication_year": 2025,
         "authorships": [{"author": {"display_name": "A. Author"}}],
         "cited_by_count": 10,
         "primary_location": {"landing_page_url": f"https://example.org/landing/{paper_id}"},
@@ -942,7 +942,7 @@ def ss_paper(
         doi=doi,
         title=f"Towards {paper_id}: automated literature review agents",
         authors=["A. Author"],
-        year=2023,
+        year=2025,
         abstract=(
             abstract
             if abstract is not None
@@ -957,7 +957,11 @@ def ss_paper(
 def ss_response(*papers: Paper) -> SearchResponse:
     return SearchResponse(
         provider="semantic_scholar",
-        request=SearchRequest(query="literature review agent", limit=100, year_from=2021),
+        request=SearchRequest(
+            query="literature review agent",
+            limit=100,
+            year_from=main_module.default_min_year(),
+        ),
         total_candidates=len(papers),
         papers=list(papers),
         skipped_candidates=0,
@@ -1119,6 +1123,142 @@ class SemanticScholarSearchTests(unittest.TestCase):
         self.assertEqual(
             {entry["paper_id"] for entry in result["downloads"]}, {"S1", "S2"}
         )
+
+
+class RunFolderAndPolicyTests(unittest.TestCase):
+    """YEAR_WINDOW, top-venue whitelist, and download-folder policy plumbing."""
+
+    def test_default_min_year_tracks_three_year_window(self) -> None:
+        self.assertEqual(main_module.default_min_year(date(2026, 1, 1)), 2024)
+        self.assertEqual(main_module.default_min_year(date(2030, 6, 1)), 2028)
+
+    def test_resolve_venues_none_empty_and_tokens(self) -> None:
+        self.assertEqual(main_module._resolve_venues(None), main_module.default_venues())
+        self.assertEqual(main_module._resolve_venues(""), ())
+        self.assertEqual(
+            main_module._resolve_venues("NeurIPS, icml,  "), ("neurips", "icml")
+        )
+
+    def test_main_clears_default_dest_before_run(self) -> None:
+        plan = create_rule_based_plan("literature review agent")
+        fake_result = {"plan": plan, "downloads": [], "stats_per_query": [], "dry_run": True}
+        with TemporaryDirectory() as tmp:
+            previous = os.getcwd()
+            os.chdir(tmp)
+            try:
+                default_dir = Path(tmp) / "data" / "run"
+                default_dir.mkdir(parents=True)
+                stale = default_dir / "stale.pdf"
+                stale.write_bytes(b"stale")
+                with mock.patch.dict(
+                    os.environ,
+                    {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "", "OLLAMA_BASE_URL": ""},
+                    clear=False,
+                ):
+                    with mock.patch("builtins.input", return_value="literature review agent"):
+                        with mock.patch.object(
+                            sys, "argv", ["literature_review.main", "--dry-run"]
+                        ):
+                            with mock.patch(
+                                "literature_review.main.run_end_to_end", return_value=fake_result
+                            ) as m_run:
+                                main_module.main()
+                kwargs = m_run.call_args.kwargs
+                dest_in_cwd = Path.cwd() / kwargs["dest_dir"]
+                self.assertEqual(dest_in_cwd, default_dir)
+                self.assertIsNone(kwargs["year_from"])
+                self.assertEqual(kwargs["venues"], main_module.default_venues())
+                self.assertFalse((dest_in_cwd / "stale.pdf").exists())
+                self.assertTrue(dest_in_cwd.exists())
+            finally:
+                os.chdir(previous)
+
+    def test_main_does_not_clear_explicit_dest_dir(self) -> None:
+        plan = create_rule_based_plan("literature review agent")
+        fake_result = {"plan": plan, "downloads": [], "stats_per_query": [], "dry_run": True}
+        with TemporaryDirectory() as tmp:
+            explicit = Path(tmp) / "run-custom"
+            explicit.mkdir(parents=True)
+            stale = explicit / "stale.pdf"
+            stale.write_bytes(b"stale")
+            with mock.patch.dict(
+                os.environ,
+                {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "", "OLLAMA_BASE_URL": ""},
+                clear=False,
+            ):
+                with mock.patch("builtins.input", return_value="literature review agent"):
+                    with mock.patch.object(
+                        sys,
+                        "argv",
+                        ["literature_review.main", "--dry-run", "--dest-dir", str(explicit)],
+                    ):
+                        with mock.patch(
+                            "literature_review.main.run_end_to_end", return_value=fake_result
+                        ) as m_run:
+                            main_module.main()
+            self.assertTrue(stale.exists())
+            self.assertEqual(m_run.call_args.kwargs["dest_dir"], explicit)
+
+    def test_main_does_not_clear_env_dest_dir(self) -> None:
+        plan = create_rule_based_plan("literature review agent")
+        fake_result = {"plan": plan, "downloads": [], "stats_per_query": [], "dry_run": True}
+        with TemporaryDirectory() as tmp:
+            env_dir = Path(tmp) / "from-env"
+            env_dir.mkdir(parents=True)
+            stale = env_dir / "stale.pdf"
+            stale.write_bytes(b"stale")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GEMINI_API_KEY": "",
+                    "GEMINI_API_KEY_2": "",
+                    "OLLAMA_BASE_URL": "",
+                    "DEST_DIR": str(env_dir),
+                },
+                clear=False,
+            ):
+                with mock.patch("builtins.input", return_value="literature review agent"):
+                    with mock.patch.object(
+                        sys, "argv", ["literature_review.main", "--dry-run"]
+                    ):
+                        with mock.patch(
+                            "literature_review.main.run_end_to_end", return_value=fake_result
+                        ) as m_run:
+                            main_module.main()
+            self.assertTrue(stale.exists())
+            self.assertEqual(m_run.call_args.kwargs["dest_dir"], env_dir)
+
+    def test_main_threads_year_and_venues_flags(self) -> None:
+        plan = create_rule_based_plan("literature review agent")
+        fake_result = {"plan": plan, "downloads": [], "stats_per_query": [], "dry_run": True}
+        with mock.patch.dict(
+            os.environ,
+            {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "", "OLLAMA_BASE_URL": ""},
+            clear=False,
+        ):
+            with mock.patch("builtins.input", return_value="literature review agent"):
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "literature_review.main",
+                        "--dry-run",
+                        "--year-from",
+                        "2019",
+                        "--year-to",
+                        "2030",
+                        "--venues",
+                        "neurips,icml",
+                    ],
+                ):
+                    with mock.patch(
+                        "literature_review.main.run_end_to_end", return_value=fake_result
+                    ) as m_run:
+                        main_module.main()
+        kwargs = m_run.call_args.kwargs
+        self.assertEqual(kwargs["year_from"], 2019)
+        self.assertEqual(kwargs["year_to"], 2030)
+        self.assertEqual(kwargs["venues"], ("neurips", "icml"))
 
 
 if __name__ == "__main__":

@@ -86,6 +86,12 @@ class FilterPolicy(BaseModel):
     min_year: int | None = Field(default=None, ge=1900, le=2100)
     max_year: int | None = Field(default=None, ge=1900, le=2100)
     min_citation_count: int = Field(default=0, ge=0)
+    venues: tuple[str, ...] = ()
+    """Normalized venue alias tokens allowed by the top-venue whitelist.
+
+    Empty tuple means no venue restriction. A paper survives only when its
+    normalized venue contains one of these tokens (see ``ranking.filter_papers``).
+    """
 
 
 class RankedPaper(BaseModel):

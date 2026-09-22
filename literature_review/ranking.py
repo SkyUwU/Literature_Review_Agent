@@ -14,6 +14,65 @@ from literature_review.models import (
 
 STOP_WORDS = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "with"}
 
+TOP_VENUE_ALIASES: dict[str, tuple[str, ...]] = {
+    # Applied as a post-filter whitelist on the provider-recorded venue string.
+    # Keys are canonical short names; values are common written variants
+    # (official full names and frequent spellings) seen across providers.
+    "NeurIPS": (
+        "neurips",
+        "nips",
+        "annual conference on neural information processing systems",
+    ),
+    "ICML": ("icml", "international conference on machine learning"),
+    "ICLR": ("iclr", "international conference on learning representations"),
+    "ACL": (
+        "acl",
+        "association for computational linguistics",
+        "annual meeting of the association for computational linguistics",
+    ),
+    "EMNLP": ("emnlp", "conference on empirical methods in natural language processing"),
+    "NAACL": (
+        "naacl",
+        "north american chapter of the association for computational linguistics",
+    ),
+    "SIGIR": (
+        "sigir",
+        "international acm sigir conference on research and development in information retrieval",
+    ),
+    "CIKM": ("cikm", "acm international conference on information and knowledge management"),
+    "WSDM": ("wsdm", "acm international conference on web search and data mining"),
+    "WWW": ("www", "the web conference", "international world wide web conference"),
+    "KDD": (
+        "kdd",
+        "acm sigkdd conference on knowledge discovery and data mining",
+        "knowledge discovery and data mining",
+    ),
+    "RecSys": ("recsys", "acm conference on recommender systems", "acm recommender systems"),
+    "CVPR": (
+        "cvpr",
+        "ieee cvf conference on computer vision and pattern recognition",
+        "computer vision and pattern recognition",
+    ),
+    "ICCV": ("iccv", "ieee international conference on computer vision"),
+    "ECCV": ("eccv", "european conference on computer vision"),
+    "AAAI": ("aaai", "aaai conference on artificial intelligence"),
+    "IJCAI": ("ijcai", "international joint conference on artificial intelligence"),
+}
+
+
+def normalize_venue(text: str) -> str:
+    """Lowercase and strip punctuation/whitespace so aliases can be compared."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def default_venues() -> tuple[str, ...]:
+    """All normalized alias tokens (canonical keys + their variants) as a whitelist."""
+    names = list(TOP_VENUE_ALIASES) + [
+        alias for variants in TOP_VENUE_ALIASES.values() for alias in variants
+    ]
+    tokens = {normalize_venue(name) for name in names}
+    return tuple(sorted(token for token in tokens if token))
+
 
 def query_terms(query: str) -> set[str]:
     """Extract simple, explainable keywords from a natural-language query."""
@@ -36,10 +95,24 @@ def filter_papers(papers: list[Paper], policy: FilterPolicy) -> list[Paper]:
             continue
         if citation_count < policy.min_citation_count:
             continue
+        if policy.venues and not _matches_venues(paper.venue, policy.venues):
+            continue
         current = by_title.get(normalized_title)
         if current is None or duplicate_preference_key(paper) > duplicate_preference_key(current):
             by_title[normalized_title] = paper
     return list(by_title.values())
+
+
+def _matches_venues(venue: str | None, whitelist: tuple[str, ...]) -> bool:
+    """True when the normalized venue contains any whitelist token.
+
+    Containment (not equality) tolerates provider strings like
+    "Proceedings of the International Conference on Learning Representations (ICLR)".
+    """
+    if not venue:
+        return False
+    normalized = normalize_venue(venue)
+    return any(token and token in normalized for token in whitelist)
 
 
 def duplicate_preference_key(paper: Paper) -> tuple[int, bool, int, int]:

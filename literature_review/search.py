@@ -18,7 +18,7 @@ from literature_review.models import (
     SearchResponse,
     SelectionPolicy,
 )
-from literature_review.ranking import filter_and_rank
+from literature_review.ranking import default_venues, filter_and_rank, normalize_venue
 from literature_review.selection import select_papers
 from literature_review.assessment import assess_selected_papers
 
@@ -160,6 +160,10 @@ def main() -> None:
     parser.add_argument("--year-to", type=int)
     parser.add_argument("--rank", action="store_true", help="Filter and rank the retrieved papers")
     parser.add_argument("--min-citations", type=int, default=0)
+    parser.add_argument(
+        "--venues",
+        help="Comma-separated venue whitelist; default is the built-in top venues; empty string disables the filter",
+    )
     parser.add_argument("--top-k", type=int, help="Select the top K ranked papers for reading")
     parser.add_argument("--min-score", type=float, help="Minimum ranking score for selection")
     parser.add_argument("--assess", action="store_true", help="Create metadata-only assessments for selected papers")
@@ -182,6 +186,15 @@ def main() -> None:
         or arguments.min_score is not None
         or arguments.assess
     )
+    venues = (
+        tuple(
+            token
+            for token in (normalize_venue(part) for part in arguments.venues.split(","))
+            if token
+        )
+        if arguments.venues is not None
+        else default_venues()
+    )
     if should_rank:
         ranked_response = filter_and_rank(
             response,
@@ -189,6 +202,7 @@ def main() -> None:
                 min_year=arguments.year_from,
                 max_year=arguments.year_to,
                 min_citation_count=arguments.min_citations,
+                venues=venues,
             ),
         )
         if arguments.top_k is not None or arguments.min_score is not None or arguments.assess:

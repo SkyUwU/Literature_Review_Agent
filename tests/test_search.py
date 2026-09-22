@@ -1,7 +1,16 @@
+import sys
 import unittest
 from urllib.parse import parse_qs, urlparse
+from unittest import mock
 
-from literature_review.models import SearchRequest
+from literature_review import search as search_module
+from literature_review.models import (
+    FilterPolicy,
+    RankedSearchResponse,
+    SearchRequest,
+    SearchResponse,
+)
+from literature_review.ranking import default_venues
 from literature_review.search import build_search_url, norm_doi, search_papers
 
 
@@ -143,3 +152,79 @@ class SearchTests(unittest.TestCase):
 
         self.assertEqual(response.papers[0].doi, "10.1145/xyz.9")
         self.assertIsNone(response.papers[1].doi)
+
+    def test_search_main_cli_threads_venues_into_filter_policy(self) -> None:
+        response = SearchResponse(
+            provider="openalex",
+            request=SearchRequest(query="test", limit=1),
+            total_candidates=0,
+            papers=[],
+            skipped_candidates=0,
+        )
+        captured: list[FilterPolicy] = []
+
+        def capture_policy(search_response, policy, **_kwargs) -> RankedSearchResponse:
+            captured.append(policy)
+            return RankedSearchResponse(
+                search_response=search_response,
+                filter_policy=policy,
+                ranked_papers=[],
+            )
+
+        with (
+            mock.patch(
+                "literature_review.search.search_papers", return_value=response
+            ) as search_mock,
+            mock.patch(
+                "literature_review.search.filter_and_rank",
+                side_effect=capture_policy,
+            ) as rank_mock,
+        ):
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "literature_review.search",
+                    "test",
+                    "--rank",
+                    "--venues",
+                    "neurips, icml",
+                    "--year-from",
+                    "2019",
+                ],
+            ), mock.patch("sys.stdout"):
+                search_module.main()
+
+        search_mock.assert_called_once()
+        self.assertEqual(rank_mock.call_count, 1)
+        self.assertEqual(captured[0].min_year, 2019)
+        self.assertEqual(captured[0].venues, ("neurips", "icml"))
+
+    def test_search_main_cli_defaults_venues_to_top_list(self) -> None:
+        response = SearchResponse(
+            provider="openalex",
+            request=SearchRequest(query="test", limit=1),
+            total_candidates=0,
+            papers=[],
+            skipped_candidates=0,
+        )
+        captured: list[FilterPolicy] = []
+
+        def capture_policy(search_response, policy, **_kwargs) -> RankedSearchResponse:
+            captured.append(policy)
+            return RankedSearchResponse(
+                search_response=search_response,
+                filter_policy=policy,
+                ranked_papers=[],
+            )
+
+        with mock.patch("literature_review.search.search_papers", return_value=response):
+            with mock.patch(
+                "literature_review.search.filter_and_rank", side_effect=capture_policy
+            ):
+                with mock.patch.object(
+                    sys, "argv", ["literature_review.search", "test", "--rank"]
+                ), mock.patch("sys.stdout"):
+                    search_module.main()
+
+        self.assertEqual(captured[0].venues, default_venues())
