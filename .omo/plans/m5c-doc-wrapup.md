@@ -43,7 +43,7 @@ Todo 0（預檢）→ Todo 1（AGENTS）→ Todo 2（HANDOFF）→ Todo 3（STAT
 
 ## Todos（所有 log 存 `.omo/evidence/m5c-wrapup-*.log`，gitignored）
 
-- [ ] 0. **預檢** — 確立執行前底線
+- [x] 0. **預檢** — 確立執行前底線
 
   **References**
   - `uv run python -m unittest discover -s tests -v`（AGENTS.md:38）
@@ -57,7 +57,7 @@ Todo 0（預檢）→ Todo 1（AGENTS）→ Todo 2（HANDOFF）→ Todo 3（STAT
   - suite exit 0、output 有 "OK"、測試數紀錄於 log。
   - `git status` 無未預期變動。
 
-- [ ] 1. **AGENTS.md 更新** — 架構圖 + Commands/key + 現行 vs legacy 對照表
+- [x] 1. **AGENTS.md 更新** — 架構圖 + Commands/key + 現行 vs legacy 對照表
 
   **References**
   - `AGENTS.md:34-48` Commands + key wiring 描述
@@ -74,7 +74,7 @@ Todo 0（預檢）→ Todo 1（AGENTS）→ Todo 2（HANDOFF）→ Todo 3（STAT
   - `grep -n "Semantic Scholar\|SEMANTIC_SCHOLAR_API_KEY" AGENTS.md` 有結果。
   - 對照表每列有現行來源檔與 legacy 來源檔。
 
-- [ ] 2. **HANDOFF.md 更新**
+- [x] 2. **HANDOFF.md 更新**
 
   **References**
   - `HANDOFF.md:18-50` 里程碑表
@@ -93,7 +93,7 @@ Todo 0（預檢）→ Todo 1（AGENTS）→ Todo 2（HANDOFF）→ Todo 3（STAT
   - HANDOFF 有 M5c 節 + 里程碑表列 + 測試數 + 26 檔基準註記。
   - `grep -n "optional 未來來源\|optional later metadata" HANDOFF.md` 無結果。
 
-- [ ] 3. **`.omo/STATE.md` 更新**
+- [x] 3. **`.omo/STATE.md` 更新**
 
   **References**
   - `.omo/STATE.md:8-10` 現況快照（測試 376、「唯一待執行里程碑：M5c」）
@@ -110,7 +110,7 @@ Todo 0（預檢）→ Todo 1（AGENTS）→ Todo 2（HANDOFF）→ Todo 3（STAT
   **Acceptance**
   - STATE 不再含「M5c 待執行」；測試數＝實際值。
 
-- [ ] 4. **README.md + `.env.example`**
+- [x] 4. **README.md + `.env.example`**
 
   **References**
   - `README.md:54` full-run key 說明段
@@ -124,7 +124,7 @@ Todo 0（預檢）→ Todo 1（AGENTS）→ Todo 2（HANDOFF）→ Todo 3（STAT
   - `git grep -n -E "AIza|sk-[A-Za-z0-9]{8,}|SEMANTIC_SCHOLAR_API_KEY=[^$]"` 於追蹤檔無命中（欄位名以空值即可，不得帶實值）。
   - `.env.example` 每行 = 註解或 `NAME=` 空值。
 
-- [ ] 5. **勾計畫 + 最終驗收 + commit 指令**
+- [x] 5. **勾計畫 + 最終驗收 + commit 指令**
 
   **References**
   - `.omo/plans/m5c-semantic-scholar.md` Todo 0-5 checkboxes
