@@ -61,6 +61,23 @@ class Paper(BaseModel):
     )
 
 
+class DownloadedPaperEntry(BaseModel):
+    """One paper actually downloaded (a single file in the run folder)."""
+
+    paper: Paper
+    query: str = Field(min_length=1)
+    local_path: str
+    priority: Literal["keep", "maybe"] | None = None
+    """Screening decision that admitted the paper for download; None on the legacy path."""
+
+
+class PapersOutput(BaseModel):
+    """Persisted overview of a run's downloaded papers and their provenance."""
+
+    run: dict[str, object]
+    papers: list[DownloadedPaperEntry] = Field(default_factory=list)
+
+
 class SearchRequest(BaseModel):
     """Search constraints supplied to one scholarly-paper provider."""
 

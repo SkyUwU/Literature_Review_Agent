@@ -42,9 +42,12 @@ from literature_review.llm_evidence import (
 )
 from literature_review.ollama_client import OllamaJsonClient
 from literature_review.models import (
+    DownloadedPaperEntry,
     FullTextDocument,
     Paper,
+    PapersOutput,
     RankedPaper,
+    SearchPlan,
     SearchRequest,
     SearchResponse,
     SynthesisResponse,
@@ -320,6 +323,8 @@ def run_end_to_end(
     paper_queries: dict[str, str] = {}
     paper_titles: dict[str, str] = {}
     follow_up_queries: set[str] = set()
+    downloaded_papers: dict[str, Paper] = {}
+    paper_priority: dict[str, str] = {}
 
     if use_screening:
         query_candidates: dict[str, list[RankedPaper]] = {}
@@ -397,6 +402,9 @@ def run_end_to_end(
                     keep_ranked.append(item)
                 elif decision.priority == "maybe":
                     maybe_ranked.append(item)
+        paper_priority = {
+            item.paper.paper_id: "keep" for item in keep_ranked
+        } | {item.paper.paper_id: "maybe" for item in maybe_ranked}
 
         result = download_and_backfill(
             [],
@@ -419,6 +427,10 @@ def run_end_to_end(
                 result.downloaded_paper_ids, result.downloaded_paths, strict=False
             )
         )
+        for paper_id in result.downloaded_paper_ids:
+            item = ranked_by_id.get(paper_id)
+            if item is not None:
+                downloaded_papers[paper_id] = item.paper
     else:
         target_n = math.ceil(TOTAL_TARGET / len(plan.queries))
         for planned in plan.queries:
@@ -450,12 +462,31 @@ def run_end_to_end(
                     result.downloaded_paper_ids, result.downloaded_paths, strict=False
                 )
             )
+            papers_by_id = {
+                item.paper.paper_id: item.paper for item in ranked_papers
+            }
+            for paper_id in result.downloaded_paper_ids:
+                paper = papers_by_id.get(paper_id)
+                if paper is not None:
+                    downloaded_papers.setdefault(paper_id, paper)
 
     if dry_run:
+        papers_output = _make_papers_output(
+            query,
+            plan,
+            follow_ups,
+            stats_per_query,
+            [],
+            downloads,
+            downloaded_papers,
+            paper_queries,
+            paper_priority,
+        )
         output: dict[str, object] = {
             "plan": plan,
             "downloads": downloads,
             "stats_per_query": stats_per_query,
+            "papers": papers_output,
             "dry_run": True,
         }
         if screening_result is not None:
@@ -491,12 +522,24 @@ def run_end_to_end(
         paper_queries=paper_queries,
         follow_up_queries=follow_up_queries,
     )
+    papers_output = _make_papers_output(
+        query,
+        plan,
+        follow_ups,
+        stats_per_query,
+        failed_extractions,
+        downloads,
+        downloaded_papers,
+        paper_queries,
+        paper_priority,
+    )
     return {
         "plan": plan,
         "downloads": downloads,
         "stats_per_query": stats_per_query,
         "failed_extractions": failed_extractions,
         "report": report,
+        "papers": papers_output,
         "screening": (
             screening_result.model_dump(mode="json")
             if screening_result is not None
@@ -505,6 +548,50 @@ def run_end_to_end(
         "follow_ups": follow_ups,
         "dry_run": False,
     }
+
+
+def _make_papers_output(
+    query: str,
+    plan: SearchPlan,
+    follow_ups: list[dict[str, str]],
+    stats_per_query: list[dict[str, object]],
+    failed_extractions: list[str],
+    downloads: list[dict[str, str]],
+    downloaded_papers: dict[str, Paper],
+    paper_queries: dict[str, str],
+    paper_priority: dict[str, str],
+) -> PapersOutput:
+    """Assemble the recorded papers for one run.
+
+    One entry per actually-written download, in download order, carrying the full
+    ``Paper`` metadata, the query that pulled it in, the on-disk path, and (for the
+    screening path) the keep/maybe decision. Entries whose paper or query is
+    missing are defensively skipped; they never occur in the normal flow.
+    """
+    entries: list[DownloadedPaperEntry] = []
+    for entry in downloads:
+        paper = downloaded_papers.get(entry["paper_id"])
+        query_text = paper_queries.get(entry["paper_id"])
+        if paper is None or query_text is None:
+            continue
+        entries.append(
+            DownloadedPaperEntry(
+                paper=paper,
+                query=query_text,
+                local_path=entry["path"],
+                priority=paper_priority.get(entry["paper_id"]),
+            )
+        )
+    return PapersOutput(
+        run={
+            "query": query,
+            "planned_queries": [planned.query for planned in plan.queries],
+            "follow_ups": follow_ups,
+            "stats_per_query": stats_per_query,
+            "failed_extractions": failed_extractions,
+        },
+        papers=entries,
+    )
 
 
 def _build_clients(
@@ -594,6 +681,32 @@ def save_report_output(
         return str(path)
     except OSError as error:
         print(f"Failed to save report JSON: {error}", file=sys.stderr)
+        return None
+
+
+def save_papers_output(
+    output: PapersOutput,
+    *,
+    output_dir: str | Path = "data/outputs",
+    timestamp: datetime | None = None,
+) -> str | None:
+    """Serialize *output* (downloaded papers + run overview) to a timestamped JSON file.
+
+    Shares the folder and timestamp convention of ``save_report_output`` so a
+    single run's report and papers files line up. Returns the written file path
+    on success, or ``None`` when the write fails (warning to stderr, no crash).
+    """
+    try:
+        payload = output.model_dump(mode="json")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        ts = timestamp if timestamp is not None else datetime.now()
+        filename = f"papers_{ts.strftime('%Y%m%d_%H%M%S_%f')}.json"
+        path = Path(output_dir) / filename
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return str(path)
+    except OSError as error:
+        print(f"Failed to save papers JSON: {error}", file=sys.stderr)
         return None
 
 
@@ -708,9 +821,13 @@ def main() -> None:
                 indent=2,
             )
         )
-        saved_path = save_report_output(result["report"])
+        ts = datetime.now()
+        saved_path = save_report_output(result["report"], timestamp=ts)
         if saved_path:
             print(f"Report saved to: {saved_path}")
+        papers_path = save_papers_output(result["papers"], timestamp=ts)
+        if papers_path:
+            print(f"Papers saved to: {papers_path}")
         pipeline._flush_langfuse()
 
 

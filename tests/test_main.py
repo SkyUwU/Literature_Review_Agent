@@ -19,11 +19,13 @@ from literature_review.embedding_retriever import QUERY_PREFIX
 from literature_review.main import TOTAL_TARGET, run_end_to_end
 from literature_review.models import (
     ChunkReference,
+    DownloadedPaperEntry,
     FutureDirection,
     Paper,
     PaperSource,
     PaperSummary,
     PaperSummaryClaim,
+    PapersOutput,
     SearchRequest,
     SearchResponse,
     SynthesisResponse,
@@ -139,6 +141,18 @@ class FakeScreenClient:
                 "follow_up_queries": follow_ups,
             }
         )
+
+
+class MaybeFirstScreenClient(FakeScreenClient):
+    """Screening client assigning keep to some candidates and maybe to the rest."""
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        text = super().generate_json(prompt, schema)
+        payload = json.loads(text)
+        for index, decision in enumerate(payload["decisions"]):
+            if index % 2 == 1:
+                decision["priority"] = "maybe"
+        return json.dumps(payload)
 
 
 class SpecialAlignedEncoder:
@@ -284,6 +298,15 @@ class MainEntryTests(unittest.TestCase):
         self.assertEqual(result["stats_per_query"][1]["duplicate_reused"], 2)
         pdf_files = sorted(self.dest.glob("*.pdf"))
         self.assertEqual(len(pdf_files), 2)
+
+        papers = result["papers"]
+        self.assertIsInstance(papers, PapersOutput)
+        self.assertEqual(len(papers.papers), 2)  # reused papers are counted, not re-listed
+        self.assertEqual(
+            {entry.paper.paper_id for entry in papers.papers},
+            {"W1", "W2"},
+        )
+        self.assertEqual(papers.run["failed_extractions"], [])
 
     # -- scenario 2: a failed download backfills the next candidate ----------
 
@@ -561,6 +584,84 @@ class MainEntryTests(unittest.TestCase):
         self.assertNotIn("screening", result)
         self.assertEqual(len(result["stats_per_query"]), 2)
 
+    def test_run_end_to_end_papers_collect_full_metadata(self) -> None:
+        payloads = [
+            results_payload(record_for("W1")),
+            results_payload(record_for("W2")),
+        ]
+        result = run_end_to_end(
+            "literature review agent",
+            dest_dir=self.dest,
+            client_plan=FakePlanClient(2),
+            use_llm_plan=True,
+            dry_run=True,
+            json_fetcher=FakeJsonFetcher(payloads),
+            pdf_fetcher=pdf_bytes,
+        )
+
+        papers = result["papers"]
+        self.assertIsInstance(papers, PapersOutput)
+        self.assertEqual(len(papers.papers), 2)
+        self.assertEqual(
+            [entry.paper.paper_id for entry in papers.papers],
+            ["W1", "W2"],
+        )
+        self.assertEqual(
+            [entry.query for entry in papers.papers],
+            ["literature review agent angle 0", "literature review agent angle 1"],
+        )
+        for entry, paper_id in zip(papers.papers, ["W1", "W2"]):
+            self.assertIsNone(entry.priority)  # legacy path has no keep/maybe decision
+            self.assertEqual(entry.local_path, str(self.dest / f"{paper_id}.pdf"))
+            self.assertEqual(
+                entry.paper.title, f"Towards {paper_id}: automated literature review agents"
+            )
+            self.assertEqual(entry.paper.year, 2025)
+            self.assertEqual(entry.paper.citation_count, 10)
+            self.assertEqual(entry.paper.authors, ["A. Author"])
+            self.assertIsNone(entry.paper.venue)
+            self.assertGreater(len(entry.paper.abstract), 20)
+        self.assertEqual(papers.run["query"], "literature review agent")
+        self.assertEqual(
+            papers.run["planned_queries"],
+            ["literature review agent angle 0", "literature review agent angle 1"],
+        )
+        self.assertEqual(papers.run["follow_ups"], [])
+        self.assertEqual(papers.run["failed_extractions"], [])
+
+    def test_run_end_to_end_papers_records_screening_priority(self) -> None:
+        screen_client = MaybeFirstScreenClient()
+        payloads = [
+            results_payload(record_for("W1"), record_for("W2")),
+            results_payload(record_for("W3"), record_for("W4")),
+        ]
+        synth_client = SynthesisFakeClient(("W1", "W2", "W3", "W4"))
+        with mock.patch("literature_review.extraction.PdfReader", FakePdfReader):
+            with mock.patch(
+                "literature_review.embedding_retriever.default_encoder",
+                return_value=FakeEncoder(),
+            ):
+                result = run_end_to_end(
+                    "literature review agent",
+                    dest_dir=self.dest,
+                    client_plan=FakePlanClient(2),
+                    client_synth=synth_client,
+                    client_screen=screen_client,
+                    use_llm_plan=True,
+                    dry_run=False,
+                    json_fetcher=FakeJsonFetcher(payloads),
+                    pdf_fetcher=pdf_bytes,
+                )
+
+        papers = result["papers"]
+        self.assertEqual(len(papers.papers), 4)
+        priorities = {entry.paper.paper_id: entry.priority for entry in papers.papers}
+        self.assertEqual(priorities["W1"], "keep")
+        self.assertEqual(priorities["W2"], "maybe")
+        self.assertEqual(priorities["W3"], "keep")
+        self.assertEqual(priorities["W4"], "maybe")
+        self.assertEqual(papers.run["failed_extractions"], [])
+
     def test_screen_client_full_run_with_follow_up(self) -> None:
         screen_client = FakeScreenClient(follow_up_query="literature review agent benchmark")
         payloads = [
@@ -810,23 +911,51 @@ class MainEntryTests(unittest.TestCase):
     def test_main_full_run_saves_report_json(self) -> None:
         plan = create_rule_based_plan("literature review agent")
         report = fake_report()
+        papers_output = PapersOutput(
+            run={
+                "query": "literature review agent",
+                "planned_queries": [planned.query for planned in plan.queries],
+                "follow_ups": [],
+                "stats_per_query": [],
+                "failed_extractions": [],
+            },
+            papers=[
+                DownloadedPaperEntry(
+                    paper=ss_paper("W1"),
+                    query=plan.queries[0].query,
+                    local_path=str(self.dest / "W1.pdf"),
+                    priority="keep",
+                )
+            ],
+        )
         fake_result = {
             "plan": plan,
             "downloads": [{"paper_id": "W1", "path": str(self.dest / "W1.pdf")}],
             "stats_per_query": [],
             "failed_extractions": [],
             "report": report,
+            "papers": papers_output,
             "screening": None,
             "follow_ups": [],
             "dry_run": False,
         }
-        real_save = main_module.save_report_output
         saved_path: str | None = None
+        papers_saved_path: str | None = None
+        timestamps: list[datetime] = []
+        real_save_report = main_module.save_report_output
+        real_save_papers = main_module.save_papers_output
 
-        def save_to_tmp(rpt: object) -> str | None:
+        def save_report_to_tmp(rpt: object, *, timestamp: datetime | None = None) -> str | None:
             nonlocal saved_path
-            saved_path = real_save(rpt, output_dir=self.dest)
+            timestamps.append(timestamp)
+            saved_path = real_save_report(rpt, output_dir=self.dest, timestamp=timestamp)
             return saved_path
+
+        def save_papers_to_tmp(rpt: object, *, timestamp: datetime | None = None) -> str | None:
+            nonlocal papers_saved_path
+            timestamps.append(timestamp)
+            papers_saved_path = real_save_papers(rpt, output_dir=self.dest, timestamp=timestamp)
+            return papers_saved_path
 
         with mock.patch.dict(
             os.environ,
@@ -836,18 +965,33 @@ class MainEntryTests(unittest.TestCase):
             with mock.patch("builtins.input", return_value="literature review agent"):
                 with mock.patch.object(sys, "argv", ["literature_review.main"]):
                     with mock.patch("literature_review.main.run_end_to_end", return_value=fake_result) as m_run:
-                        with mock.patch("literature_review.main.save_report_output", side_effect=save_to_tmp):
-                            with contextlib.redirect_stdout(io.StringIO()) as captured:
-                                main_module.main()
+                        with mock.patch("literature_review.main.save_report_output", side_effect=save_report_to_tmp):
+                            with mock.patch("literature_review.main.save_papers_output", side_effect=save_papers_to_tmp):
+                                with contextlib.redirect_stdout(io.StringIO()) as captured:
+                                    main_module.main()
 
         self.assertIsNotNone(saved_path)
-        path = Path(saved_path)
-        self.assertTrue(path.exists())
-        with open(path, encoding="utf-8") as f:
+        report_path = Path(saved_path)
+        self.assertTrue(report_path.exists())
+        with open(report_path, encoding="utf-8") as f:
             payload = json.load(f)
         self.assertEqual(payload["generated_by"], "llm")
         self.assertEqual(len(payload["paper_sources"]), 1)
         self.assertIn(f"Report saved to: {saved_path}", captured.getvalue())
+
+        self.assertIsNotNone(papers_saved_path)
+        papers_path = Path(papers_saved_path)
+        self.assertTrue(papers_path.exists())
+        self.assertEqual(papers_path.name, f"papers_{report_path.name[len('report_'):]}")
+        with open(papers_path, encoding="utf-8") as f:
+            papers_payload = json.load(f)
+        self.assertEqual(papers_payload["papers"][0]["paper"]["paper_id"], "W1")
+        self.assertEqual(papers_payload["papers"][0]["priority"], "keep")
+        self.assertEqual(papers_payload["run"]["query"], "literature review agent")
+        self.assertIn(f"Papers saved to: {papers_saved_path}", captured.getvalue())
+
+        self.assertEqual(len(timestamps), 2)
+        self.assertEqual(timestamps[0], timestamps[1])
 
 
 def fake_report() -> SynthesisResponse:
@@ -926,6 +1070,77 @@ class SaveReportOutputTests(unittest.TestCase):
                 )
             written = "".join(call.args[0] for call in stderr.write.call_args_list)
             self.assertIn("Failed to save report JSON", written)
+
+        self.assertIsNone(saved)
+
+
+class SavePapersOutputTests(unittest.TestCase):
+    """Unit tests for main.save_papers_output: file creation, empty list, failure fallback."""
+
+    def _output(self) -> PapersOutput:
+        return PapersOutput(
+            run={
+                "query": "queries",
+                "planned_queries": ["queries"],
+                "follow_ups": [],
+                "stats_per_query": [],
+                "failed_extractions": [],
+            },
+            papers=[
+                DownloadedPaperEntry(
+                    paper=ss_paper("P1"),
+                    query="queries",
+                    local_path="/tmp/P1.pdf",
+                    priority="keep",
+                )
+            ],
+        )
+
+    def test_save_papers_output_creates_file(self) -> None:
+        output = self._output()
+        ts = datetime(2026, 9, 22, 9, 0, 0, 654321)
+        with TemporaryDirectory() as tmp:
+            saved = main_module.save_papers_output(output, output_dir=Path(tmp), timestamp=ts)
+
+            self.assertIsNotNone(saved)
+            path = Path(saved)
+            self.assertTrue(path.exists())
+            with open(path, encoding="utf-8") as f:
+                payload = json.load(f)
+            self.assertEqual(payload, output.model_dump(mode="json"))
+            self.assertEqual(path.name, "papers_20260922_090000_654321.json")
+
+    def test_save_papers_output_allows_empty_list(self) -> None:
+        output = PapersOutput(
+            run={
+                "query": "queries",
+                "planned_queries": ["queries"],
+                "follow_ups": [],
+                "stats_per_query": [],
+                "failed_extractions": [],
+            }
+        )
+        with TemporaryDirectory() as tmp:
+            saved = main_module.save_papers_output(
+                output, output_dir=Path(tmp), timestamp=datetime(2026, 9, 22, 9, 0)
+            )
+            self.assertIsNotNone(saved)
+            with open(Path(saved), encoding="utf-8") as f:
+                payload = json.load(f)
+        self.assertEqual(payload["papers"], [])
+
+    def test_save_papers_output_returns_none_on_error(self) -> None:
+        with TemporaryDirectory() as tmp:
+            blocker = Path(tmp) / "not-a-directory"
+            blocker.write_text("", encoding="utf-8")
+            with mock.patch("sys.stderr") as stderr:
+                saved = main_module.save_papers_output(
+                    self._output(),
+                    output_dir=blocker,
+                    timestamp=datetime(2026, 9, 22, 9, 0, 0, 654321),
+                )
+            written = "".join(call.args[0] for call in stderr.write.call_args_list)
+            self.assertIn("Failed to save papers JSON", written)
 
         self.assertIsNone(saved)
 
