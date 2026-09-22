@@ -343,6 +343,15 @@ Implements the professor's "last three years, top venues only" rule and the down
 - `.gitignore`: `data/run/` added (alongside `data/papers/`, which stays ignored for manual use).
 - Verification: suite grew 414 → **430 tests** (venue-whitelist, year-window, `_resolve_venues`, download-folder clear/keep behavior, and CLI threading tests); full suite PASS (`run-policy-todo4.log`). F4 real run remains deferred (Gemini quota). Unpaywall no-OA backfill stays a later candidate (not started).
 
+## Follow-up milestone: --venues by name (venues-by-name, 2026-09-22)
+
+Refines `--venues` so users select conferences by name instead of typing raw substring tokens (which were brittle against the alias table):
+
+- `literature_review/ranking.py`: `_VENUE_BY_ALIAS` index (normalized key/alias → canonical, collision-checked at build, 40 tokens, zero collisions) and `resolve_venues(raw)` — `None` → `default_venues()` (all 17); `""`/`"none"` (whole input) → `()`; each recognized name (key or alias, case/punctuation-insensitive) expands to that conference's full alias set; unrecognized names are warned on `stderr` and used as raw substring tokens; if every name is unrecognized the restriction is disabled with a warning; result preserves first-appearance order with dedup. `resolve_venues(None)` also means `--venues "nips"` and `--venues "NeurIPS"` now behave identically (both expand to the NeurIPS alias family).
+- `literature_review/main.py`: `_resolve_venues` now delegates to `ranking.resolve_venues`; `--venues` help updated (`none` documented; defaults to all built-in top venues).
+- `literature_review/search.py`: adopted `resolve_venues`, dropped the inline duplicate and the now-unused `default_venues`/`normalize_venue` imports.
+- Verification: suite grew 430 → **442 tests** (`ResolveVenuesTests` in `test_ranking.py`; updated expectations in `test_main.py` and `test_search.py` where raw tokens became full alias expansions); full suite PASS (`venues-by-name-todo4.log`).
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.
