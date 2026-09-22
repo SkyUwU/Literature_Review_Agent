@@ -30,6 +30,7 @@ from literature_review.models import (
 )
 from literature_review.pdf_downloader import PdfDownloadError
 from literature_review.planning import create_rule_based_plan
+from literature_review.ranking import default_venues
 from literature_review.ss_search import ABSTRACT_PLACEHOLDER, SsSearchError
 
 # ---------------------------------------------------------------------------
@@ -1133,10 +1134,21 @@ class RunFolderAndPolicyTests(unittest.TestCase):
         self.assertEqual(main_module.default_min_year(date(2030, 6, 1)), 2028)
 
     def test_resolve_venues_none_empty_and_tokens(self) -> None:
-        self.assertEqual(main_module._resolve_venues(None), main_module.default_venues())
+        self.assertEqual(main_module._resolve_venues(None), default_venues())
         self.assertEqual(main_module._resolve_venues(""), ())
+        self.assertEqual(main_module._resolve_venues("none"), ())
         self.assertEqual(
-            main_module._resolve_venues("NeurIPS, icml,  "), ("neurips", "icml")
+            main_module._resolve_venues("NeurIPS, icml,  "),
+            (
+                "neurips",
+                "nips",
+                "annualconferenceonneuralinformationprocessingsystems",
+                "icml",
+                "internationalconferenceonmachinelearning",
+            ),
+        )
+        self.assertEqual(
+            main_module._resolve_venues("nips"), main_module._resolve_venues("NeurIPS")
         )
 
     def test_main_clears_default_dest_before_run(self) -> None:
@@ -1167,7 +1179,7 @@ class RunFolderAndPolicyTests(unittest.TestCase):
                 dest_in_cwd = Path.cwd() / kwargs["dest_dir"]
                 self.assertEqual(dest_in_cwd, default_dir)
                 self.assertIsNone(kwargs["year_from"])
-                self.assertEqual(kwargs["venues"], main_module.default_venues())
+                self.assertEqual(kwargs["venues"], default_venues())
                 self.assertFalse((dest_in_cwd / "stale.pdf").exists())
                 self.assertTrue(dest_in_cwd.exists())
             finally:
@@ -1258,7 +1270,16 @@ class RunFolderAndPolicyTests(unittest.TestCase):
         kwargs = m_run.call_args.kwargs
         self.assertEqual(kwargs["year_from"], 2019)
         self.assertEqual(kwargs["year_to"], 2030)
-        self.assertEqual(kwargs["venues"], ("neurips", "icml"))
+        self.assertEqual(
+            kwargs["venues"],
+            (
+                "neurips",
+                "nips",
+                "annualconferenceonneuralinformationprocessingsystems",
+                "icml",
+                "internationalconferenceonmachinelearning",
+            ),
+        )
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 import math
 import re
+import sys
 
 from literature_review.embedding_retriever import Encoder, encode_query
 from literature_review.models import (
@@ -72,6 +73,72 @@ def default_venues() -> tuple[str, ...]:
     ]
     tokens = {normalize_venue(name) for name in names}
     return tuple(sorted(token for token in tokens if token))
+
+
+def _build_venue_index() -> dict[str, str]:
+    """Map every normalized conference key/alias to its canonical name."""
+    index: dict[str, str] = {}
+    for canonical, aliases in TOP_VENUE_ALIASES.items():
+        for name in (canonical, *aliases):
+            token = normalize_venue(name)
+            if not token:
+                continue
+            prior = index.get(token)
+            if prior is not None and prior != canonical:
+                raise ValueError(
+                    f"venue alias collision: {token!r} maps to both {prior!r} and {canonical!r}"
+                )
+            index[token] = canonical
+    return index
+
+
+_VENUE_BY_ALIAS = _build_venue_index()
+
+
+def resolve_venues(raw: str | None) -> tuple[str, ...]:
+    """Resolve a ``--venues`` value into normalized whitelist tokens.
+
+    ``None`` returns the built-in top-venue default; ``""`` / ``"none"``
+    disable the restriction; each recognized conference name (canonical key
+    or alias, case/punctuation-insensitive) expands to that conference's full
+    alias set; unrecognized names are warned on stderr and used as raw
+    substring tokens; if every name is unrecognized the restriction is
+    disabled with a warning.
+    """
+    if raw is None:
+        return default_venues()
+    if raw == "" or raw.strip().lower() == "none":
+        return ()
+    matched: list[str] = []
+    unknown: list[tuple[str, str]] = []
+    for part in raw.split(","):
+        token = normalize_venue(part)
+        if not token:
+            continue
+        canonical = _VENUE_BY_ALIAS.get(token)
+        if canonical is None:
+            unknown.append((part, token))
+            continue
+        for name in (canonical, *TOP_VENUE_ALIASES[canonical]):
+            expanded = normalize_venue(name)
+            if expanded and expanded not in matched:
+                matched.append(expanded)
+    if not matched:
+        if unknown:
+            print(
+                f"[venues] 所有輸入均未識別頂會，停用頂會過濾（輸入：{raw!r}）",
+                file=sys.stderr,
+            )
+        return ()
+    tokens = list(matched)
+    for part, token in unknown:
+        print(
+            f"[venues] 未識別頂會 {part!r}（→{token!r}），以 raw 子字串過濾",
+            file=sys.stderr,
+        )
+        if token not in tokens:
+            tokens.append(token)
+    return tuple(tokens)
 
 
 def query_terms(query: str) -> set[str]:

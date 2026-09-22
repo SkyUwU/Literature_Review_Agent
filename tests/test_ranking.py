@@ -1,15 +1,19 @@
+import contextlib
+import io
 import unittest
 from collections.abc import Sequence
 
 from literature_review.models import FilterPolicy, Paper, SearchRequest, SearchResponse
 from literature_review.ranking import (
     TOP_VENUE_ALIASES,
+    _VENUE_BY_ALIAS,
     default_venues,
     filter_and_rank,
     filter_papers,
     normalize_venue,
     rank_papers,
     rank_papers_embedding,
+    resolve_venues,
 )
 
 
@@ -252,3 +256,64 @@ class VenueWhitelistTests(unittest.TestCase):
             FilterPolicy(venues=("iclr",)),
         )
         self.assertEqual([item.venue for item in kept], ["ICLR workshop on learning representations"])
+
+
+NEURIPS_EXPANDED = (
+    "neurips",
+    "nips",
+    "annualconferenceonneuralinformationprocessingsystems",
+)
+ICML_EXPANDED = ("icml", "internationalconferenceonmachinelearning")
+
+
+class ResolveVenuesTests(unittest.TestCase):
+    def test_none_selects_the_default_whitelist(self) -> None:
+        self.assertEqual(resolve_venues(None), default_venues())
+
+    def test_empty_and_whitespace_disable_the_filter(self) -> None:
+        self.assertEqual(resolve_venues(""), ())
+        self.assertEqual(resolve_venues("   "), ())
+
+    def test_none_token_disables_the_filter(self) -> None:
+        self.assertEqual(resolve_venues("none"), ())
+        self.assertEqual(resolve_venues("  NONE  "), ())
+
+    def test_all_blank_segments_disable_without_warning(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(resolve_venues(", ,"), ())
+        self.assertEqual(err.getvalue(), "")
+
+    def test_canonical_key_and_alias_expand_identically(self) -> None:
+        self.assertEqual(resolve_venues("NeurIPS"), resolve_venues("nips"))
+
+    def test_alias_expands_to_full_venue_alias_set(self) -> None:
+        self.assertEqual(resolve_venues("nips"), NEURIPS_EXPANDED)
+
+    def test_multi_venue_union_preserves_input_order(self) -> None:
+        self.assertEqual(resolve_venues("neurips, icml"), NEURIPS_EXPANDED + ICML_EXPANDED)
+
+    def test_deduplicates_repeated_names(self) -> None:
+        self.assertEqual(resolve_venues("neurips,nips"), NEURIPS_EXPANDED)
+
+    def test_all_unknown_names_disable_the_filter_with_warning(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(resolve_venues("tyop"), ())
+        self.assertIn("所有輸入均未識別頂會", err.getvalue())
+
+    def test_unknown_name_used_as_raw_token_with_warning(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(resolve_venues("nips,cvprw"), NEURIPS_EXPANDED + ("cvprw",))
+        self.assertIn("未識別頂會", err.getvalue())
+
+    def test_venue_index_maps_every_alias_to_its_canonical(self) -> None:
+        for canonical, aliases in TOP_VENUE_ALIASES.items():
+            for name in (*aliases, canonical):
+                token = normalize_venue(name)
+                if token:
+                    self.assertEqual(_VENUE_BY_ALIAS[token], canonical)
+
+    def test_unknown_case_mixing_and_full_names_are_still_matched_by_aliases(self) -> None:
+        self.assertEqual(
+            resolve_venues("international conference on machine learning"),
+            ICML_EXPANDED,
+        )

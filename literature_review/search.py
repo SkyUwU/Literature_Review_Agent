@@ -18,7 +18,7 @@ from literature_review.models import (
     SearchResponse,
     SelectionPolicy,
 )
-from literature_review.ranking import default_venues, filter_and_rank, normalize_venue
+from literature_review.ranking import filter_and_rank, resolve_venues
 from literature_review.selection import select_papers
 from literature_review.assessment import assess_selected_papers
 
@@ -162,7 +162,7 @@ def main() -> None:
     parser.add_argument("--min-citations", type=int, default=0)
     parser.add_argument(
         "--venues",
-        help="Comma-separated venue whitelist; default is the built-in top venues; empty string disables the filter",
+        help="Comma-separated top venues by name (matches the built-in 17-conference list by key or alias and expands its aliases; unrecognized names filter as raw substrings with a warning); 'none' or an empty string disables the filter; default is all built-in top venues",
     )
     parser.add_argument("--top-k", type=int, help="Select the top K ranked papers for reading")
     parser.add_argument("--min-score", type=float, help="Minimum ranking score for selection")
@@ -186,15 +186,7 @@ def main() -> None:
         or arguments.min_score is not None
         or arguments.assess
     )
-    venues = (
-        tuple(
-            token
-            for token in (normalize_venue(part) for part in arguments.venues.split(","))
-            if token
-        )
-        if arguments.venues is not None
-        else default_venues()
-    )
+    venues = resolve_venues(arguments.venues)
     if should_rank:
         ranked_response = filter_and_rank(
             response,

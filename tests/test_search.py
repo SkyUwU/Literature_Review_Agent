@@ -198,7 +198,16 @@ class SearchTests(unittest.TestCase):
         search_mock.assert_called_once()
         self.assertEqual(rank_mock.call_count, 1)
         self.assertEqual(captured[0].min_year, 2019)
-        self.assertEqual(captured[0].venues, ("neurips", "icml"))
+        self.assertEqual(
+            captured[0].venues,
+            (
+                "neurips",
+                "nips",
+                "annualconferenceonneuralinformationprocessingsystems",
+                "icml",
+                "internationalconferenceonmachinelearning",
+            ),
+        )
 
     def test_search_main_cli_defaults_venues_to_top_list(self) -> None:
         response = SearchResponse(

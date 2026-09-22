@@ -55,9 +55,8 @@ from literature_review.screening import ScreeningResult, sample_candidates, scre
 from literature_review.synthesis import SynthesisError
 from literature_review.ranking import (
     FilterPolicy,
-    default_venues,
     filter_and_rank,
-    normalize_venue,
+    resolve_venues,
 )
 
 LIMIT = 100
@@ -77,15 +76,12 @@ def default_min_year(today: date | None = None) -> int:
 def _resolve_venues(raw: str | None) -> tuple[str, ...]:
     """Parse a ``--venues`` value into normalized whitelist tokens.
 
-    ``None`` selects the built-in top-venue default; an empty string disables
-    the venue restriction entirely; anything else is split on commas and
-    normalized like a provider venue string.
+    ``None`` selects the built-in top-venue default; ``""``/``"none"``
+    disable the restriction; recognized conference names expand to that
+    conference's full alias set. See ``ranking.resolve_venues`` for the
+    full matching semantics.
     """
-    if raw is None:
-        return default_venues()
-    if raw == "":
-        return ()
-    return tuple(token for token in (normalize_venue(part) for part in raw.split(",")) if token)
+    return resolve_venues(raw)
 
 
 def _make_plan(
@@ -632,7 +628,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--venues",
-        help="Comma-separated venue whitelist; default is the built-in top venues; empty string disables the filter",
+        help="Comma-separated top venues by name (matches the built-in 17-conference list by key or alias and expands its aliases; unrecognized names filter as raw substrings with a warning); 'none' or an empty string disables the filter; default is all built-in top venues",
     )
     arguments = parser.parse_args()
 
