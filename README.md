@@ -45,7 +45,7 @@ uv run python -m literature_review.pipeline data/papers "literature review agent
 
 ## Run the full pipeline (M3C)
 
-One interactive query produces a complete literature-review report: plan -> search/rank -> download open-access PDFs -> extract evidence -> LLM synthesis. Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `TOP_K_CHUNKS=32`; `target_n = ceil(20 / query_count)`). Search provider (M5c): with `SEMANTIC_SCHOLAR_API_KEY` set, planned queries are searched through Semantic Scholar first; a missing key, an empty SS result, or a failed SS request falls back to OpenAlex, then SS placeholder abstracts are backfilled from OpenAlex by DOI and any paper still lacking an abstract is dropped before ranking. Paper ranking uses bge-small-en-v1.5 semantic similarity between the query and each paper's title+abstract (plus citation and recency, equal weight); `--dry-run` skips the embedding model and keeps the lexical baseline. With no key, dry-run stops after downloads:
+One interactive query produces a complete literature-review report: plan -> search/rank -> download open-access PDFs -> extract evidence -> LLM synthesis. Parameters are mostly hard-coded (`LIMIT=100`, `TOTAL_TARGET=20`, `TOP_K_CHUNKS=32`; `target_n = ceil(20 / query_count)`) with a research search policy: every planned query searches only the last `YEAR_WINDOW=3` years (2026 → 2024) and is hard-filtered to a top-venue whitelist (`ranking.TOP_VENUE_ALIASES`, 17 venues across ML/NLP/IR/CV/AI). Search provider (M5c): with `SEMANTIC_SCHOLAR_API_KEY` set, planned queries are searched through Semantic Scholar first; a missing key, an empty SS result, or a failed SS request falls back to OpenAlex, then SS placeholder abstracts are backfilled from OpenAlex by DOI and any paper still lacking an abstract is dropped before ranking. Paper ranking uses bge-small-en-v1.5 semantic similarity between the query and each paper's title+abstract (plus citation and recency, equal weight); `--dry-run` skips the embedding model and keeps the lexical baseline. With no key, dry-run stops after downloads:
 
 ```powershell
 uv run python -m literature_review.main --dry-run
@@ -57,7 +57,7 @@ The full run plans with the LLM planner (default, `GEMINI_API_KEY`), scores and 
 uv run python -m literature_review.main
 ```
 
-Use `--rule-based` to force the deterministic fallback plan; `--dry-run` always uses it, so a dry run needs no key. Downloads go to `data/papers/`. Multiple planned queries share one dedup set, so a paper already downloaded by an earlier query counts as satisfied and is never re-downloaded or backfilled.
+Use `--rule-based` to force the deterministic fallback plan; `--dry-run` always uses it, so a dry run needs no key. Downloads go to `data/run/`, which `main()` rebuilds (removes and recreates) at the start of every default run; pass `--dest-dir <folder>` or set `DEST_DIR` to download into a folder you manage instead (that folder is never cleared). Temporary one-off runs can widen or move the window with `--year-from` / `--year-to` and swap the venue whitelist with `--venues` (comma-separated alias tokens; empty string disables the filter). Multiple planned queries share one dedup set, so a paper already downloaded by an earlier query counts as satisfied and is never re-downloaded or backfilled.
 
 ## Run the demo
 

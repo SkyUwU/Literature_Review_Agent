@@ -49,8 +49,9 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | LLM Input Hygiene | `functional.py`, `synthesis.py`, `pairwise_eval.py` | Done; no page numbers in LLM inputs |
 | Output Traceability | `models.py`, `synthesis.py`, `pipeline.py` | Done; claim_id/claim_ids in external outputs |
 | M5c Semantic Scholar primary search | `ss_search.py`, `main.py`, `search.py`, `pdf_downloader.py` | Done; SS primary + OpenAlex fallback + DOI abstract backfill; F4 real run deferred (Gemini quota) |
+| Run folder & research policy | `main.py`, `ranking.py`, `models.py`, `search.py`, `.gitignore` | Done; downloads → rebuilt `data/run/`, `YEAR_WINDOW=3` window, top-venue whitelist (`FilterPolicy.venues`), escape-hatch flags `--dest-dir/--year-from/--year-to/--venues` |
 
-The current suite has 414 tests. Do not replace tests with only live API checks.
+The current suite has 430 tests. Do not replace tests with only live API checks.
 
 ## Important design decisions
 
@@ -331,6 +332,17 @@ M5c makes Semantic Scholar the primary search provider, keeps OpenAlex as the fa
 - Probe highlights: DOI overlap between SS and OpenAlex is low (Jaccard 0.05–0.13), so switching to SS also changes the candidate pool substantially; SS abstract coverage is 0.91–0.92 (well above the 0.40 threshold), SS DOI coverage 97–98% (is what makes DOI dedup viable), and SS OA-PDF coverage is 0.55–0.76 (slightly below OpenAlex's 0.72, so download shortfalls remain a real-run concern).
 - Note: HANDOFF's older "21-file `data/papers/` baseline" statements were accurate at their time; the current baseline is **26 files** (pre-dates M5c smoke on 2026-08-26..2026-09-16). Historical records are intentionally not rewritten.
 
+## Latest milestone: run folder & research policy (2026-09-22)
+
+Implements the professor's "last three years, top venues only" rule and the download-folder convention agreed with the user:
+
+- `literature_review/main.py`: `MIN_YEAR` constant removed; `YEAR_WINDOW=3` + `default_min_year()` (= current year − 2, so 2026 → 2024). Every planned query (initial queries, M5e bucket samples, gap follow-ups, and the legacy per-query path) now searches through `SearchRequest(year_from, year_to)` and is ranked under `FilterPolicy(min_year=year_from, venues=...)`, keeping the provider request and the min-year backstop consistent. `DEST_DIR` defaults to `data/run/`, which `main()` rebuilds (rmtree + recreate) before every run unless the caller passed `--dest-dir` or set `DEST_DIR` (explicitly chosen folders are never cleared). New escape-hatch flags: `--dest-dir`, `--year-from`, `--year-to`, `--venues` (comma-separated normalized alias tokens; empty string disables the whitelist; default is `ranking.default_venues()`).
+- `literature_review/ranking.py`: `TOP_VENUE_ALIASES` (17 venues across ML/NLP/IR/CV/AI, including AAAI and IJCAI), `normalize_venue()` (lowercase + strip non-alphanumerics), `default_venues()` (canonical keys ∪ variants, normalized, empty tokens dropped), and a containment match in `filter_papers` — a paper survives the whitelist when its normalized venue contains any whitelist token, which tolerates provider strings like `Proceedings of the International Conference on Learning Representations (ICLR)`. Known limitations recorded in the plan: on the OpenAlex fallback path a top-venue paper published as arXiv primary can have venue `arXiv` and be dropped (the SS-primary path records the venue properly), and containment can over-match a third-party workshop whose name contains a short alias.
+- `literature_review/models.py`: `FilterPolicy.venues: tuple[str, ...] = ()` (empty = no restriction, so existing callers are unchanged).
+- `literature_review/search.py` CLI: `--venues` mirroring the default/override semantics, applied to its `FilterPolicy`.
+- `.gitignore`: `data/run/` added (alongside `data/papers/`, which stays ignored for manual use).
+- Verification: suite grew 414 → **430 tests** (venue-whitelist, year-window, `_resolve_venues`, download-folder clear/keep behavior, and CLI threading tests); full suite PASS (`run-policy-todo4.log`). F4 real run remains deferred (Gemini quota). Unpaywall no-OA backfill stays a later candidate (not started).
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.
@@ -350,7 +362,7 @@ M5c makes Semantic Scholar the primary search provider, keeps OpenAlex as the fa
 Suggested sequence for the next milestones (track the current one in `.omo/STATE.md`; each plan lives in `.omo/plans/`):
 
 1. Unpaywall no-OA backfill for papers without an OpenAlex/SS OA link;
-2. smaller candidates tracked in `.omo/STATE.md` (e.g. functional-prompt Section interpretation, M5f embedding query representation, `data/papers/` accumulation strategy).
+2. smaller candidates tracked in `.omo/STATE.md` (e.g. functional-prompt Section interpretation, M5f embedding query representation).
 
 ## API and operational notes
 

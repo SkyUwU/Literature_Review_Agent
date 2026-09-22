@@ -1,12 +1,12 @@
-# .omo/STATE.md — 專案現況（最後更新：2026-09-21）
+# .omo/STATE.md — 專案現況（最後更新：2026-09-22）
 
 > `opencode.json` 只自動載入 `AGENTS.md`；需要時用 `@.omo/STATE.md` 重新載入。
 > 規劃側維護，執行側只讀不改。架構摘要見 `AGENTS.md`；詳細交接見 `HANDOFF.md`；決策紀錄見 `.omo/plans/`。
 
 ## 現況快照
 
-- 測試 **414 全綠**（2026-09-21 M5c 驗收 F1；2026-09-22 收尾複跑確認 `.omo/evidence/m5c-wrapup-todo0.log`）。
-- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出。
+- 測試 **430 全綠**（2026-09-22 run-policy 里程碑收尾複跑，414 → 430；log `.omo/evidence/run-policy-todo4.log`）。
+- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出；未 commit 待確認：**run-folder-and-policy**（下載落點 + 三年窗 + 頂會白名單）。
 - **所有里程碑已完成；下一步＝候選里程碑，動工前先討論**（見「下一步：候選里程碑」與「未動工候選」）。
 
 ## 里程碑一覽
@@ -35,13 +35,15 @@
 | Output Traceability | ✅ | `claim_id` / `claim_ids` 進對外輸出 |
 | JSON 輸出 | ✅ | `save_report_output` → `data/outputs/report_*.json` |
 | main.py `.env` 自動載入 | ✅ | `_build_clients` 呼叫 `load_local_env()`，完整 run 免 `--env-file`（376 tests） |
+| Run folder & 研究政策 | ⏳ 待使用者 commit | `data/run/` 每跑重建、`YEAR_WINDOW=3` 三年窗、頂會白名單硬濾（`FilterPolicy.venues`）、`--dest-dir/--year-from/--year-to/--venues` |
 
 ## 下一步：候選里程碑（動工前先討論）
 
+- **run-folder-and-policy 已完成 code/test/docs、待使用者 commit**：計畫 `.omo/plans/run-folder-and-policy.md`。F4 續跑不受影響。
 - **M5c 已完成**（code commit + F1-F4b 驗收；F4 real run 因 Gemini 配額掛帳）。
   計畫：`.omo/plans/m5c-semantic-scholar.md`（Todos 已勾）；文件收尾：`.omo/plans/m5c-doc-wrapup.md`。
-  F4 續跑指令：`printf 'literature review agent\n' | uv run -m literature_review.main`（需 key1-3 + SS key，`data/papers/` 用完還原 26 檔基準）。
-- **候選**：見「未動工候選（動工前討論）」清單；並含 2026-09-22 使用者偏好——每輪 run 輸出一份獨立資料夾（未成計畫，先議）。
+  F4 續跑指令：`printf 'literature review agent\n' | uv run -m literature_review.main`（需 key1-3 + SS key；下載落點已改 `data/run/`，run 後該資料夾即結果、不需還原）。
+- **候選**：見「未動工候選（動工前討論）」清單；使用者曾提單獨資料夾偏好已成案＝`data/run/` 每跑重建（見其里程碑）。
 - 環境：`SEMANTIC_SCHOLAR_API_KEY` 已在 WSL `.env`（勿再提醒）。
 
 ## 2026-09-22 討論紀錄（使用者休息前交付；明日提醒）
@@ -78,8 +80,9 @@
 - **A2 表格/結構化證據低估**：K3c 校準發現（使用者 vs LLM 10vs6）；複驗＝再抽 2-3 表格型 chunks 對比。
 - **functional prompt 教 LLM 解讀 Section 欄位**：一行 prompt（附錄/References chunk 鮮少貢獻 utility）；與 T1 章節包裝同批（章節資訊主題）。
 - **Claude 4 建議未落地項**：① 陪襯效應（逐 chunk 化，校準後仍飄才考慮）、③ max-chunk 採納條件（併閾值決策）、④ 本地小模型（M6 已試 Ollama，已裁定評分線路回 Gemini，列遠期）。
-- **`main.py` DEST_DIR 覆寫（候選 M）**：支援 env/flag 覆寫 `data/papers/`，免手動搬檔還原。
-- **`data/papers/` 累積策略（待討論）**：每次 run 清空 / 互動詢問 / 維持現況。
+- **Unpaywall no-OA backfill（後續優先、考慮中）**：無 OpenAlex/SS OA link 的論文從 Unpaywall 補 OA；使用者有考慮、尚未定案，動工前先議。
+- **`main.py` DEST_DIR 覆寫（✅ 已落地 2026-09-22）**：`--dest-dir` / `DEST_DIR` 覆寫 `data/run/`（覆寫時不清空），免手動搬檔還原。
+- **`data/papers/` 累積策略（✅ 已定案 2026-09-22）**：系統流程改落 `data/run/` 每跑清空重建；`data/papers/` 退役為手動用途。
 
 ## 關鍵裁示（使用者定案）
 
