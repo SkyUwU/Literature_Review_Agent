@@ -45,7 +45,7 @@ uv run python -m literature_review.main --dry-run
 uv run python -m literature_review.main --rule-based
 uv run --env-file .env python -m literature_review.main
 ```
-`literature_review.main` is the end-to-end entry (M3C): it interactively asks one query, plans with the LLM planner by default (`--rule-based` forces the deterministic fallback; `--dry-run` always uses it, so a dry run needs no key), searches/ranks/downloads each planned query independently, then extracts and synthesizes the report. `--dry-run` stops after downloads (no key). Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `target_n = ceil(20 / query_count)`). Key wiring (C2c): `GEMINI_API_KEY` = planner + screening (missing → rule-based fallback, no abort), `GEMINI_API_KEY_2` = functional scoring + per-paper notes, `GEMINI_API_KEY_3` = report (three calls); a missing key2 or key3 exits with code 1. `.env` handling: `GeminiJsonClient` / `OllamaJsonClient` call `load_local_env()` in their constructor, so the stage CLIs (`pipeline`, `pairwise_eval`) read a local `.env` automatically; `main.py` calls it at the start of `_build_clients` as well, so `uv run python -m literature_review` works without `--env-file` (which still works and wins, since `load_local_env` never overwrites an already-set variable).
+`literature_review.main` is the end-to-end entry (M3C): it interactively asks one query, plans with the LLM planner by default (`--rule-based` forces the deterministic fallback; `--dry-run` always uses it, so a dry run needs no key), searches/ranks/downloads each planned query independently, then extracts and synthesizes the report. `--dry-run` stops after downloads (no key). Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `target_n = ceil(20 / query_count)`). Search provider (M5c): with `SEMANTIC_SCHOLAR_API_KEY` set, planned queries are searched through Semantic Scholar first; a missing key, an empty SS result, or a failed SS request falls back to OpenAlex, then each SS placeholder abstract is backfilled from OpenAlex by DOI and any paper still lacking an abstract is dropped before ranking. Key wiring (C2c): `GEMINI_API_KEY` = planner + screening (missing → rule-based fallback, no abort), `GEMINI_API_KEY_2` = functional scoring + per-paper notes, `GEMINI_API_KEY_3` = report (three calls); a missing key2 or key3 exits with code 1. `.env` handling: `GeminiJsonClient` / `OllamaJsonClient` call `load_local_env()` in their constructor, so the stage CLIs (`pipeline`, `pairwise_eval`) read a local `.env` automatically; `main.py` calls it at the start of `_build_clients` as well, so `uv run python -m literature_review` works without `--env-file` (which still works and wins, since `load_local_env` never overwrites an already-set variable).
 
 Langfuse observability: confirm the self-hosted server is up with `curl http://localhost:3000/api/public/health` before a full run; traces appear in the dashboard at `http://localhost:3000`.
 
@@ -58,21 +58,46 @@ git config --global --add safe.directory C:/Users/User/Desktop/Literature_Review
 ## Current architecture
 
 ```text
-ResearchIdea -> SearchPlan -> OpenAlex retrieval -> metadata filter/rank/select
--> LLM screening (keep/maybe/exclude) -> local PDF extraction (multi-PDF) -> EvidenceChunk retrieval
+ResearchIdea -> SearchPlan -> Semantic Scholar retrieval (OpenAlex fallback + DOI abstract backfill)
+-> metadata filter/rank/select -> LLM screening (keep/maybe/exclude)
+-> local PDF extraction (multi-PDF) -> EvidenceChunk retrieval
 -> functional scoring (1-10 utility) -> evidence-backed paper assessment
 -> per-paper claim notes -> synthesis report with [claim-N] markers / future directions
 ```
 
 The pipeline now retrieves evidence with semantic (embedding) ranking by default — `literature_review.embedding_retriever.retrieve_evidence_embedding` replaced the lexical baseline for `pipeline.py`; the lexical `evidence_ranking.retrieve_evidence` is retained as compare/legacy only. The formal scoring layer is the C2b functional scoring (`literature_review.functional`: a single 1-10 utility per sampled chunk, per-paper top-2 sampling from the sub-query that pulled the paper in, batches of 5, quota∩threshold selection); the per-paper score blends max and mean (`0.7×max + 0.3×mean`, S3). The LLM contextual-summary/re-ranking interface (`summarize_and_rerank`) is retained as compare/legacy only. Synthesis output cites claims as `[claim-N]` with `claim_chunks` / `claim_id` / `claim_ids` tagging (C2c / Output Traceability). Langfuse observability (tree tracing on every LLM call, flushed before CLI exit) is implemented.
 
-PDF acquisition (M3B): `literature_review.pdf_downloader` fetches open-access PDFs from the OpenAlex `best_oa_location.pdf_url` recorded by `search.py` into `Paper.open_access_pdf_url`. `download_pdf(paper, dest_dir)` writes into a caller-chosen directory (real runs use `data/papers/`, smoke runs use a temp dir) with collision-resistant file names; missing OA links raise `NoOpenAccessError`, network/HTTP failures raise `PdfDownloadError`. `download_and_backfill(ranked_papers, dest_dir, target_n, *, already_downloaded=None)` keeps the top-N selection: failing papers are replaced by the next ranked candidates, and the pass reports OA coverage ratios (`oa_ratio_candidates`, `oa_ratio_attempted`, `shortfall`, `duplicate_reused`) with optional JSON stats output. `already_downloaded` is a shared set that deduplicates across multi-query runs (M3C): a paper id already in the set counts as satisfied (`duplicate_reused`) without writing a new file and without backfilling.
+PDF acquisition (M3B): `literature_review.pdf_downloader` fetches open-access PDFs from the source-provider link recorded into `Paper.open_access_pdf_url` — the OpenAlex `best_oa_location.pdf_url` (recorded by `search.py`) or the Semantic Scholar `openAccessPdf.url` (M5c, `ss_search.py`). `download_pdf(paper, dest_dir)` writes into a caller-chosen directory (real runs use `data/papers/`, smoke runs use a temp dir) with collision-resistant file names; missing OA links raise `NoOpenAccessError`, network/HTTP failures raise `PdfDownloadError`. `download_and_backfill(ranked_papers, dest_dir, target_n, *, already_downloaded=None)` keeps the top-N selection: failing papers are replaced by the next ranked candidates, and the pass reports OA coverage ratios (`oa_ratio_candidates`, `oa_ratio_attempted`, `shortfall`, `duplicate_reused`) with optional JSON stats output. `already_downloaded` is a shared set that deduplicates across multi-query runs (M3C) by `dedup_key(paper)` — normalized DOI first, title+year as fallback (M5c): a paper already in the set counts as satisfied (`duplicate_reused`) without writing a new file and without backfilling.
 
-End-to-end entry (M3C): `literature_review/main.py` wires query -> SearchPlan -> per-query OpenAlex search/rank -> optional LLM screening (M5e: bucket sampling + keep/maybe/exclude + gap follow-ups via `client_screen`) -> download -> shared-set dedup -> PDF extraction -> synthesis report. There is no cross-query merging; each planned query keeps its own download target (`target_n = ceil(TOTAL_TARGET / len(plan.queries))`, duplicated papers consume quota). `run_end_to_end(...)` is fully injectable (`json_fetcher`, `pdf_fetcher`, plan/synthesis/screen clients), and `main()` keeps `--rule-based` / `--dry-run` only (Amendment 1: the LLM planner is the default; rule-based is the escape hatch / fallback). Non-dry-run runs persist the full report as JSON under `data/outputs/` via `save_report_output` (`report_%Y%m%d_%H%M%S_%f.json`).
+End-to-end entry (M3C): `literature_review/main.py` wires query -> SearchPlan -> per-query Semantic Scholar / OpenAlex search/rank (M5c) -> optional LLM screening (M5e: bucket sampling + keep/maybe/exclude + gap follow-ups via `client_screen`) -> download -> shared-set dedup -> PDF extraction -> synthesis report. There is no cross-query merging; each planned query keeps its own download target (`target_n = ceil(TOTAL_TARGET / len(plan.queries))`, duplicated papers consume quota). `run_end_to_end(...)` is fully injectable (`json_fetcher`, `pdf_fetcher`, plan/synthesis/screen clients, `ss_api_key`), and `main()` keeps `--rule-based` / `--dry-run` only (Amendment 1: the LLM planner is the default; rule-based is the escape hatch / fallback). Non-dry-run runs persist the full report as JSON under `data/outputs/` via `save_report_output` (`report_%Y%m%d_%H%M%S_%f.json`).
 
 Paper-level ranking (K): real runs of `main.py` rank OpenAlex candidates with `filter_and_rank(response, policy, encoder=...)` → `ranking.rank_papers_embedding` — bge-small-en-v1.5 embeddings of the query vs. each paper's title+abstract, with cosine similarity plus citation and recency as three equal-weight components (total 0..3). `--dry-run` skips the embedding model entirely and keeps the deterministic lexical baseline (`rank_papers`); the `search.py --rank` CLI also keeps lexical (compare/legacy).
 
 The `SearchPlan` contract is query-only: `SearchPlan.idea` is optional. The LLM planner is the default — `planning.create_llm_plan(query, client)` produces a validated plan (`generated_by="llm"`) using the shared `llm_evidence.generate_validated` call-once-parse-repair helper; `planning.create_rule_based_plan(query)` is the deterministic fallback (missing/failed key, and always for `--dry-run`; `--rule-based` forces it outright). See `HANDOFF.md` for the next integration scope and decisions.
+
+## Live vs legacy path map
+
+main.py 的正式路徑與保留的舊路徑對照（識別「現行 vs legacy」用；legacy 皆不動、僅存檔或對照）。
+
+| 階段 | 現行（live） | legacy・逃生門・對照 |
+|---|---|---|
+| 規劃 | `create_llm_plan`（key1） | rule-based（`--dry-run` / `--rule-based` / 無 key） |
+| 搜尋 | `ss_search.search_ss`（SS 主源，有 key） | `search.search_papers`（OpenAlex fallback / CLI） |
+| 摘要補齊 | `backfill_abstracts`（OpenAlex DOI lookup） | placeholder 救不回 → drop |
+| 篩選 | M5e screening（分桶→單一 call→gap≤1 輪） | 無 screen client → legacy per-query 下載 |
+| 論文排名 | `ranking.rank_papers_embedding`（bge-small） | `ranking.rank_papers`（lexical：dry-run / `search.py --rank`） |
+| 去重 | `pdf_downloader.dedup_key` = DOI→title+year | 舊 paper_id 去重（已改寫） |
+| 下載 | `download_and_backfill`（keep/maybe priority_groups） | 舊 top-N backfill |
+| 抽取 | `extraction.extract_pdf_text`（pymupdf4llm markdown） | pypdf 僅 fallback |
+| 切分 | `evidence.chapter_chunk_document`（`{paper_id}-c{n}`） | `evidence.chunk_document`（舊格式） |
+| 檢索 | `embedding_retriever.retrieve_evidence_embedding`（top-32、per-paper cap 6） | `evidence_ranking.retrieve_evidence`（lexical 對照） |
+| 評分 | `functional`（1-10 utility、top-2/篇、0.7×max+0.3×mean、配額∩閾值） | `llm_evidence.summarize_and_rerank`（RCS，C2b 後 legacy；M6 Ollama 為其逃生門） |
+| 筆記 | `synthesis.paper_notes`（key2、claim_id） | — |
+| 報告 | C2e 三 call（outline→report→directions、key3、`[claim-N]`） | 舊單 call（`LlmSynthesisBatch` 保留逃生/測試） |
+| 材料清單 | `synthesis.render_materials_section`（程式組裝） | LLM 直出（已退役） |
+| 落盤 | `main.save_report_output` → `data/outputs/` | — |
+
+不在 main 的路徑（各別 CLI / 參考概念）：`selection.py` + `SelectedPaperSet`（`search.py --assess`）、`assessment.py`（metadata 初評，deprecated）、`coverage.py`（覆蓋包，參考）、`pairwise_eval.py` / `retrieval_eval.py`（比較工具，非 pipeline）。
 
 ## Terminology
 

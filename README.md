@@ -15,13 +15,13 @@ The first milestone defines validated data models. It intentionally does not cal
 
 The second milestone searches the OpenAlex API without requiring an API key. Papers without an abstract or author metadata are skipped because the later summarization stage needs source evidence. The third milestone filters, ranks, and selects a small reading set while preserving the full search provenance.
 
-Before retrieval, a search plan is produced from a bare query string. `literature_review.planning.create_llm_plan(query, client)` is the default planner (validated `SearchPlan`, `generated_by="llm"`); `literature_review.planning.create_rule_based_plan()` is the fallback (no key needed), used whenever the LLM planner is unavailable and always for `--dry-run`. Both keep `SearchPlan.idea` optional/`None`, so the downstream OpenAlex search consumes one query-only contract.
+Before retrieval, a search plan is produced from a bare query string. `literature_review.planning.create_llm_plan(query, client)` is the default planner (validated `SearchPlan`, `generated_by="llm"`); `literature_review.planning.create_rule_based_plan()` is the fallback (no key needed), used whenever the LLM planner is unavailable and always for `--dry-run`. Both keep `SearchPlan.idea` optional/`None`, so the downstream Semantic Scholar / OpenAlex search consumes one query-only contract.
 
 The evidence layer extracts local PDFs with `literature_review.extraction.extract_pdf_text()` and splits the page text into overlapping `EvidenceChunk` objects. Chunks may span consecutive pages and retain their inclusive page range. Store local paper PDFs in `data/papers/`; this directory is intentionally not tracked by Git.
 
 `literature_review.embedding_retriever.retrieve_evidence_embedding()` is the first evidence-selection stage. It uses semantic (embedding) ranking with a local `BAAI/bge-small-en-v1.5` encoder (free, no key needed) to retrieve the top-k chunks across all papers combined. The first run downloads ~130MB of model weights from Hugging Face. The lexical `evidence_ranking.retrieve_evidence()` is retained only as a compare/legacy baseline; it is no longer used by the pipeline. The LLM contextual-summary stage `summarize_and_rerank()` uses the same retrieval response contract.
 
-Automatic PDF acquisition (M3B): `literature_review.pdf_downloader.download_pdf()` fetches an open-access PDF from the OpenAlex `best_oa_location.pdf_url` recorded at search time (`Paper.open_access_pdf_url`). `download_and_backfill()` keeps the top-N selection — papers that fail to download (no OA link or network error) are replaced by the next ranked candidates — and reports OA coverage ratios (`oa_ratio_candidates`, `oa_ratio_attempted`, `shortfall`), optionally as JSON. Real smoke runs always download into a temp directory, never into `data/papers/`.
+Automatic PDF acquisition (M3B): `literature_review.pdf_downloader.download_pdf()` fetches an open-access PDF from the source-provider link recorded at search time (`Paper.open_access_pdf_url`) — the OpenAlex `best_oa_location.pdf_url` or the Semantic Scholar `openAccessPdf.url`. `download_and_backfill()` keeps the top-N selection — papers that fail to download (no OA link or network error) are replaced by the next ranked candidates — and reports OA coverage ratios (`oa_ratio_candidates`, `oa_ratio_attempted`, `shortfall`), optionally as JSON. Real smoke runs always download into a temp directory, never into `data/papers/`.
 
 `literature_review.llm_evidence.summarize_and_rerank()` is the second stage. It calls the LLM once for the corpus-wide top-k chunks across all papers and validates the structured LLM assessments while preserving the trusted paper ID and page range from retrieved chunks. Gemini reads `GEMINI_API_KEY` only from the environment; no key is needed for unit tests.
 
@@ -45,13 +45,13 @@ uv run python -m literature_review.pipeline data/papers "literature review agent
 
 ## Run the full pipeline (M3C)
 
-One interactive query produces a complete literature-review report: plan -> search/rank -> download open-access PDFs -> extract evidence -> LLM synthesis. Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `TOP_K_CHUNKS=32`; `target_n = ceil(20 / query_count)`). Paper ranking uses bge-small-en-v1.5 semantic similarity between the query and each paper's title+abstract (plus citation and recency, equal weight); `--dry-run` skips the embedding model and keeps the lexical baseline. With no key, dry-run stops after downloads:
+One interactive query produces a complete literature-review report: plan -> search/rank -> download open-access PDFs -> extract evidence -> LLM synthesis. Parameters are hard-coded (`LIMIT=100`, `MIN_YEAR=2021`, `TOTAL_TARGET=20`, `TOP_K_CHUNKS=32`; `target_n = ceil(20 / query_count)`). Search provider (M5c): with `SEMANTIC_SCHOLAR_API_KEY` set, planned queries are searched through Semantic Scholar first; a missing key, an empty SS result, or a failed SS request falls back to OpenAlex, then SS placeholder abstracts are backfilled from OpenAlex by DOI and any paper still lacking an abstract is dropped before ranking. Paper ranking uses bge-small-en-v1.5 semantic similarity between the query and each paper's title+abstract (plus citation and recency, equal weight); `--dry-run` skips the embedding model and keeps the lexical baseline. With no key, dry-run stops after downloads:
 
 ```powershell
 uv run python -m literature_review.main --dry-run
 ```
 
-The full run plans with the LLM planner (default, `GEMINI_API_KEY`), scores and generates per-paper notes with `GEMINI_API_KEY_2`, and produces the synthesis report with `GEMINI_API_KEY_3`:
+The full run plans with the LLM planner (default, `GEMINI_API_KEY`), scores and generates per-paper notes with `GEMINI_API_KEY_2`, and produces the synthesis report with `GEMINI_API_KEY_3`. Set `SEMANTIC_SCHOLAR_API_KEY` in `.env` to make Semantic Scholar the primary search source (without it, OpenAlex is used directly):
 
 ```powershell
 uv run python -m literature_review.main

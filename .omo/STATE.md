@@ -5,9 +5,9 @@
 
 ## 現況快照
 
-- 測試 **376 全綠**（2026-09-21 main.py `.env` 自動載入修正）。
-- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出。
-- **唯一待執行里程碑：M5c（Semantic Scholar 為主檢索）** — 計畫 `.omo/plans/m5c-semantic-scholar.md`（唯一權威）已寫，待貼執行指令包。
+- 測試 **414 全綠**（2026-09-21 M5c 驗收 F1；2026-09-22 收尾複跑確認 `.omo/evidence/m5c-wrapup-todo0.log`）。
+- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出。
+- **所有里程碑已完成；下一步＝候選里程碑，動工前先討論**（見「下一步：候選里程碑」與「未動工候選」）。
 
 ## 里程碑一覽
 
@@ -22,7 +22,7 @@
 | M5a planner 多面向 | ✅ `6457dbe9` | 子查詢重合度 0.444 → ≤0.133 |
 | M5b RCS 校準 | ✅ | A9/A10 雙 rationale、B=4；10 分比例 47% → 3-9% |
 | M5b.1 prompt 小修 | ✅ | 誠實證偽「加指示」路線（8B 無效），停止投入 |
-| M5c SS 為主檢索 | ⏳ 計畫已寫待執行 | SS 主源 + DOI 去重 + 摘要 backfill |
+| M5c SS 為主檢索 | ✅ | SS 主源 + DOI 去重 + 摘要 backfill（F4 real run 掛帳） |
 | M5e 候選池升級 | ✅ | 分桶選樣 + LLM 篩選（keep/maybe/exclude）+ gap follow-up |
 | M6 RCS on Ollama | ✅ | `OllamaJsonClient` + Gemini fallback（後裁定評分線路回 Gemini） |
 | C2a pymupdf4llm 抽取 | ✅ | markdown 表格 + 章節感知 chunk（`{paper_id}-c{n}`） |
@@ -36,11 +36,12 @@
 | JSON 輸出 | ✅ | `save_report_output` → `data/outputs/report_*.json` |
 | main.py `.env` 自動載入 | ✅ | `_build_clients` 呼叫 `load_local_env()`，完整 run 免 `--env-file`（376 tests） |
 
-## 下一步：M5c（Semantic Scholar 為主檢索）
+## 下一步：候選里程碑（動工前先討論）
 
-- 計畫：`.omo/plans/m5c-semantic-scholar.md`（唯一權威，含 Todo 0-5 + F1-F4 + Commit strategy）。
-- 執行順序：**Todo 0 probe → 1（`Paper.doi` 欄位）→ 2∥3（去重 / SS adapter）→ 4（pipeline 接線）→ 5（smoke）**。
-- 設計要點：SS 為主（key 存在時）、OpenAlex 雙角色（搜尋 fallback + DOI 補摘要 backfill）；**adapter 不過濾無摘要論文**（過濾移到 backfill 之後、`filter_and_rank` 之前）；`Paper.abstract` 必填 → 用 `ABSTRACT_PLACEHOLDER` 佔位（backfill 取代、救不回才在 pipeline 過濾）。
+- **M5c 已完成**（code commit + F1-F4b 驗收；F4 real run 因 Gemini 配額掛帳）。
+  計畫：`.omo/plans/m5c-semantic-scholar.md`（Todos 已勾）；文件收尾：`.omo/plans/m5c-doc-wrapup.md`。
+  F4 續跑指令：`printf 'literature review agent\n' | uv run -m literature_review.main`（需 key1-3 + SS key，`data/papers/` 用完還原 26 檔基準）。
+- **候選**：見「未動工候選（動工前討論）」清單；並含 2026-09-22 使用者偏好——每輪 run 輸出一份獨立資料夾（未成計畫，先議）。
 - 環境：`SEMANTIC_SCHOLAR_API_KEY` 已在 WSL `.env`（勿再提醒）。
 
 ## 2026-09-22 討論紀錄（使用者休息前交付；明日提醒）
@@ -51,7 +52,9 @@
 2. **多 query 偏離已閉合**：SS pacing 1.1→2.0（code + 計畫同步，已 commit）。此為修我自己的幻覺衍生物，非使用者要求的需求。
 3. **系統運作模式（使用者問我答、已確認）**：
    - 基礎篩選先做（OpenAlex URL filter `from_publication_date` / SS `year`）→ `FilterPolicy(min_year)` 於 ranking 前統一後衛（provider 間語意不同，故用統一 FilterPolicy 後衛）。
-   - FilterPolicy + SelectionPolicy → SelectedPaperSet。
+   - **當前 main.py 活路徑＝`filter_and_rank(response, FilterPolicy(min_year), encoder)` → RankingResponse（ranking.py）**。
+     `SelectionPolicy`/`SelectedPaperSet`/`select_papers` 只存在 `selection.py` + `search.py`（search CLI 路徑），
+     **不在 main.py 的 run_end_to_end 裡**。我先前把 SelectionPolicy 寫進「當前系統」是幻覺，已更正。
    - 每 query 各自搜尋；第二輪補搜在 LLM screening 後（gap follow_up_queries，≤3）。
    - LLM 一次接收所有 query 分桶取樣結果（單一 call）；第二輪 follow-up 補搜尋也在同 screening 流程。
    - dedup / 孤兒進 archive / W4416209823 已移 8 檔 archive。

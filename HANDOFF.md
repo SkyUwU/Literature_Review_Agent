@@ -48,8 +48,9 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | S1-S5 — scoring/output-line adjustments | `synthesis.py`, `functional.py`, `models.py` | Done; 0.7×max+0.3×mean, sub-query sampling |
 | LLM Input Hygiene | `functional.py`, `synthesis.py`, `pairwise_eval.py` | Done; no page numbers in LLM inputs |
 | Output Traceability | `models.py`, `synthesis.py`, `pipeline.py` | Done; claim_id/claim_ids in external outputs |
+| M5c Semantic Scholar primary search | `ss_search.py`, `main.py`, `search.py`, `pdf_downloader.py` | Done; SS primary + OpenAlex fallback + DOI abstract backfill; F4 real run deferred (Gemini quota) |
 
-The current suite has 374 tests. Do not replace tests with only live API checks.
+The current suite has 414 tests. Do not replace tests with only live API checks.
 
 ## Important design decisions
 
@@ -318,6 +319,18 @@ C2e 把合成報告從「單一 LLM call（一包 `{report, future_directions}`�
 - 測試遷移與新增：`test_synthesis.py` — `FakeSynthesisClient` 改序列回應（三 call 依序 pop）、新增 `TwoStagePromptTests`（三 prompt 內容：含全部 claim_id／含大綱節標題／不含 assessments／query 進 call 1+3）、大綱 unknown claim repair→reject、方向 paper/claim unknown reject；`test_pipeline.py`/`test_main.py` — `SynthesisFakeClient`/`PaperDropFakeClient` 遷移三 call（outline/report/directions 分支、`future_directions` 移出 report call）。**363 tests OK**（`two-stage-report-generation-tests.log`，354→363、+9、零刪除）。fake e2e 三 call 依序驗證 `two-stage-report-generation-smoke.log`（outline→report→directions prefix、report 來自 call 2、directions 來自 call 3、unknown paper direction rejection OK）。
 - **真實 run 掛帳**（與 S1-S5 同批；最終線路一次跑）；commit/push 由使用者親做。
 
+## Latest milestone: M5c — Semantic Scholar primary search (2026-09-21)
+
+M5c makes Semantic Scholar the primary search provider, keeps OpenAlex as the fallback/CLI source, and backs up SS abstracts through OpenAlex DOI lookups:
+
+- `literature_review/ss_search.py` (new): SS adapter with the same `SearchRequest`/`SearchResponse` contracts as `search.py`. 2.0s pacing (double the keyed 1 RPS limit; 1.1s tripped 429 on 2026-09-19), exponential backoff honoring `Retry-After` (max 3 retries), `paper_from_ss` normalizer (`paperId` used as `paper_id`, DOI from `externalIds.DOI`, citation count filled, `openAccessPdf.url` guarded for null/empty). Abstracts that are missing or shorter than 20 chars are filled with `ABSTRACT_PLACEHOLDER` so `Paper.abstract` (required, min_length=20) never crashes; a record missing `paperId`/`title`/`year` or with empty authors returns None exactly like the OpenAlex adapter.
+- `literature_review/models.py` + `search.py`: `Paper.doi: str | None` added; OpenAlex `REQUESTED_FIELDS` includes `doi` and `paper_from_openalex` normalizes the bare DOI (`norm_doi` strips `https://doi.org/` / `http://doi.org/` / `doi:` and lowercases).
+- `literature_review/pdf_downloader.py`: dedup moved from `paper_id` to `dedup_key(paper)` — normalized DOI first, `title:title+year` fallback — so the same DOI from different providers deduplicates within the merged `already_downloaded` set.
+- `literature_review/main.py`: `_search_candidates` calls `ss_search.search_ss` when `SEMANTIC_SCHOLAR_API_KEY` is set (missing key, empty result, or failed request falls back to OpenAlex); `backfill_abstracts` replaces placeholder abstracts via `https://api.openalex.org/works/doi:{doi}` using `search.reconstruct_abstract` (0.2s pacing); papers still lacking an abstract are dropped before `filter_and_rank`. `run_end_to_end` is injectable via `ss_api_key`.
+- Verification: **F1** full suite PASS (414 tests), **F2** probe metrics PASS, **F3** dry-run PASS, **F4b** scoped M5c real check PASS, **F4** full real run DEFERRED (Gemini free-tier quota 429 at the functional-scoring stage after the whole SS path — search + backfill + rank + download + extraction — had completed; per HANDOFF precedent, over-quota = 掛帳). Evidence: `.omo/evidence/m5c-todo0-probe.log`, `ss-probe-20260921T115955Z.json`, `m5c-smoke.log`, `m5c-real-check.json`.
+- Probe highlights: DOI overlap between SS and OpenAlex is low (Jaccard 0.05–0.13), so switching to SS also changes the candidate pool substantially; SS abstract coverage is 0.91–0.92 (well above the 0.40 threshold), SS DOI coverage 97–98% (is what makes DOI dedup viable), and SS OA-PDF coverage is 0.55–0.76 (slightly below OpenAlex's 0.72, so download shortfalls remain a real-run concern).
+- Note: HANDOFF's older "21-file `data/papers/` baseline" statements were accurate at their time; the current baseline is **26 files** (pre-dates M5c smoke on 2026-08-26..2026-09-16). Historical records are intentionally not rewritten.
+
 ## Windows and WSL/OpenCode handoff
 
 - The Windows folder (`C:\Users\User\Desktop\Literature_Review_Agent`) uses Anaconda/Windows `uv`. OpenCode runs in WSL and should use WSL-native `uv`, not the Windows environment. The user has already installed WSL `uv`; verify it with `uv --version` rather than reinstalling it.
@@ -336,14 +349,13 @@ C2e 把合成報告從「單一 LLM call（一包 `{report, future_directions}`�
 
 Suggested sequence for the next milestones (track the current one in `.omo/STATE.md`; each plan lives in `.omo/plans/`):
 
-1. Semantic Scholar API + DOI merge discussion (2026-09-16; apply for a free SS API key first — it arrives by email and enables the `x-api-key` header);
-2. Unpaywall no-OA backfill for papers without an OpenAlex OA link;
-3. smaller candidates tracked in `.omo/STATE.md` (e.g. functional-prompt Section interpretation, M5f embedding query representation, `data/papers/` accumulation strategy).
+1. Unpaywall no-OA backfill for papers without an OpenAlex/SS OA link;
+2. smaller candidates tracked in `.omo/STATE.md` (e.g. functional-prompt Section interpretation, M5f embedding query representation, `data/papers/` accumulation strategy).
 
 ## API and operational notes
 
-- OpenAlex is the primary paper search provider because it works without an API key. `search.py` uses `urllib`, a User-Agent, timeout, and retries. A past Windows/Python TLS EOF error was intermittent; `curl.exe` returned HTTP 200. If it returns repeatedly, consider switching that module to `httpx`, not disabling TLS verification.
-- Semantic Scholar previously returned rate-limit errors in the shared environment. Treat it as an optional later metadata/citation-graph source, with caching and backoff.
+- OpenAlex was the original primary search provider because it works without an API key; since M5c it is the fallback/backfill source, but `search.py` still serves the `search`/`--rank` CLI and the SS fallback. `search.py` uses `urllib`, a User-Agent, timeout, and retries. A past Windows/Python TLS EOF error was intermittent; `curl.exe` returned HTTP 200. If it returns repeatedly, consider switching that module to `httpx`, not disabling TLS verification.
+- Semantic Scholar is now the primary search provider (M5c) when `SEMANTIC_SCHOLAR_API_KEY` is set; `ss_search.py` paces at 2.0s and retries 429 with backoff. SS's free-tier default "no key" 1 RPS limit and past shared-environment rate-limit errors are why the keyed adapter stays conservative.
 - Google Gemini API keys and quotas are managed in Google AI Studio. The user should inspect **API Keys** and **Dashboard > Usage**. Free-tier limits are adequate for a very small smoke test but vary by model/project.
 
 ## External implementation references
