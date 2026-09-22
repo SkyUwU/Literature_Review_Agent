@@ -51,7 +51,7 @@ One interactive query produces a complete literature-review report: plan -> sear
 uv run python -m literature_review.main --dry-run
 ```
 
-The full run plans with the LLM planner (default, `GEMINI_API_KEY`), scores and generates per-paper notes with `GEMINI_API_KEY_2`, and produces the synthesis report with `GEMINI_API_KEY_3`. Set `SEMANTIC_SCHOLAR_API_KEY` in `.env` to make Semantic Scholar the primary search source (without it, OpenAlex is used directly):
+The full run plans with the LLM planner (default, `GEMINI_API_KEY`), scores and generates per-paper notes with `GEMINI_API_KEY_2`, and produces the synthesis report with `GEMINI_API_KEY_3`. Set `SEMANTIC_SCHOLAR_API_KEY` in `.env` to make Semantic Scholar the primary search source (without it, OpenAlex is used directly). Every real run also persists the downloaded-papers list as `data/outputs/papers_%Y%m%d_%H%M%S_%f.json` (one entry per actually-downloaded PDF with full metadata, its originating query, screening priority, and on-disk path, plus a run overview) sharing the timestamp of the companion `report_*.json`; neither file is ever written by a `--dry-run`, and the folder accumulates across runs:
 
 ```powershell
 uv run python -m literature_review.main

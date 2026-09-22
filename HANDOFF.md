@@ -50,8 +50,10 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | Output Traceability | `models.py`, `synthesis.py`, `pipeline.py` | Done; claim_id/claim_ids in external outputs |
 | M5c Semantic Scholar primary search | `ss_search.py`, `main.py`, `search.py`, `pdf_downloader.py` | Done; SS primary + OpenAlex fallback + DOI abstract backfill; F4 real run deferred (Gemini quota) |
 | Run folder & research policy | `main.py`, `ranking.py`, `models.py`, `search.py`, `.gitignore` | Done; downloads → rebuilt `data/run/`, `YEAR_WINDOW=3` window, top-venue whitelist (`FilterPolicy.venues`), escape-hatch flags `--dest-dir/--year-from/--year-to/--venues` |
+| `--venues` by conference name | `ranking.py`, `main.py`, `search.py` | Done; alias-table name resolution (`resolve_venues`), `none` disables, unknown names warn+raw token |
+| Papers output JSON | `models.py`, `main.py`, `test_main.py` | Done; non-dry runs also write `data/outputs/papers_*.json` (downloaded-paper list + run overview, shared timestamp with report) |
 
-The current suite has 430 tests. Do not replace tests with only live API checks.
+The current suite has 447 tests. Do not replace tests with only live API checks.
 
 ## Important design decisions
 
@@ -351,6 +353,15 @@ Refines `--venues` so users select conferences by name instead of typing raw sub
 - `literature_review/main.py`: `_resolve_venues` now delegates to `ranking.resolve_venues`; `--venues` help updated (`none` documented; defaults to all built-in top venues).
 - `literature_review/search.py`: adopted `resolve_venues`, dropped the inline duplicate and the now-unused `default_venues`/`normalize_venue` imports.
 - Verification: suite grew 430 → **442 tests** (`ResolveVenuesTests` in `test_ranking.py`; updated expectations in `test_main.py` and `test_search.py` where raw tokens became full alias expansions); full suite PASS (`venues-by-name-todo4.log`).
+
+## Follow-up milestone: papers output JSON (papers-output, 2026-09-22)
+
+Persists the downloaded-papers list next to the synthesis report, so a real run leaves a self-contained record of exactly which PDFs were written and why:
+
+- `literature_review/models.py`: `DownloadedPaperEntry` (full `Paper` + originating `query`, `local_path`, screening `priority: "keep"/"maybe"/None`) and `PapersOutput` (`run` overview + `papers` list; the list is allowed to be empty so a 0-download dry-run return value never crashes — a saved papers file is never empty because real runs already `ValueError` before saving when nothing is usable).
+- `literature_review/main.py`: `_make_papers_output(...)` assembles one entry per actually-written download (strict 1:1 with `downloads`; reused/`duplicate_reused` papers appear only inside `run.stats_per_query`); both `run_end_to_end` return branches carry the `"papers"` key. New `save_papers_output(output, *, output_dir="data/outputs", timestamp=None)` mirrors `save_report_output` (OSError → stderr warning + `None`, no crash). `main()` computes one `ts = datetime.now()` and passes it to both saves, so `papers_%Y%m%d_%H%M%S_%f.json` shares the report's timestamp and folder; dry-runs never write either file and the folder accumulates.
+- Run overview: `query`, initial `planned_queries`, gap `follow_ups`, `stats_per_query`, `failed_extractions` (computed after extraction on real runs).
+- Verification: suite grew 442 → **447 tests** (legacy-path metadata/query/path assertions, screening priority keep/maybe, cross-query dedup single-entry, `save_papers_output` unit incl. empty-list + OSError failure, `main()` integration asserting both files + shared timestamp; the existing `test_main_full_run_saves_report_json` gained a `papers` key + `save_papers_output` interception so no test ever writes into the repo `data/outputs/`). Full suite PASS (`papers-output-todo4.log`). Data contracts unchanged; no provider/scoring/report behavior touched; no Gemini spend.
 
 ## Windows and WSL/OpenCode handoff
 

@@ -5,8 +5,8 @@
 
 ## 現況快照
 
-- 測試 **442 全綠**（2026-09-22 venues-by-name 收尾複跑，430 → 442；log `.omo/evidence/venues-by-name-todo4.log`）。
-- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出、run-folder-and-policy；未 commit 待確認：**venues-by-name**（`--venues` 按會議名對應別名表）。
+- 測試 **447 全綠**（2026-09-22 papers-output 收尾複跑，442 → 447；log `.omo/evidence/papers-output-todo4.log`）。
+- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出、run-folder-and-policy、venues-by-name；未 commit 待確認：**papers-output**（下載論文清單 JSON 輸出）。
 - **所有里程碑已完成；下一步＝候選里程碑，動工前先討論**（見「下一步：候選里程碑」與「未動工候選」）。
 
 ## 里程碑一覽
@@ -36,7 +36,8 @@
 | JSON 輸出 | ✅ | `save_report_output` → `data/outputs/report_*.json` |
 | main.py `.env` 自動載入 | ✅ | `_build_clients` 呼叫 `load_local_env()`，完整 run 免 `--env-file`（376 tests） |
 | Run folder & 研究政策 | ✅ | `data/run/` 每跑重建、`YEAR_WINDOW=3` 三年窗、頂會白名單硬濾（`FilterPolicy.venues`）、`--dest-dir/--year-from/--year-to/--venues` |
-| Venues by name | ⏳ 待使用者 commit | `--venues` 按會議名對應別名表（`resolve_venues`：key/別名→展開全別名、未知→警告＋raw、`none`→不濾、全未知→警告＋不濾）|
+| Venues by name | ✅ 已 commit | `--venues` 按會議名對應別名表（`resolve_venues`：key/別名→展開全別名、未知→警告＋raw、`none`→不濾、全未知→警告＋不濾）|
+| Papers output JSON | ⏳ 待使用者 commit | 真實 run 另寫 `data/outputs/papers_*.json`（完整 Paper metadata＋query＋priority＋路徑＋run 概覽），與 report 同 ts 同資料夾、累積；dry-run 不產檔 |
 
 ## 下一步：候選里程碑（動工前先討論）
 
@@ -82,7 +83,7 @@
 - **functional prompt 教 LLM 解讀 Section 欄位**：一行 prompt（附錄/References chunk 鮮少貢獻 utility）；與 T1 章節包裝同批（章節資訊主題）。
 - **Claude 4 建議未落地項**：① 陪襯效應（逐 chunk 化，校準後仍飄才考慮）、③ max-chunk 採納條件（併閾值決策）、④ 本地小模型（M6 已試 Ollama，已裁定評分線路回 Gemini，列遠期）。
 - **Unpaywall no-OA backfill（後續優先、考慮中）**：無 OpenAlex/SS OA link 的論文從 Unpaywall 補 OA；使用者有考慮、尚未定案，動工前先議。
-- **下載論文清單 JSON 輸出（使用者提出 2026-09-22、未成計畫）**：查詢+下載後把「實際下載論文清單」含 metadata 匯出 JSON 到 `data/outputs/`（與報告同資料夾、累積不清空）；僅**真實 run**（非 dry-run）才輸，與報告規則一致。動工前先討論。
+- **下載論文清單 JSON 輸出（✅ 已落地 2026-09-22）**：查詢+下載後把「實際下載論文清單」含 metadata 匯出 JSON 到 `data/outputs/`（與報告同資料夾、累積不清空）＝`papers_*.json`，`papers-output` 里程碑（Todo 全部完成）。
 - **`main.py` DEST_DIR 覆寫（✅ 已落地 2026-09-22）**：`--dest-dir` / `DEST_DIR` 覆寫 `data/run/`（覆寫時不清空），免手動搬檔還原。
 - **`data/papers/` 累積策略（✅ 已定案 2026-09-22）**：系統流程改落 `data/run/` 每跑清空重建；`data/papers/` 退役為手動用途。
 
