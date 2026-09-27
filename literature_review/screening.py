@@ -13,6 +13,7 @@ duplicated decisions for real candidates stay fatal.
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -24,6 +25,7 @@ from literature_review.models import RankedPaper
 __all__ = [
     "FollowUpQuery",
     "GapAnalysis",
+    "SampledCandidates",
     "ScreenDecision",
     "ScreeningError",
     "ScreeningResult",
@@ -37,6 +39,19 @@ DEFAULT_PER_QUERY_TARGET = 24
 _BUCKET_A_RATIO = 0.25
 _BUCKET_B_RATIO = 0.50
 _BUCKET_C_RATIO = 0.25
+
+
+@dataclass
+class SampledCandidates:
+    """Bucket-sampled candidates plus the paper_id -> a/b/c label map.
+
+    ``buckets`` records, for every paper in ``papers``, the diversity bucket that
+    actually claimed it (only set when the pool was large enough to warrant
+    bucketing; small pools return an empty map).
+    """
+
+    papers: list[RankedPaper]
+    buckets: dict[str, str] = field(default_factory=dict)
 
 
 class ScreenDecision(BaseModel):
@@ -102,17 +117,17 @@ def _normalize_doc_id(doc_id: str) -> str:
 
 
 def _doc_id_map(
-    query_candidates: dict[str, list[RankedPaper]],
+    query_candidates: dict[str, SampledCandidates],
 ) -> dict[str, tuple[str, RankedPaper]]:
     """Assign one global ``DOC_n`` id per candidate, in prompt display order.
 
-    The numbering is sequential across all queries (query order, then ranked
+    The numbering is sequential across all queries (query order, then bucket
     order inside a query) so the id is unique regardless of query grouping.
     """
     mapping: dict[str, tuple[str, RankedPaper]] = {}
     counter = 0
-    for query, ranked in query_candidates.items():
-        for item in ranked:
+    for query, sampled in query_candidates.items():
+        for item in sampled.papers:
             counter += 1
             mapping[f"DOC_{counter}"] = (query, item)
     return mapping
@@ -167,7 +182,7 @@ def sample_candidates(
     ranked_papers: list[RankedPaper],
     *,
     per_query_target: int = DEFAULT_PER_QUERY_TARGET,
-) -> list[RankedPaper]:
+) -> SampledCandidates:
     """Sample a bounded, diversity-preserving candidate window for one query.
 
     Bucket conditions use the query's own rank / citation / year distribution
@@ -183,7 +198,7 @@ def sample_candidates(
     matters for large candidate pools, avoiding the K3 same-type monopoly).
     """
     if len(ranked_papers) <= per_query_target:
-        return list(ranked_papers)
+        return SampledCandidates(papers=list(ranked_papers), buckets={})
 
     max_year = max((item.paper.year or 0) for item in ranked_papers)
     a = _sample_bucket(
@@ -201,70 +216,188 @@ def sample_candidates(
         "c": int(per_query_target * _BUCKET_C_RATIO),
     }
     sampled: list[RankedPaper] = []
+    buckets: dict[str, str] = {}
     seen: set[str] = set()
     for name, bucket in (("a", a), ("b", b), ("c", c)):
         for item in bucket[: budgets[name]]:
             if item.paper.paper_id not in seen:
                 sampled.append(item)
+                buckets[item.paper.paper_id] = name
                 seen.add(item.paper.paper_id)
-    return sampled
+    return SampledCandidates(papers=sampled, buckets=buckets)
 
 
-def build_screening_prompt(query_candidates: dict[str, list[RankedPaper]]) -> str:
+_ROLE_TEXT = (
+    "You are a senior scholarly review assistant. Your task is to evaluate the "
+    "candidate papers retrieved for the user's research topic, select the core papers "
+    "of substantial reference value, and analyze the information gaps in the current "
+    "literature pool."
+)
+
+_CANDIDATES_INTRO = (
+    "The candidate papers below are organized by (1) the retrieval sub-query that "
+    "found them and (2) their scholarly role (Category A foundational / Category B "
+    "frontier / Category C applied)."
+)
+
+_GUIDANCE_TEXT = (
+    "1. **Global review first**: Before making any decisions, browse ALL sub-queries "
+    "and ALL candidate categories to establish a complete picture of the literature "
+    "landscape, then evaluate as a whole. Balance representative papers across "
+    "sub-topics so every sub-direction is represented, and avoid biasing decisions "
+    "toward a single sub-direction (do not rush to exhaust your keep decisions on "
+    "the first papers you see).\n"
+    "2. **Layered judgment**:\n"
+    "   - If a sub-query displays the `Category A/B/C` headers:\n"
+    "     * Category A (Foundational): value its role as a core starting point or "
+    "classic baseline of the field; do not reject it simply because it was published "
+    "earlier.\n"
+    "     * Category B (Frontier): value whether it proposes an innovative "
+    "architecture, mechanism, or latest breakthrough.\n"
+    "     * Category C (Applied): value whether it provides cross-domain integration "
+    "or a novel application context.\n"
+    "   - If a sub-query is marked `Un-bucketed` or has few candidates:\n"
+    "     * evaluate directly whether the paper provides substantive methodological or "
+    "experimental support for the overall research topic.\n"
+    "   - If a sub-query is marked `Empty retrieval`:\n"
+    "     * record this blind spot under `missing_pieces` and propose a precise "
+    "follow-up search in `follow_up_queries`.\n"
+    "3. **Decision labels**:\n"
+    '   - "keep": highly relevant to the research topic, or of key representativeness; '
+    "it should be downloaded now.\n"
+    '   - "maybe": uncertain value — keep it as a buffer in case the keep set is too '
+    "small to fill the review.\n"
+    '   - "reject": off-topic, redundant, or low-quality; reject it explicitly.\n'
+    "4. Base each decision on the paper's title, abstract, year, and citation count "
+    "only. Every candidate must receive exactly one decision; make decisions only "
+    "about the papers listed below — never output a document id not shown above."
+)
+
+_OUTPUT_TEXT = (
+    "Return exactly one JSON object matching the provided schema. In every decision "
+    'set "doc_id" to the candidate\'s exact document id as listed above (e.g. '
+    '"[DOC_1]", copy it word for word).\n\n'
+    "The output has two parts:\n\n"
+    "1. Per-paper decisions (`decisions`): exactly one entry per candidate, each with\n"
+    "   - `doc_id`: the document id shown above, copied verbatim;\n"
+    '   - `priority`: "keep", "maybe", or "reject";\n'
+    "   - `reason`: a brief scholarly justification, 1-2 sentences.\n\n"
+    "2. Global information-gap reflection (the feedback loop): honestly state what "
+    "the current pool already covers and what is still missing, as a roadmap for the "
+    "next search round:\n"
+    "   - `covered_areas`: what the selected papers already cover well;\n"
+    "   - `missing_pieces`: the key aspects or evidence still absent to fully support "
+    "the research topic;\n"
+    "   - `follow_up_queries`: 1-3 precise search queries that would fill the gaps "
+    "(must target the missing aspects and avoid repeating the initial sub-queries "
+    "above; empty list [] if coverage is sufficient).\n\n"
+    "Form example:\n"
+    "{\n"
+    '  "decisions": [\n'
+    '    {"doc_id": "[DOC_1]", "priority": "keep", "reason": "..."},\n'
+    '    {"doc_id": "[DOC_2]", "priority": "maybe", "reason": "..."}\n'
+    "  ],\n"
+    '  "covered_areas": ["..."],\n'
+    '  "missing_pieces": ["..."],\n'
+    '  "follow_up_queries": ["..."]\n'
+    "}\n\n"
+    "No Markdown, no explanation, no preamble. Your reply must be the JSON object "
+    "itself and nothing else."
+)
+
+_BUCKET_HEADERS = {
+    "a": "### Category A: Foundational (High-Impact / Baseline)",
+    "b": "### Category B: Frontier (Recent Frontier)",
+    "c": "### Category C: Applied (Domain / Integration)",
+}
+
+_EMPTY_RETRIEVAL_TEXT = (
+    "### Empty retrieval\n"
+    "No candidates were found for this sub-query; note this blind spot in "
+    "`missing_pieces` and propose a follow-up search in `follow_up_queries`."
+)
+
+
+def _year_str(year: int | None) -> str:
+    return "n/a" if year is None else str(year)
+
+
+def _citations_str(citation_count: int | None) -> str:
+    return "N/A" if citation_count is None else str(citation_count)
+
+
+def _format_candidate(doc_index: int, item: RankedPaper) -> str:
+    paper = item.paper
+    title = " ".join(paper.title.split())
+    abstract = " ".join(paper.abstract.split())
+    return (
+        f'- [DOC_{doc_index}] "{title}" ({_year_str(paper.year)}, '
+        f"citations: {_citations_str(paper.citation_count)})\n"
+        f"  Abstract: {abstract}"
+    )
+
+
+def build_screening_prompt(
+    query_candidates: dict[str, SampledCandidates],
+    main_query: str | None = None,
+) -> str:
     """Build the single-call screening prompt over every query's sampled candidates.
 
-    Each candidate is presented as ``### [DOC_n] year title`` + abstract — **no rank
-    or score** (avoiding relative-scoring bias, mirroring the RCS input reduction
-    spirit). The output contract is id-style: decisions reference papers by their
-    document id ``[DOC_n]`` exactly as displayed, which the program resolves back
-    to paper ids. Unknown ids (papers outside this list) are dropped downstream.
+    The prompt is fully in English: the research idea, the rating guidance, and the
+    Candidate papers list reference normalized display ids (``[DOC_n]``) — **no rank
+    or score** is shown (avoiding relative-scoring bias). The candidates sit in the
+    middle; the JSON output requirements are the *last* instruction, to reduce
+    preamble noise around the returned object. Each query renders its candidates
+    under the diversity bucket headers ``Category A/B/C`` when bucketing applied,
+    under ``Un-bucketed`` otherwise, or under ``Empty retrieval`` when the query
+    produced no candidates. ``main_query`` is the user's original research idea;
+    when ``None`` the ``## Research topic`` section is omitted entirely.
     """
-    blocks: list[str] = [
-        "You are a scholarly screening reviewer. Below are candidate papers grouped "
-        "by the search query that retrieved them. Decide the disposition of every "
-        "candidate paper and perform a global gap analysis of the whole pool.\n",
-        "Decision rules:\n"
-        '- "keep": high-quality paper that is directly useful for the research topic; '
-        "it should be downloaded now.\n"
-        '- "maybe": uncertain value — keep it as a buffer in case the keep set is '
-        "too small to fill the review.\n"
-        '- "reject": off-topic, redundant, or low-quality; reject it explicitly.\n'
-        "- Every candidate must receive exactly one decision. Base each decision on "
-        "the paper's title, abstract, and year only.\n"
-        "- Make decisions only about the papers listed below — do not add or invent "
-        "papers outside this list, and never output a document id that is not "
-        "shown above.\n",
-        "Then produce a global gap analysis over ALL candidates: name the areas the "
-        "pool already covers, the key pieces still missing (e.g. a missing benchmark "
-        "or methodology family), and at most 3 follow-up queries that would fill the "
-        "missing pieces. If the pool is already sufficient, return an empty "
-        "follow-up list.\n",
-        "Return exactly one JSON object matching the provided schema. In every "
-        'decision, set "doc_id" to the candidate\'s exact document id as listed '
-        'above (e.g. "[DOC_1]", copy it word for word).',
-    ]
+    blocks: list[str] = [_ROLE_TEXT]
+    if main_query:
+        blocks.extend(["## Research topic", " ".join(main_query.split())])
+    blocks.extend(["## Rating guidance and principles", _GUIDANCE_TEXT])
+    blocks.extend(["## Candidate papers", _CANDIDATES_INTRO])
 
     counter = 0
-    for query_index, (query, ranked) in enumerate(query_candidates.items(), start=1):
+    for query_index, (query, sampled) in enumerate(query_candidates.items(), start=1):
         blocks.append(f"## Query {query_index}: {query}")
-        for item in ranked:
-            counter += 1
-            paper = item.paper
-            title = " ".join(paper.title.split())
-            abstract = " ".join(paper.abstract.split())
-            blocks.append(f"### [DOC_{counter}] {paper.year} {title}\n{abstract}")
+        papers = sampled.papers
+        if not papers:
+            blocks.append(_EMPTY_RETRIEVAL_TEXT)
+            continue
+        bucket_map = sampled.buckets
+        if bucket_map:
+            for name in ("a", "b", "c"):
+                bucket_papers = [
+                    item for item in papers if bucket_map.get(item.paper.paper_id) == name
+                ]
+                if not bucket_papers:
+                    continue
+                blocks.append(_BUCKET_HEADERS[name])
+                for item in bucket_papers:
+                    counter += 1
+                    blocks.append(_format_candidate(counter, item))
+        else:
+            blocks.append("### Un-bucketed")
+            for item in papers:
+                counter += 1
+                blocks.append(_format_candidate(counter, item))
+
+    blocks.extend(["## Output", _OUTPUT_TEXT])
     return "\n\n".join(blocks)
 
 
 def _build_screening_repair_prompt(
     raw_output: str,
     error: BaseException,
-    query_candidates: dict[str, list[RankedPaper]],
+    query_candidates: dict[str, SampledCandidates],
 ) -> str:
     """Ask the model to repair a screening output that cannot be resolved."""
     doc_map = _doc_id_map(query_candidates)
     lines = "\n".join(
-        f"- [{doc_id}] ({item.paper.year}) {item.paper.title}"
+        f"- [{doc_id}] ({_year_str(item.paper.year)}, "
+        f"citations: {_citations_str(item.paper.citation_count)}) {item.paper.title}"
         for doc_id, (query, item) in doc_map.items()
     )
     return (
@@ -281,7 +414,7 @@ def _build_screening_repair_prompt(
 
 def _resolve_output(
     output: _LlmScreeningOutput,
-    query_candidates: dict[str, list[RankedPaper]],
+    query_candidates: dict[str, SampledCandidates],
 ) -> ScreeningResult:
     """Resolve doc-id-keyed LLM decisions back to paper ids, grouped per query.
 
@@ -339,21 +472,24 @@ def _resolve_output(
 
 
 def screen_candidates(
-    query_candidates: dict[str, list[RankedPaper]],
+    query_candidates: dict[str, SampledCandidates],
     client: JsonGenerationClient,
     *,
+    main_query: str | None = None,
     parse: Callable[[str], ScreeningResult] | None = None,
 ) -> ScreeningResult:
     """Run one LLM screening + gap call over every query's sampled candidates.
 
-    ``query_candidates`` maps a query string to its sampled ``RankedPaper`` list.
-    Uses the shared call-once-parse-repair helper: one initial call, and a single
-    repair retry when the output fails Pydantic validation **or cannot be resolved**
-    back to the supplied candidate document ids (missing / duplicated). Unknown
-    doc ids (hallucinated papers outside the list) are dropped with a warning.
-    ``parse`` may be injected for tests and must return a ``ScreeningResult``.
+    ``query_candidates`` maps a query string to its sampled ``SampledCandidates``.
+    ``main_query`` is the user's original research idea shown in the prompt (``None``
+    omits the ``## Research topic`` section). Uses the shared call-once-parse-repair
+    helper: one initial call, and a single repair retry when the output fails Pydantic
+    validation **or cannot be resolved** back to the supplied candidate document ids
+    (missing / duplicated). Unknown doc ids (hallucinated papers outside the list) are
+    dropped with a warning. ``parse`` may be injected for tests and must return a
+    ``ScreeningResult``.
     """
-    prompt = build_screening_prompt(query_candidates)
+    prompt = build_screening_prompt(query_candidates, main_query)
     schema = _LlmScreeningOutput.model_json_schema()
 
     def default_parse(raw_output: str) -> ScreeningResult:

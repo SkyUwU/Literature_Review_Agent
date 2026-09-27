@@ -16,6 +16,7 @@ from pydantic import HttpUrl
 
 from literature_review.models import Paper, RankedPaper
 from literature_review.screening import (
+    SampledCandidates,
     ScreeningError,
     build_screening_prompt,
     sample_candidates,
@@ -61,6 +62,10 @@ def _ranked(
         matched_terms=["literature", "review"],
         rationale=f"Test ranking fixture for {paper_id}.",
     )
+
+
+def _sampled(*items: RankedPaper) -> SampledCandidates:
+    return SampledCandidates(papers=list(items), buckets={})
 
 
 def _screening_payload(
@@ -109,38 +114,45 @@ class BucketSamplingTests(unittest.TestCase):
             for index in range(count)
         ]
 
-    def test_small_pool_below_target_returns_everything(self) -> None:
+    def test_small_pool_below_target_returns_everything_unbucketed(self) -> None:
         pool = self._pool(5)
         sampled = sample_candidates(pool, per_query_target=24)
-        self.assertEqual(len(sampled), 5)
-        self.assertEqual([item.paper.paper_id for item in sampled], [f"W{i:02d}" for i in range(5)])
+        self.assertEqual(len(sampled.papers), 5)
+        self.assertEqual(
+            [item.paper.paper_id for item in sampled.papers],
+            [f"W{i:02d}" for i in range(5)],
+        )
+        self.assertEqual(sampled.buckets, {})
 
-    def test_large_pool_samples_bounded_diverse_window(self) -> None:
+    def test_large_pool_samples_bounded_diverse_window_with_bucket_labels(self) -> None:
         pool = self._pool(40)
         sampled = sample_candidates(pool, per_query_target=24)
-        ids = [item.paper.paper_id for item in sampled]
+        ids = [item.paper.paper_id for item in sampled.papers]
         # Bucket A keeps the authority heads (rank <= 20%, citation <= 30%);
         # bucket B adds frontier papers (rank <= 50%, year >= 2023). In this
         # synthetic pool citations drop with rank, so bucket C (rank 40-70% AND
         # citation top 30%) is legitimately empty. The window must stay bounded,
         # unique, and sampled beyond the strict top of the rank order.
-        self.assertLessEqual(len(sampled), 24)
+        self.assertLessEqual(len(sampled.papers), 24)
         self.assertEqual(len(set(ids)), len(ids))
         self.assertIn("W00", ids)
         self.assertIn("W19", ids)  # B bucket: rank 20 with year 2024
         self.assertGreater(len(ids), 6)
+        # every emitted paper carries exactly one bucket label, aligned to the list
+        self.assertEqual(set(sampled.buckets), set(ids))
+        self.assertTrue(all(label in ("a", "b", "c") for label in sampled.buckets.values()))
 
     def test_sampling_is_deterministic(self) -> None:
         pool = self._pool(40)
-        first = [item.paper.paper_id for item in sample_candidates(pool, per_query_target=24)]
-        second = [item.paper.paper_id for item in sample_candidates(pool, per_query_target=24)]
+        first = [item.paper.paper_id for item in sample_candidates(pool, per_query_target=24).papers]
+        second = [item.paper.paper_id for item in sample_candidates(pool, per_query_target=24).papers]
         self.assertEqual(first, second)
 
 
 class ScreeningContractTests(unittest.TestCase):
     def test_screen_resolves_doc_ids_to_papers_and_keeps_gap(self) -> None:
         candidates = {
-            "literature review agent": [_ranked("W1"), _ranked("W2", rank=2)],
+            "literature review agent": _sampled(_ranked("W1"), _ranked("W2", rank=2)),
         }
         payload = _screening_payload(
             [
@@ -190,7 +202,7 @@ class ScreeningContractTests(unittest.TestCase):
         )
         client = FakeClipboardClient([json.dumps(first), json.dumps(repair)])
         candidates = {
-            "literature review agent": [_ranked("W1"), _ranked("W2", rank=2)],
+            "literature review agent": _sampled(_ranked("W1"), _ranked("W2", rank=2)),
         }
         result = screen_candidates(candidates, client)
 
@@ -208,13 +220,13 @@ class ScreeningContractTests(unittest.TestCase):
         )
         client = FakeClipboardClient([json.dumps(incomplete), json.dumps(also_incomplete)])
         candidates = {
-            "literature review agent": [_ranked("W1"), _ranked("W2", rank=2)],
+            "literature review agent": _sampled(_ranked("W1"), _ranked("W2", rank=2)),
         }
         with self.assertRaises(ScreeningError):
             screen_candidates(candidates, client)
 
     def test_screen_drops_unknown_doc_id_with_warning_and_keeps_known(self) -> None:
-        candidates = {"literature review agent": [_ranked("W1")]}
+        candidates = {"literature review agent": _sampled(_ranked("W1"))}
         payload = _screening_payload(
             [
                 ("[DOC_1]", "keep"),
@@ -232,7 +244,7 @@ class ScreeningContractTests(unittest.TestCase):
         self.assertIn("unknown document", buffer.getvalue())
 
     def test_screen_unknown_doc_id_cannot_replace_a_missing_candidate(self) -> None:
-        candidates = {"literature review agent": [_ranked("W1")]}
+        candidates = {"literature review agent": _sampled(_ranked("W1"))}
         only_unknown = _screening_payload([("[DOC_9]", "keep")])
         client = FakeClipboardClient([json.dumps(only_unknown), json.dumps(only_unknown)])
         with self.assertRaises(ScreeningError):
@@ -240,21 +252,87 @@ class ScreeningContractTests(unittest.TestCase):
 
     def test_build_prompt_lists_doc_ids_and_hides_rank_and_score(self) -> None:
         candidates = {
-            "literature review agent": [
-                _ranked("W1", year=2024, title="Alpha paper on review agents", rank=7)
-            ]
+            "literature review agent": _sampled(
+                _ranked("W1", year=2024, citations=85, title="Alpha paper on review agents", rank=7)
+            )
         }
-        prompt = build_screening_prompt(candidates)
+        prompt = build_screening_prompt(candidates, main_query="How should evidence be mapped for a lit review agent?")
         self.assertIn("Alpha paper on review agents", prompt)
+        self.assertIn('- [DOC_1] "Alpha paper on review agents" (2024, citations: 85)', prompt)
         self.assertIn("[DOC_1]", prompt)
         self.assertIn("## Query 1: literature review agent", prompt)
+        self.assertIn("## Research topic", prompt)
+        self.assertIn("How should evidence be mapped for a lit review agent?", prompt)
         self.assertIn("doc_id", prompt)
-        self.assertIn("do not add or invent", prompt)
+        self.assertIn("never output a document id not shown above", prompt)
         self.assertNotIn("rank", prompt.lower())
         self.assertNotIn("score", prompt.lower())
 
+    def test_prompt_renders_citation_with_na_fallback(self) -> None:
+        candidates = {
+            "q1": _sampled(
+                _ranked("W1", year=2024, citations=None),
+                _ranked("W2", year=2023, citations=3),
+            )
+        }
+        prompt = build_screening_prompt(candidates, main_query="main")
+        self.assertIn("(2024, citations: N/A)", prompt)
+        self.assertIn("(2023, citations: 3)", prompt)
+
+    def test_prompt_groups_bucketed_candidates_under_category_headers(self) -> None:
+        a = _ranked("W1", year=2020, citations=200, rank=1)
+        b = _ranked("W2", year=2025, citations=2, rank=10)
+        sampled = SampledCandidates(
+            papers=[a, b],
+            buckets={"W1": "a", "W2": "b"},
+        )
+        prompt = build_screening_prompt({"q": sampled}, main_query="main")
+        self.assertIn("### Category A: Foundational (High-Impact / Baseline)", prompt)
+        self.assertIn("### Category B: Frontier (Recent Frontier)", prompt)
+        self.assertNotIn("Category C:", prompt)
+        self.assertLess(prompt.index("Category A"), prompt.index("Category B"))
+
+    def test_prompt_marks_unbucketed_and_empty_retrieval_queries(self) -> None:
+        unbucketed = {"q1": _sampled(_ranked("W1"))}
+        empty = {"q1": _sampled(_ranked("W1")), "q2": SampledCandidates(papers=[], buckets={})}
+        prompt_u = build_screening_prompt(unbucketed)
+        self.assertIn("### Un-bucketed", prompt_u)
+        self.assertNotIn("Category A:", prompt_u)
+        prompt_e = build_screening_prompt(empty)
+        self.assertIn("### Empty retrieval", prompt_e)
+        self.assertIn("propose a follow-up search", prompt_e)
+
+    def test_prompt_doc_ids_are_global_across_queries_and_buckets(self) -> None:
+        candidates = {
+            "q1": SampledCandidates(papers=[_ranked("W1")], buckets={}),
+            "q2": SampledCandidates(
+                papers=[_ranked("W2"), _ranked("W3")],
+                buckets={"W2": "a", "W3": "b"},
+            ),
+            "q3": SampledCandidates(papers=[], buckets={}),
+        }
+        prompt = build_screening_prompt(candidates, main_query="main")
+        self.assertIn("[DOC_1]", prompt)
+        self.assertIn("[DOC_2]", prompt)
+        self.assertIn("[DOC_3]", prompt)
+        self.assertNotIn("[DOC_4]", prompt)
+
+    def test_prompt_global_guidance_and_output_instructions_last(self) -> None:
+        candidates = {"q1": _sampled(_ranked("W1"))}
+        prompt = build_screening_prompt(candidates, main_query="main")
+        self.assertIn("Global review first", prompt)
+        self.assertIn("avoid repeating the initial sub-queries", prompt)
+        last_query = prompt.rfind("## Query")
+        json_instruction = prompt.rfind("No Markdown, no explanation, no preamble")
+        self.assertGreater(json_instruction, last_query)
+
+    def test_prompt_omits_research_topic_when_main_query_none(self) -> None:
+        candidates = {"q1": _sampled(_ranked("W1"))}
+        self.assertNotIn("## Research topic", build_screening_prompt(candidates))
+        self.assertIn("## Output", build_screening_prompt(candidates))
+
     def test_follow_up_cap_of_three_queries(self) -> None:
-        candidates = {"q": [_ranked("W1")]}
+        candidates = {"q": _sampled(_ranked("W1"))}
         too_many = _screening_payload(
             [("[DOC_1]", "keep")],
             follow_ups=[
@@ -276,7 +354,7 @@ class ScreeningContractTests(unittest.TestCase):
 
     def test_every_candidate_must_receive_exactly_one_decision(self) -> None:
         candidates = {
-            "literature review agent": [_ranked("W1"), _ranked("W2", rank=2)],
+            "literature review agent": _sampled(_ranked("W1"), _ranked("W2", rank=2)),
         }
         duplicated = _screening_payload(
             [

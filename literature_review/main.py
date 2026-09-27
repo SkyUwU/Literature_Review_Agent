@@ -54,7 +54,12 @@ from literature_review.models import (
 )
 from literature_review.pdf_downloader import Fetcher, default_fetcher, download_and_backfill
 from literature_review.planning import create_llm_plan, create_rule_based_plan
-from literature_review.screening import ScreeningResult, sample_candidates, screen_candidates
+from literature_review.screening import (
+    SampledCandidates,
+    ScreeningResult,
+    sample_candidates,
+    screen_candidates,
+)
 from literature_review.synthesis import SynthesisError
 from literature_review.ranking import (
     FilterPolicy,
@@ -327,7 +332,7 @@ def run_end_to_end(
     paper_priority: dict[str, str] = {}
 
     if use_screening:
-        query_candidates: dict[str, list[RankedPaper]] = {}
+        query_candidates: dict[str, SampledCandidates] = {}
         for planned in plan.queries:
             query_candidates[planned.query] = sample_candidates(
                 _search_and_rank(
@@ -341,12 +346,12 @@ def run_end_to_end(
                     venues=venues,
                 )
             )
-        screening_result = screen_candidates(query_candidates, client_screen)
+        screening_result = screen_candidates(query_candidates, client_screen, main_query=query)
         follow_up_queries = {
             fu.query for fu in screening_result.gap.follow_up_queries
         }
 
-        follow_up_candidates: dict[str, list[RankedPaper]] = {}
+        follow_up_candidates: dict[str, SampledCandidates] = {}
         if screening_result.gap.follow_up_queries:
             for fu in screening_result.gap.follow_up_queries:
                 follow_ups.append(
@@ -367,16 +372,16 @@ def run_end_to_end(
                         venues=venues,
                     )
                 )
-            follow_up_screening = screen_candidates(follow_up_candidates, client_screen)
+            follow_up_screening = screen_candidates(follow_up_candidates, client_screen, main_query=query)
             for query, decisions in follow_up_screening.decisions.items():
                 screening_result.decisions.setdefault(query, []).extend(decisions)
 
         ranked_by_id: dict[str, RankedPaper] = {}
-        for candidates in query_candidates.values():
-            for item in candidates:
+        for sampled in query_candidates.values():
+            for item in sampled.papers:
                 ranked_by_id.setdefault(item.paper.paper_id, item)
-        for candidates in follow_up_candidates.values():
-            for item in candidates:
+        for sampled in follow_up_candidates.values():
+            for item in sampled.papers:
                 ranked_by_id.setdefault(item.paper.paper_id, item)
         paper_titles = {
             paper_id: item.paper.title for paper_id, item in ranked_by_id.items()
