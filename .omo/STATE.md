@@ -5,8 +5,9 @@
 
 ## 現況快照
 
-- 測試 **449 全綠**（2026-09-22 papers-output 三項小修收尾複跑，447 → 449）。
+- 測試 **455 全綠**（2026-09-28 screening prompt 升級收尾複跑，449 → 455）。
 - 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出、run-folder-and-policy、venues-by-name、papers-output（`d6d78d9`+`1c00de7`）。
+- **screening-prompt 升級已完成 code/test/docs、待使用者 commit**：計畫 `.omo/plans/screening-prompt-upgrade.md`（引用數＋三層分桶＋全域評判＋輸出要求壓尾；455 tests）。
 - **所有里程碑已完成；下一步＝候選里程碑，動工前先討論**（見「下一步：候選里程碑」與「未動工候選」）。
 
 ## 里程碑一覽
@@ -38,6 +39,7 @@
 | Run folder & 研究政策 | ✅ | `data/run/` 每跑重建、`YEAR_WINDOW=3` 三年窗、頂會白名單硬濾（`FilterPolicy.venues`）、`--dest-dir/--year-from/--year-to/--venues` |
 | Venues by name | ✅ 已 commit | `--venues` 按會議名對應別名表（`resolve_venues`：key/別名→展開全別名、未知→警告＋raw、`none`→不濾、全未知→警告＋不濾）|
 | Papers output JSON | ✅ `d6d78d9`+`1c00de7` | 真實 run 另寫 `data/outputs/papers_*.json`（完整 Paper metadata＋query＋priority＋路徑＋run 概覽），與 report 同 ts 同資料夾、累積；dry-run 不產檔 |
+| Screening prompt 升級 | ✅ code/test/docs 完成、待 commit | 引用數＋`Category A/B/C`／`Un-bucketed`／`Empty retrieval` 標記＋全域評判準則＋JSON 輸出要求壓尾；`SampledCandidates` 傳 bucket、`main_query` 接主 query；455 tests |
 
 ## 下一步：候選里程碑（動工前先討論）
 
