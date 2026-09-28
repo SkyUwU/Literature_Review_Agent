@@ -416,9 +416,10 @@ class MainEntryTests(unittest.TestCase):
     # -- scenario 5: target_n follows ceil(TOTAL_TARGET / query count) ------
 
     def test_target_n_follows_ceil_formula(self) -> None:
-        # Pairs must both divide TOTAL_TARGET and supply >= target_n candidates
-        # per query so downloads can actually reach TOTAL_TARGET.
-        for query_count, papers_per_query in ((4, 5), (5, 4)):
+        # Pairs must supply >= target_n candidates per query so downloads can
+        # reach the per-query target; (3, 7) cannot divide 20 evenly (3 * 7 = 21),
+        # so the exact-total assertion applies only to the divisible case.
+        for query_count, papers_per_query in ((3, 7), (4, 5)):
             expected = math.ceil(TOTAL_TARGET / query_count)
             payloads = [
                 results_payload(
@@ -440,7 +441,8 @@ class MainEntryTests(unittest.TestCase):
                     pdf_fetcher=pdf_bytes,
                 )
                 self.assertEqual(result["stats_per_query"][0]["requested"], expected)
-                self.assertEqual(len(result["downloads"]), TOTAL_TARGET)
+                if query_count * expected == TOTAL_TARGET:
+                    self.assertEqual(len(result["downloads"]), TOTAL_TARGET)
 
     # -- scenario 6: LLM plan failure falls back to the rule-based plan ------
 
@@ -553,7 +555,7 @@ class MainEntryTests(unittest.TestCase):
         result = run_end_to_end(
             "literature review agent",
             dest_dir=self.dest,
-            client_plan=FakePlanClient(2),
+            client_plan=FakePlanClient(3),
             client_screen=screen_client,
             use_llm_plan=True,
             dry_run=True,
@@ -563,7 +565,7 @@ class MainEntryTests(unittest.TestCase):
 
         self.assertEqual(screen_client.calls, [])
         self.assertNotIn("screening", result)
-        self.assertEqual(len(result["stats_per_query"]), 2)  # legacy per-query path
+        self.assertEqual(len(result["stats_per_query"]), 3)  # one stats entry per planned query
         self.assertEqual(len(result["downloads"]), 3)
 
     def test_no_screen_client_keeps_legacy_per_query_merging(self) -> None:
@@ -574,7 +576,7 @@ class MainEntryTests(unittest.TestCase):
         result = run_end_to_end(
             "literature review agent",
             dest_dir=self.dest,
-            client_plan=FakePlanClient(2),
+            client_plan=FakePlanClient(3),
             use_llm_plan=True,
             dry_run=True,
             json_fetcher=FakeJsonFetcher(payloads),
@@ -582,7 +584,7 @@ class MainEntryTests(unittest.TestCase):
         )
 
         self.assertNotIn("screening", result)
-        self.assertEqual(len(result["stats_per_query"]), 2)
+        self.assertEqual(len(result["stats_per_query"]), 3)
 
     def test_run_end_to_end_papers_collect_full_metadata(self) -> None:
         payloads = [
@@ -592,7 +594,7 @@ class MainEntryTests(unittest.TestCase):
         result = run_end_to_end(
             "literature review agent",
             dest_dir=self.dest,
-            client_plan=FakePlanClient(2),
+            client_plan=FakePlanClient(3),
             use_llm_plan=True,
             dry_run=True,
             json_fetcher=FakeJsonFetcher(payloads),
@@ -624,7 +626,11 @@ class MainEntryTests(unittest.TestCase):
         self.assertEqual(papers.run["query"], "literature review agent")
         self.assertEqual(
             papers.run["planned_queries"],
-            ["literature review agent angle 0", "literature review agent angle 1"],
+            [
+                "literature review agent angle 0",
+                "literature review agent angle 1",
+                "literature review agent angle 2",
+            ],
         )
         self.assertEqual(papers.run["follow_ups"], [])
         self.assertEqual(papers.run["failed_extractions"], [])
@@ -690,6 +696,7 @@ class MainEntryTests(unittest.TestCase):
         payloads = [
             results_payload(record_for("W1"), record_for("W2")),
             results_payload(record_for("W3")),
+            results_payload(),  # the third planned query finds nothing
             results_payload(record_for("W4")),  # answered for the follow-up query
         ]
         synth_client = SynthesisFakeClient(("W1", "W2", "W3", "W4"))
@@ -701,7 +708,7 @@ class MainEntryTests(unittest.TestCase):
                 result = run_end_to_end(
                     "literature review agent",
                     dest_dir=self.dest,
-                    client_plan=FakePlanClient(2),
+                    client_plan=FakePlanClient(3),
                     client_synth=synth_client,
                     client_screen=screen_client,
                     use_llm_plan=True,
@@ -772,7 +779,7 @@ class MainEntryTests(unittest.TestCase):
         result = run_end_to_end(
             "literature review agent",
             dest_dir=self.dest,
-            client_plan=FakePlanClient(2),
+            client_plan=FakePlanClient(3),
             dry_run=True,
             json_fetcher=FakeJsonFetcher(payloads),
             pdf_fetcher=pdf_bytes,

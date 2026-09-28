@@ -22,11 +22,21 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(plan.idea, "literature review agent")
 
     def test_plan_respects_max_queries_and_keeps_them_unique(self) -> None:
-        plan = create_rule_based_plan("agent review", max_queries=2)
+        plan = create_rule_based_plan("agent review", max_queries=3)
 
-        self.assertLessEqual(len(plan.queries), 2)
+        self.assertLessEqual(len(plan.queries), 3)
+        self.assertGreaterEqual(len(plan.queries), 3)
         self.assertEqual(plan.idea, "agent review")
         self.assertEqual(len({item.query.lower() for item in plan.queries}), len(plan.queries))
+
+    def test_rule_based_plan_rejects_below_searchplan_lower_bound(self) -> None:
+        with self.assertRaises(ValueError):
+            create_rule_based_plan("agent review", max_queries=2)
+
+    def test_rule_based_plan_default_meets_searchplan_lower_bound(self) -> None:
+        plan = create_rule_based_plan("agent review")
+
+        self.assertGreaterEqual(len(plan.queries), 3)
 
 
 class FakePlanClient:
@@ -47,10 +57,18 @@ def valid_plan() -> dict[str, object]:
             {
                 "query": "literature review agent",
                 "purpose": "Find core papers on literature review agents.",
-            }
+            },
+            {
+                "query": "systematic survey automation tools",
+                "purpose": "Find automation tooling for systematic surveys.",
+            },
+            {
+                "query": "comparative evaluation benchmarks",
+                "purpose": "Find evaluation benchmarks for comparative surveys.",
+            },
         ],
-        "perspectives": ["core topic", "surveys"],
-        "rationale": "Cover the core topic and prior surveys in separate queries.",
+        "perspectives": ["core topic", "surveys", "evaluation"],
+        "rationale": "Cover the core topic, prior surveys, and evaluation benchmarks in separate queries.",
         "generated_by": "llm",
     }
 
@@ -81,9 +99,10 @@ def overlapping_plan() -> dict[str, object]:
         "queries": [
             {"query": "literature review agent AI", "purpose": "Find core papers on AI literature review agents."},
             {"query": "AI literature review agent tools", "purpose": "Find tooling papers for AI literature review agents."},
+            {"query": "agent-based literature review systems", "purpose": "Find system papers for agent-based literature review."},
         ],
         "perspectives": ["core topic"],
-        "rationale": "Cover the core topic from two overlapping angles.",
+        "rationale": "Cover the core topic from overlapping angles.",
         "generated_by": "llm",
     }
 
@@ -94,6 +113,7 @@ class LlmPlanOverlapRepairTests(unittest.TestCase):
         repaired["queries"] = [
             {"query": "AI systematic review automation", "purpose": "Find automation papers for systematic reviews."},
             {"query": "LLM research assistant agents", "purpose": "Find LLM research assistant agent papers."},
+            {"query": "survey quality evaluation benchmarks", "purpose": "Find survey quality evaluation benchmarks."},
         ]
         client = FakePlanClient([json.dumps(overlapping_plan()), json.dumps(repaired)])
 
@@ -102,18 +122,62 @@ class LlmPlanOverlapRepairTests(unittest.TestCase):
         self.assertLessEqual(max_query_overlap([q.query for q in plan.queries]), 0.5)
         self.assertEqual(len(client.prompts), 2)
 
-    def test_overlap_repair_failure_keeps_first_plan(self) -> None:
-        still_overlapping = dict(overlapping_plan())
-        still_overlapping["queries"] = [
-            {"query": "literature review agent tools", "purpose": "Find tooling papers for literature review agents."},
-            {"query": "AI literature review agent", "purpose": "Find AI literature review agent papers."},
+    def test_overlap_repair_strictly_improved_but_still_overlapping_is_accepted(self) -> None:
+        improved = dict(valid_plan())
+        improved["queries"] = [
+            {"query": "literature review agent AI", "purpose": "Find core papers on AI literature review agents."},
+            {"query": "AI review agent frameworks", "purpose": "Find agent framework papers for AI reviews."},
+            {"query": "systematic survey automation", "purpose": "Find systematic survey automation papers."},
         ]
-        client = FakePlanClient([json.dumps(overlapping_plan()), json.dumps(still_overlapping)])
+        self.assertEqual(max_query_overlap([q["query"] for q in improved["queries"]]), 0.6)
+        client = FakePlanClient([json.dumps(overlapping_plan()), json.dumps(improved)])
+
+        plan = create_llm_plan("literature review agent", client)
+
+        self.assertGreater(max_query_overlap([q.query for q in plan.queries]), 0.5)
+        self.assertEqual(plan.queries[1].query, "AI review agent frameworks")
+        self.assertEqual(len(client.prompts), 2)
+
+    def test_overlap_repair_failure_keeps_first_plan(self) -> None:
+        equal_overlap = dict(overlapping_plan())
+        equal_overlap["queries"] = [
+            {"query": "literature review agent AI", "purpose": "Find core papers on AI literature review agents."},
+            {"query": "AI literature review agent tools", "purpose": "Find tooling papers for AI literature review agents."},
+            {"query": "literature review agent systems", "purpose": "Find system papers for literature review agents."},
+        ]
+        self.assertEqual(max_query_overlap([q["query"] for q in equal_overlap["queries"]]), 0.8)
+        client = FakePlanClient([json.dumps(overlapping_plan()), json.dumps(equal_overlap)])
 
         plan = create_llm_plan("literature review agent", client)
 
         self.assertEqual(len(client.prompts), 2)
         self.assertEqual(plan.queries[0].query, "literature review agent AI")
+
+    def test_overlap_repair_disabled_never_issues_second_call(self) -> None:
+        client = FakePlanClient([json.dumps(overlapping_plan()), json.dumps(valid_plan())])
+
+        plan = create_llm_plan("literature review agent", client, enable_overlap_repair=False)
+
+        self.assertEqual(len(client.prompts), 1)
+        self.assertEqual(plan.queries[0].query, "literature review agent AI")
+
+    def test_schema_repair_consuming_budget_skips_overlap_repair(self) -> None:
+        client = FakePlanClient(['{"queries": [', json.dumps(overlapping_plan())])
+
+        plan = create_llm_plan("literature review agent", client)
+
+        self.assertEqual(len(client.prompts), 2)
+        self.assertEqual(plan.queries[0].query, "literature review agent AI")
+
+    def test_two_query_plan_gets_one_schema_repair(self) -> None:
+        two_query = dict(valid_plan())
+        two_query["queries"] = two_query["queries"][:2]
+        client = FakePlanClient([json.dumps(two_query), json.dumps(valid_plan())])
+
+        plan = create_llm_plan("literature review agent", client)
+
+        self.assertEqual(len(client.prompts), 2)
+        self.assertEqual(len(plan.queries), 3)
 
 
 class LlmPlanTests(unittest.TestCase):
@@ -135,6 +199,14 @@ class LlmPlanTests(unittest.TestCase):
         self.assertIn("(3) evaluation benchmarks", prompt)
         self.assertIn("keyword pool for each dimension", prompt)
         self.assertIn("combine terms taken from different dimensions", prompt)
+
+    def test_llm_prompt_tightened_to_three_to_four_short_keyword_queries(self) -> None:
+        prompt = build_llm_plan_prompt("literature review agent")
+
+        self.assertIn("exactly 3 to 4 items", prompt)
+        self.assertIn("Keyword Length (Strict)", prompt)
+        self.assertIn("For example (good):", prompt)
+        self.assertIn("For example (bad):", prompt)
 
     def test_t_llm_1_valid_plan_returned(self) -> None:
         client = FakePlanClient([json.dumps(valid_plan())])

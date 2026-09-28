@@ -13,6 +13,9 @@ from literature_review.models import PlannedQuery, SearchPlan
 logger = logging.getLogger(__name__)
 
 _QUERY_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+# Safety net for lexical near-duplicate reuse: 0.5 fires under evident keyword
+# overlap; 0.4 would fire too often and 0.55 is almost unreachable for the
+# Jaccard value range of sensible keyword phrases.
 QUERY_OVERLAP_THRESHOLD = 0.5
 
 
@@ -52,6 +55,8 @@ def create_rule_based_plan(query: str, max_queries: int = 5) -> SearchPlan:
     query-only contract), so ``SearchPlan.idea`` holds the query string to preserve
     the input provenance.
     """
+    if max_queries < 3:
+        raise ValueError("max_queries must be >= 3 to satisfy the SearchPlan lower bound.")
     candidates = [
         (query, "Find papers on the core topic supplied by the researcher."),
         (f"{query} literature review", "Find surveys and prior literature reviews for the topic."),
@@ -81,8 +86,14 @@ def create_rule_based_plan(query: str, max_queries: int = 5) -> SearchPlan:
     )
 
 
-def build_llm_plan_prompt(query: str, max_queries: int = 5) -> str:
-    """Build the prompt that asks the model for one structured, query-only search plan."""
+def build_llm_plan_prompt(query: str) -> str:
+    """Build the prompt that asks the model for one structured, query-only search plan.
+
+    Sub-queries must be 3-4 short keyword phrases (2-4 keywords each): the schema
+    enforces the count band and the ``Keyword Length (Strict)`` rule constrains
+    phrasing, because scholarly search APIs match short keyword phrases more
+    precisely than verbose sentences.
+    """
     return (
         "You are a scholarly search planner. Given one researcher query, produce a "
         "structured search plan as exactly one JSON object matching the provided schema.\n\n"
@@ -92,6 +103,11 @@ def build_llm_plan_prompt(query: str, max_queries: int = 5) -> str:
         "(1) the core task name, (2) key methodology, and (3) evaluation benchmarks "
         "and mainstream comparisons. Generate a short keyword pool for each dimension "
         "(2-4 word keywords for scholarly search APIs, not long sentences).\n"
+        "- Keyword Length (Strict): every sub-query must be a short keyword phrase of 2-4 "
+        "keywords - scholarly search APIs match short keyword phrases more precisely than "
+        'verbose sentences. For example (good): "multi-agent retrieval planning"; '
+        'For example (bad): "how can we build a literature review agent that uses retrieval '
+        'augmentation to write a survey for users".\n'
         "- Compose this plan's sub-queries from those keyword pools: each sub-query "
         "must combine terms taken from different dimensions so the resulting queries "
         "cover distinct angles of the idea rather than recombining the same words.\n"
@@ -103,7 +119,7 @@ def build_llm_plan_prompt(query: str, max_queries: int = 5) -> str:
         "- Stay on-topic: every sub-query must remain a reasonable sub-facet of the "
         "original researcher query, not a tangential topic.\n\n"
         "Return a JSON object with these fields only:\n"
-        f'- "queries": 1 to {max_queries} items, each with a "query" string (at least 3 '
+        '- "queries": exactly 3 to 4 items, each with a "query" string (at least 3 '
         'characters) and a "purpose" string (at least 10 characters explaining the '
         "information need that query covers);\n"
         '- "perspectives": at least 1 short label naming the search angles;\n'
@@ -158,31 +174,56 @@ def _build_overlap_repair_prompt(queries: list[str], query: str) -> str:
     )
 
 
+class _BudgetedClient:
+    """Wrap a planning client so the whole plan stage costs at most ``budget`` calls.
+
+    ``generate_validated`` retries once on parse failure, so when a third provider
+    call would be attempted the budget guard raises ``PlanningError``; the caller
+    treats that as "keep the plan we already have" rather than a hard failure.
+    """
+
+    def __init__(self, client: JsonGenerationClient, budget: int) -> None:
+        self.client = client
+        self.budget = budget
+        self.calls = 0
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        if self.calls >= self.budget:
+            raise PlanningError("Planning LLM call budget exhausted after 2 calls.")
+        self.calls += 1
+        return self.client.generate_json(prompt, schema)
+
+
 def create_llm_plan(
-    query: str, client: JsonGenerationClient, *, max_queries: int = 5
+    query: str, client: JsonGenerationClient, *, enable_overlap_repair: bool = True
 ) -> SearchPlan:
     """Use an LLM to turn a bare query into a validated ``SearchPlan`` (``generated_by="llm"``).
 
     The search-plan schema is sent as the JSON-schema second argument so the provider can
     constrain its structured output, and the returned text is still validated with
-    ``model_validate_json``. Exactly one schema-repair retry is allowed. ``idea`` is set
-    to the query string to preserve the input provenance, matching ``create_rule_based_plan``.
+    ``model_validate_json``. Exactly one repair is allowed for the whole stage — schema and
+    overlap repairs share the budget — so planning always costs at most two provider calls.
+    ``idea`` is set to the query string to preserve the input provenance, matching
+    ``create_rule_based_plan``.
 
     After schema validation the plan's queries are checked for lexical overlap. When any
-    pair exceeds ``QUERY_OVERLAP_THRESHOLD`` one diversification rewrite is requested; if
-    the rewritten plan still overlaps, the first (original) plan is returned and a warning
-    is logged. Overlap is a quality signal, not a failure, so planning never degrades to
-    the rule-based fallback for this reason.
+    pair exceeds ``QUERY_OVERLAP_THRESHOLD`` and ``enable_overlap_repair`` is set, one
+    diversification rewrite is requested (unless the repair budget is already spent); the
+    rewritten plan is accepted when it no longer exceeds the threshold, or when it strictly
+    improves on the original overlap; otherwise the first (original) plan is returned and a
+    warning is logged. Overlap is a quality signal, not a failure, so planning never
+    degrades to the rule-based fallback for this reason.
     """
-    prompt = build_llm_plan_prompt(query, max_queries)
+    prompt = build_llm_plan_prompt(query)
     schema = SearchPlan.model_json_schema()
+    budgeted = _BudgetedClient(client, 2)
 
     def _normalized_plan(plan: SearchPlan) -> SearchPlan:
         return plan.model_copy(update={"generated_by": "llm", "idea": query})
 
     first = _normalized_plan(
         generate_validated(
-            client,
+            budgeted,
             SearchPlan,
             prompt,
             schema,
@@ -190,13 +231,17 @@ def create_llm_plan(
             repair_prompt=_build_plan_repair_prompt,
         )
     )
-    if max_query_overlap([item.query for item in first.queries]) <= QUERY_OVERLAP_THRESHOLD:
+    if (
+        max_query_overlap([item.query for item in first.queries]) <= QUERY_OVERLAP_THRESHOLD
+        or budgeted.calls >= 2
+        or not enable_overlap_repair
+    ):
         return first
 
     try:
         repaired = _normalized_plan(
             generate_validated(
-                client,
+                budgeted,
                 SearchPlan,
                 _build_overlap_repair_prompt([item.query for item in first.queries], query),
                 schema,
@@ -207,10 +252,14 @@ def create_llm_plan(
     except PlanningError as error:
         logger.warning("Overlap repair failed (%s); keeping the original plan.", error)
         return first
-    if max_query_overlap([item.query for item in repaired.queries]) <= QUERY_OVERLAP_THRESHOLD:
+    first_overlap = max_query_overlap([item.query for item in first.queries])
+    repaired_overlap = max_query_overlap([item.query for item in repaired.queries])
+    if repaired_overlap <= QUERY_OVERLAP_THRESHOLD:
+        return repaired
+    if repaired_overlap < first_overlap:
         return repaired
     logger.warning(
         "Plan queries still overlap after repair (max %.2f); keeping the original plan.",
-        max_query_overlap([item.query for item in repaired.queries]),
+        repaired_overlap,
     )
     return first

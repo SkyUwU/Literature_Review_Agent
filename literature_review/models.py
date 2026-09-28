@@ -31,11 +31,12 @@ class SearchPlan(BaseModel):
     (the LLM and rule-based planners both accept a query-only input). When the
     plan is authored from a bare query, ``idea`` holds that query string so the
     input provenance is preserved; a richer ``ResearchIdea`` is retained for
-    future inputs.
+    future inputs. Sub-queries must be 3-4 short keyword phrases: the schema
+    lower bound keeps plans focused and the upper bound caps per-query cost.
     """
 
     idea: ResearchIdea | str | None = None
-    queries: list[PlannedQuery] = Field(min_length=1, max_length=10)
+    queries: list[PlannedQuery] = Field(min_length=3, max_length=4)
     perspectives: list[str] = Field(min_length=1)
     generated_by: Literal["rule_based", "llm"]
     rationale: str = Field(min_length=20)
