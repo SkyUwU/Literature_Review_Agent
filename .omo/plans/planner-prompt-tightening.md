@@ -225,6 +225,8 @@ Todo 0（預檢）→ Todo 1（schema + rule-based 防護）→ Todo 2（prompt 
   3. STATE.md：現況快照測試數（Todo 4 實測）＋里程碑表加列。
   4. 最終驗收：完整 suite（`.omo/evidence/planner-prompt-tightening-final.log`）、`git status --short`、`git grep -n "AIza"` 無 key 洩漏、prompt 傾印對照。
 
+  > **註記（2026-09-29）**：本計畫執行時的 key check 用 `git grep -n "AIza"`；現行 canonical 檢查為 `git grep -nE "AIza[A-Za-z0-9_-]{20,}|AQ\.[A-Za-z0-9_-]{20,}"`（見 AGENTS.md「Key-leak check」節，里程碑 section-stats 併入）。
+
   **Acceptance**
   - suite 全綠；git status 只含預期檔（models.py/planning.py/test_planning.py/test_main.py/AGENTS/HANDOFF/STATE/.omo/plans/.omo/evidence）；無 key 洩漏；commit 指令一次列齊。
 
