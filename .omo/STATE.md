@@ -5,10 +5,10 @@
 
 ## 現況快照
 
-- 測試 **455 全綠**（2026-09-28 screening prompt 升級收尾複跑，449 → 455）。
-- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出、run-folder-and-policy、venues-by-name、papers-output（`d6d78d9`+`1c00de7`）。
-- **screening-prompt 升級已完成 code/test/docs、待使用者 commit**：計畫 `.omo/plans/screening-prompt-upgrade.md`（引用數＋三層分桶＋全域評判＋輸出要求壓尾；455 tests）。
-- **所有里程碑已完成；下一步＝候選里程碑，動工前先討論**（見「下一步：候選里程碑」與「未動工候選」）。
+- 測試 **462 全綠**（2026-09-28 planner-prompt-tightening 收尾複跑，455 → 462）。
+- 已完成並 commit：M1、M2、M3A-C、M4、M5a-e、M5b/b1、M5c、M6、C2a-e、S1-S5、LLM Input Hygiene、Output Traceability、JSON 輸出、run-folder-and-policy、venues-by-name、papers-output（`d6d78d9`+`1c00de7`）、screening-prompt 升級（`7531aed`+`86f7f68`+`d1b1119`）。
+- **planner-prompt-tightening 已完成 code/test/docs、待使用者 commit**：計畫 `.omo/plans/planner-prompt-tightening.md`（`SearchPlan.queries` 3-4 條、Keyword Length (Strict)、planning 全段 ≤2 LLM calls；462 tests）。
+- **下一步＝section-stats-and-ref-filter（已寫計畫、未動工）**：見「未動工候選」；里程碑順序＝planner-tightening → section-stats 皆在 F4 真實 run 前落地，B（section-aware sampling）以 F4 SD 數據為 gate。
 
 ## 里程碑一覽
 
@@ -39,7 +39,8 @@
 | Run folder & 研究政策 | ✅ | `data/run/` 每跑重建、`YEAR_WINDOW=3` 三年窗、頂會白名單硬濾（`FilterPolicy.venues`）、`--dest-dir/--year-from/--year-to/--venues` |
 | Venues by name | ✅ 已 commit | `--venues` 按會議名對應別名表（`resolve_venues`：key/別名→展開全別名、未知→警告＋raw、`none`→不濾、全未知→警告＋不濾）|
 | Papers output JSON | ✅ `d6d78d9`+`1c00de7` | 真實 run 另寫 `data/outputs/papers_*.json`（完整 Paper metadata＋query＋priority＋路徑＋run 概覽），與 report 同 ts 同資料夾、累積；dry-run 不產檔 |
-| Screening prompt 升級 | ✅ code/test/docs 完成、待 commit | 引用數＋`Category A/B/C`／`Un-bucketed`／`Empty retrieval` 標記＋全域評判準則＋JSON 輸出要求壓尾；`SampledCandidates` 傳 bucket、`main_query` 接主 query；455 tests |
+| Screening prompt 升級 | ✅ `7531aed`+`86f7f68`+`d1b1119` | 引用數＋`Category A/B/C`／`Un-bucketed`／`Empty retrieval` 標記＋全域評判準則＋JSON 輸出要求壓尾；`SampledCandidates` 傳 bucket、`main_query` 接主 query |
+| Planner prompt tightening | ✅ code/test/docs 完成、待 commit | `SearchPlan.queries` 3-4 條（schema 自握上下限）、Keyword Length (Strict) 2-4 關鍵字（含 good/bad 範例）、planning 全段 `_BudgetedClient` ≤2 LLM calls（schema+overlap repair 合計 ≤1）、overlap repair 接受＝≤0.5 或 strict 改善、`create_rule_based_plan max_queries<3 → ValueError`；462 tests（log：`.omo/evidence/planner-prompt-tightening-*.log`） |
 
 ## 下一步：候選里程碑（動工前先討論）
 
@@ -48,6 +49,7 @@
   計畫：`.omo/plans/m5c-semantic-scholar.md`（Todos 已勾）；文件收尾：`.omo/plans/m5c-doc-wrapup.md`。
   F4 續跑指令：`printf 'literature review agent\n' | uv run -m literature_review.main`（需 key1-3 + SS key；下載落點已改 `data/run/`，run 後該資料夾即結果、不需還原）。
 - **候選**：見「未動工候選（動工前討論）」清單；使用者曾提單獨資料夾偏好已成案＝`data/run/` 每跑重建（見其里程碑）。
+- **section-stats-and-ref-filter（計畫已寫、未動工）**：計畫 `.omo/plans/section-stats-and-ref-filter.md`——SD 統計（零 LLM、逐篇＋Aggregate）、references 標題補漏、層 1 缺章節補洞＋層 2 別名表；里程碑 1（planner-tightening）與此皆在 F4 真實 run 前落地；B（section-aware sampling）以 F4 SD 數據為 gate。
 - 環境：`SEMANTIC_SCHOLAR_API_KEY` 已在 WSL `.env`（勿再提醒）。
 
 ## 2026-09-22 討論紀錄（使用者休息前交付；明日提醒）

@@ -53,8 +53,17 @@ Task Connection does not prescribe a concrete protocol. Therefore, the project u
 | `--venues` by conference name | `ranking.py`, `main.py`, `search.py` | Done; alias-table name resolution (`resolve_venues`), `none` disables, unknown names warn+raw token |
 | Papers output JSON | `models.py`, `main.py`, `test_main.py` | Done; non-dry runs also write `data/outputs/papers_*.json` (downloaded-paper list + run overview, shared timestamp with report) |
 | Screening prompt upgrade | `screening.py`, `main.py`, `test_screening.py`, `test_main.py` | Done; citation count + Category A/B/C tiers + global-review guidance + output-last ordering + empty/unbucketed markers |
+| Planner prompt tightening | `models.py`, `planning.py`, `test_planning.py`, `test_main.py` | Done; `SearchPlan.queries` = 3-4 (`min_length=3, max_length=4`), Keyword Length (Strict) 2-4 keywords, planning stage ≤ 2 LLM calls (`_BudgetedClient`), `create_rule_based_plan max_queries<3` → `ValueError` |
 
-The current suite has 455 tests. Do not replace tests with only live API checks.
+The current suite has 462 tests. Do not replace tests with only live API checks.
+
+## Follow-up (2026-09-28): planner prompt tightening + next milestones
+
+- **Planner prompt tightening** (code+test+docs done, awaiting user commit): `SearchPlan.queries` schema now enforces 3-4 short keyword sub-queries (`Keyword Length (Strict)`), and the whole planning stage costs at most 2 LLM calls. None of the legacy/compare paths changed; `SearchPlan.min_length` 1→3 is the only contract change (rule-based returns 4 queries and stays compliant). Details and commit commands: `.omo/plans/planner-prompt-tightening.md`.
+- **Execution deviation (plan-approved, recorded here)**: `tests/test_main.py` also had to be touched — strict fixture tightening made `FakePlanClient(2)` plans invalid, so 6 tests now use `FakePlanClient(3)` / adjusted follow-up payloads / refined `test_target_n_follows_ceil_formula` pairs. The plan's original commit list assumed only `test_planning.py`; the commit now also stages `tests/test_main.py`.
+- **Next planned milestone: `section-stats-and-ref-filter`** (planned, NOT started — user asked to do one part at a time): section/distribution stats (`literature_review/section_stats.py`, zero-LLM), references/bibliography heading round-up (`_REFERENCES_HEADING_REGEX`), layer-1 missing-heading patches, layer-2 alias table. Plan: `.omo/plans/section-stats-and-ref-filter.md`.
+- **Ordering vs F4**: milestones 1 (planner tightening) and 2 (section stats) both land before the F4 real run; milestone 3 (section-aware sampling B) is gated on F4's section-distribution data showing Intro/Abstract dominance — do not start B until that data exists.
+- **Known harmless noise**: `FakePlanClient` angle queries overlap (>0.5), so planning tests log `Plan queries still overlap after repair (max 0.67/0.80)` warnings — expected, overlap repair is exercised on purpose.
 
 ## Important design decisions
 
