@@ -5,17 +5,19 @@ import re
 from literature_review.models import CoveragePackPolicy, EvidenceChunk
 
 _ACKNOWLEDGMENTS_REGEX = re.compile(r"(?i)^[0-9]*\.?\s*acknowledg(?:ements?|ments?)\b")
+# Layer-1 shared heading table for section-aware chunks. Layer-2 alias folding
+# (approach family -> method, etc.) lives in section_stats.canonical_section_name.
 _SECTION_HEADERS: tuple[tuple[str, int, re.Pattern[str]], ...] = (
     ("abstract", 1, re.compile(r"(?i)^[0-9]*\.?\s*abstract\b")),
     ("limitations", 2, re.compile(r"(?i)^[0-9]*\.?\s*limitations?\b")),
     ("future work", 3, re.compile(r"(?i)^[0-9]*\.?\s*future\s+work\b")),
     ("results", 4, re.compile(r"(?i)^[0-9]*\.?\s*results?\b")),
     ("experiments", 5, re.compile(r"(?i)^[0-9]*\.?\s*experiments?\b")),
-    ("evaluation", 6, re.compile(r"(?i)^[0-9]*\.?\s*evaluation\b")),
-    ("method", 7, re.compile(r"(?i)^[0-9]*\.?\s*method(?:ology|s)?\b")),
+    ("evaluation", 6, re.compile(r"(?i)^[0-9]*\.?\s*evaluation(?:s)?\b")),
+    ("method", 7, re.compile(r"(?i)^[0-9]*\.?\s*method(?:ology|ologies|ogies|s)?\b")),
     ("approach", 8, re.compile(r"(?i)^[0-9]*\.?\s*approach\b")),
     ("introduction", 9, re.compile(r"(?i)^[0-9]*\.?\s*introduction\b")),
-    ("conclusion", 10, re.compile(r"(?i)^[0-9]*\.?\s*conclusion\b")),
+    ("conclusion", 10, re.compile(r"(?i)^[0-9]*\.?\s*conclusion(?:s)?\b")),
     ("related work", 11, re.compile(r"(?i)^[0-9]*\.?\s*related\s+work\b")),
     ("background", 11, re.compile(r"(?i)^[0-9]*\.?\s*background\b")),
     ("discussion", 11, re.compile(r"(?i)^[0-9]*\.?\s*discussion\b")),
@@ -29,6 +31,12 @@ _LIMITATION_CUE_REGEX = re.compile(
 _OTHER_PRIORITY = 12
 _APPENDIX_PRIORITY = 13
 _REFERENCES_REGEX = re.compile(r"(?i)^[0-9]*\.?\s*(?:references|bibliography)\b")
+# Heading path only: broadens _REFERENCES_REGEX with common title variants while
+# the legacy text scan (_has_references_header) keeps the narrower _REFERENCES_REGEX.
+_REFERENCES_HEADING_REGEX = re.compile(
+    r"(?i)^[0-9]*\.?\s*(?:references?|references?\s+list|references?\s+cited|"
+    r"literature\s+cited|works\s+cited|bibliography)\b"
+)
 _REFERENCES_PRIORITY = 14  # lowest; lower than appendix(13)
 _NOISE_CLASSES = frozenset({"references", "bibliography", "acknowledgments"})
 
@@ -64,11 +72,15 @@ def classify_chunk(chunk: EvidenceChunk) -> tuple[int, str]:
 
 
 def _classify_heading(heading: str) -> tuple[int, str]:
-    """Match one heading string against the section table, then reference/appendix."""
+    """Match one heading string against the section table, then reference/appendix.
+
+    Headings use the broad alias set (``_REFERENCES_HEADING_REGEX``); the legacy
+    text scan keeps the narrower ``_REFERENCES_REGEX`` (see ``_has_references_header``).
+    """
     for name, priority, pattern in _SECTION_HEADERS:
         if pattern.match(heading):
             return priority, name
-    if _REFERENCES_REGEX.match(heading):
+    if _REFERENCES_HEADING_REGEX.match(heading):
         return _REFERENCES_PRIORITY, "references"
     if _APPENDIX_REGEX.match(heading):
         return _APPENDIX_PRIORITY, "appendix"

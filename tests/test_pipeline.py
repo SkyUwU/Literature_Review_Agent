@@ -344,6 +344,29 @@ class SynthesisPipelineTests(unittest.TestCase):
         self.assertTrue(set(markers).issubset(set(result.claim_chunks)))
         self.assertNotIn("## 材料來源清單", result.report)
 
+    def test_synthesis_pipeline_prints_section_distribution_by_default(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            run_synthesis_pipeline(
+                [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)],
+                "literature review agent",
+                SynthesisFakeClient(),
+                **self.policy_arguments(),
+            )
+
+        self.assertIn("Section distribution across", stdout.getvalue())
+
+    def test_synthesis_pipeline_print_section_distribution_false_is_quiet(self) -> None:
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            run_synthesis_pipeline(
+                [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)],
+                "literature review agent",
+                SynthesisFakeClient(),
+                print_section_distribution=False,
+                **self.policy_arguments(),
+            )
+
+        self.assertEqual(stdout.getvalue(), "")
+
     def test_synthesis_pipeline_same_paper_id(self) -> None:
         with self.assertRaises(ValueError):
             run_synthesis_pipeline(

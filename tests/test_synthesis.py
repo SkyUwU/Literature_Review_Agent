@@ -956,6 +956,31 @@ class SectionClassificationTests(unittest.TestCase):
             with self.subTest(section=section):
                 self.assertEqual(classify_chunk(self._chunk(section)), expected)
 
+    def test_plural_headers_map_to_singular_family(self) -> None:
+        cases = [
+            ("**Paper** > **Conclusions**", (10, "conclusion")),
+            ("**Paper** > **Evaluations**", (6, "evaluation")),
+            ("**Paper** > **Methodologies**", (7, "method")),
+            ("**Paper** > **Methods**", (7, "method")),
+        ]
+        for section, expected in cases:
+            with self.subTest(section=section):
+                self.assertEqual(classify_chunk(self._chunk(section)), expected)
+
+    def test_references_heading_variants_map_to_references(self) -> None:
+        cases = [
+            ("**Paper** > **Reference**", (14, "references")),
+            ("**Paper** > **Reference List**", (14, "references")),
+            ("**Paper** > **References Cited**", (14, "references")),
+            ("**Paper** > **Literature Cited**", (14, "references")),
+            ("**Paper** > **Works Cited**", (14, "references")),
+            ("**Paper** > **References**", (14, "references")),
+            ("**Paper** > **Bibliography**", (14, "references")),
+        ]
+        for section, expected in cases:
+            with self.subTest(section=section):
+                self.assertEqual(classify_chunk(self._chunk(section)), expected)
+
     def test_unrecognized_section_falls_to_other(self) -> None:
         self.assertEqual(
             classify_chunk(self._chunk("**Paper** > **12 Case Studies**")),
@@ -995,6 +1020,19 @@ class DropNoiseSectionsTests(unittest.TestCase):
         kept = drop_noise_sections(chunks)
 
         self.assertEqual([chunk.paper_id for chunk in kept], ["p1"])
+
+    def test_drops_references_heading_variants(self) -> None:
+        chunks = [
+            self._chunk("p1", "**Paper** > **References Cited**"),
+            self._chunk("p2", "**Paper** > **Literature Cited**"),
+            self._chunk("p3", "**Paper** > **Works Cited**"),
+            self._chunk("p4", "**Paper** > **Reference List**"),
+            self._chunk("p5", "**Paper** > **1 Introduction**"),
+        ]
+
+        kept = drop_noise_sections(chunks)
+
+        self.assertEqual([chunk.paper_id for chunk in kept], ["p5"])
 
     def test_keeps_all_core_and_other_sections(self) -> None:
         chunks = [

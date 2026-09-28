@@ -37,6 +37,7 @@ from literature_review.models import (
     PaperSummary,
     SynthesisResponse,
 )
+from literature_review.section_stats import print_section_distribution as _print_section_distribution
 from literature_review.synthesis import (
     SynthesisError,
     build_coverage_packs,
@@ -178,6 +179,7 @@ def run_synthesis_pipeline(
     paper_titles: dict[str, str] | None = None,
     paper_queries: dict[str, str] | None = None,
     follow_up_queries: set[str] | None = None,
+    print_section_distribution: bool = True,
 ) -> SynthesisResponse:
     """Run section-aware chunking, per-paper functional scoring, notes, and cited synthesis.
 
@@ -202,6 +204,9 @@ def run_synthesis_pipeline(
     omitted, ``client`` serves the report too, and the report prose is kept
     pure: consumers assemble the 材料來源清單 (materials list) themselves from
     the resolved sources / summaries via ``render_materials_section``.
+    ``print_section_distribution`` prints the sampled-chunk section distribution
+    (SD) to stdout after per-paper sampling; it is a print switch, not a data
+    contract (nothing is stored in ``PapersOutput.run``).
     """
     effective_functional_policy = functional_policy or FunctionalScoringPolicy()
     prepared = _prepare_documents(
@@ -222,6 +227,8 @@ def run_synthesis_pipeline(
         paper_titles=paper_titles,
     )
     sampled_flat = [chunk for chunks in sampled.values() for chunk in chunks]
+    if print_section_distribution and sampled:
+        _print_section_distribution(sampled, paper_titles=paper_titles)
     functional_assessments = score_chunks_functionally(
         query,
         sampled_flat,
