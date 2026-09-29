@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -55,10 +56,20 @@ def build_search_url(request: SearchRequest) -> str:
 
 
 def fetch_json(url: str) -> dict[str, Any]:
-    """Fetch JSON with a timeout and turn network failures into domain errors."""
+    """Fetch JSON with a timeout and turn network failures into domain errors.
+
+    When ``OPENALEX_API_KEY`` is set in the environment, it is sent as a bearer
+    token so OpenAlex uses the caller's dedicated daily budget instead of the
+    anonymous shared pool (the 2026 error message explicitly recommends a free
+    API key for uninterrupted access). The key stays out of the URL and logs.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    api_key = os.environ.get("OPENALEX_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     for attempt in range(3):
         try:
-            request = Request(url, headers={"User-Agent": USER_AGENT})
+            request = Request(url, headers=headers)
             with urlopen(request, timeout=20) as response:  # noqa: S310 - fixed HTTPS provider URL
                 return json.load(response)
         except HTTPError as error:

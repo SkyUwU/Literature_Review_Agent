@@ -913,6 +913,26 @@ class MainEntryTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_make_plan_warns_and_falls_back_when_llm_plan_fails(self) -> None:
+        """A failing LLM planner must warn on stderr and fall back to rule-based."""
+        plan = create_rule_based_plan("literature review agent")
+
+        class FailingClient:
+            def generate_json(self, prompt, schema=None):
+                raise RuntimeError("gemini overloaded")
+
+        with contextlib.redirect_stderr(io.StringIO()) as stderr:
+            result = main_module._make_plan(
+                "literature review agent",
+                use_llm_plan=True,
+                client_plan=FailingClient(),
+            )
+
+        self.assertEqual(result.generated_by, "rule_based")
+        self.assertIn("LLM plan unavailable, falling back to rule-based plan", stderr.getvalue())
+        self.assertIn("gemini overloaded", stderr.getvalue())
+        self.assertEqual(result, plan)
+
     def test_main_dry_run_forces_rule_based(self) -> None:
         plan = create_rule_based_plan("literature review agent")
         fake_result = {"plan": plan, "downloads": [], "stats_per_query": [], "dry_run": True}

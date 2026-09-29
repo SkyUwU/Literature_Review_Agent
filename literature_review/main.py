@@ -108,9 +108,11 @@ def _make_plan(
     if use_llm_plan and client_plan is not None:
         try:
             return create_llm_plan(query, client_plan)
-        except Exception:
-            # fall through to the deterministic rule-based plan
-            pass
+        except Exception as error:
+            print(
+                f"LLM plan unavailable, falling back to rule-based plan: {error}",
+                file=sys.stderr,
+            )
     return create_rule_based_plan(query)
 
 

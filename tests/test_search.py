@@ -1,3 +1,5 @@
+import json
+import os
 import sys
 import unittest
 from urllib.parse import parse_qs, urlparse
@@ -12,6 +14,42 @@ from literature_review.models import (
 )
 from literature_review.ranking import default_venues
 from literature_review.search import build_search_url, norm_doi, search_papers
+
+
+class FetchJsonTests(unittest.TestCase):
+    def test_fetch_json_sends_bearer_token_when_openalex_key_set(self) -> None:
+        payload = {"meta": {"count": 0}, "results": []}
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps(payload).encode()
+
+        opener = mock.MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+
+        with mock.patch.dict(
+            os.environ, {"OPENALEX_API_KEY": "the-openalex-key"}
+        ), mock.patch("literature_review.search.urlopen", opener.open):
+            result = search_module.fetch_json("https://api.openalex.org/works?per-page=1")
+
+        self.assertEqual(result, payload)
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.headers["Authorization"], "Bearer the-openalex-key")
+        self.assertNotIn("OPENALEX_API_KEY", request.full_url)
+
+    def test_fetch_json_omits_bearer_token_without_key(self) -> None:
+        payload = {"meta": {"count": 0}, "results": []}
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps(payload).encode()
+
+        opener = mock.MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            "literature_review.search.urlopen", opener.open
+        ):
+            search_module.fetch_json("https://api.openalex.org/works?per-page=1")
+
+        request = opener.open.call_args.args[0]
+        self.assertIsNone(request.headers.get("Authorization"))
 
 
 class SearchTests(unittest.TestCase):
