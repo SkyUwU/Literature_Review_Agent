@@ -16,6 +16,7 @@ from unittest import mock
 
 import literature_review.main as main_module
 from literature_review.embedding_retriever import QUERY_PREFIX
+from literature_review.llm_evidence import DailyQuotaExhausted, LlmServiceError
 from literature_review.main import TOTAL_TARGET, run_end_to_end
 from literature_review.models import (
     ChunkReference,
@@ -155,6 +156,22 @@ class MaybeFirstScreenClient(FakeScreenClient):
         return json.dumps(payload)
 
 
+class QuotaScreenClient:
+    """Screening client that fails like an exhausted key, on the main or gap call."""
+
+    def __init__(self, error: Exception, *, fail_on: str = "main") -> None:
+        self.error = error
+        self.fail_on = fail_on
+        self.calls: list[str] = []
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        self.calls.append(prompt)
+        is_main_call = len(self.calls) == 1
+        if (self.fail_on == "main") == is_main_call:
+            raise self.error
+        return FakeScreenClient().generate_json(prompt, schema)
+
+
 class SpecialAlignedEncoder:
     """Fake encoder aligning the BGE-prefixed query with the W-special paper."""
 
@@ -274,6 +291,13 @@ class MainEntryTests(unittest.TestCase):
         self._tmp = TemporaryDirectory()
         self.dest = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
+        # The real notes pacing is 13s per paper (the free-tier 5 RPM ceiling);
+        # these end-to-end tests must not spend that in wall clock.
+        pacing = mock.patch(
+            "literature_review.pipeline._notes_pacing_seconds", return_value=0.0
+        )
+        pacing.start()
+        self.addCleanup(pacing.stop)
 
     # -- scenario 1: shared set deduplicates across queries ------------------
 
@@ -735,6 +759,162 @@ class MainEntryTests(unittest.TestCase):
         )
         self.assertIsNotNone(result["screening"])
         self.assertEqual(len(result["report"].paper_sources), 4)
+
+    # -- degradation: a screening key that is out of quota must not kill the run
+
+    def _degraded_run(
+        self,
+        screen_client,
+        payloads: list[dict[str, object]],
+        synth_client: SynthesisFakeClient,
+    ) -> tuple[dict[str, object], FakeJsonFetcher]:
+        fetcher = FakeJsonFetcher(payloads)
+        with mock.patch("literature_review.extraction.PdfReader", FakePdfReader):
+            with mock.patch(
+                "literature_review.embedding_retriever.default_encoder",
+                return_value=FakeEncoder(),
+            ):
+                result = run_end_to_end(
+                    "literature review agent",
+                    dest_dir=self.dest,
+                    client_plan=FakePlanClient(3),
+                    client_synth=synth_client,
+                    client_screen=screen_client,
+                    use_llm_plan=True,
+                    dry_run=False,
+                    json_fetcher=fetcher,
+                    pdf_fetcher=pdf_bytes,
+                )
+        return result, fetcher
+
+    def test_screening_daily_quota_downloads_the_retrieved_candidates(self) -> None:
+        payloads = [
+            results_payload(record_for("W1"), record_for("W2")),
+            results_payload(record_for("W3")),
+            results_payload(),
+        ]
+        result, fetcher = self._degraded_run(
+            QuotaScreenClient(DailyQuotaExhausted("429 Limit: 20 requests per day")),
+            payloads,
+            SynthesisFakeClient(("W1", "W2", "W3")),
+        )
+        self.assertIsNone(result["screening"])
+        self.assertEqual(result["follow_ups"], [])
+        # three planned queries, three searches: the degraded path reuses the
+        # candidates it already retrieved instead of searching them again
+        self.assertEqual(len(fetcher.calls), 3)
+        self.assertEqual(
+            {entry["paper_id"] for entry in result["downloads"]},
+            {"W1", "W2", "W3"},
+        )
+        self.assertEqual(len(result["report"].paper_sources), 3)
+        self.assertEqual(
+            [entry.priority for entry in result["papers"].papers], [None, None, None]
+        )
+
+    def test_screening_service_error_also_degrades(self) -> None:
+        payloads = [
+            results_payload(record_for("W1"), record_for("W2")),
+            results_payload(record_for("W3")),
+            results_payload(),
+        ]
+        result, _ = self._degraded_run(
+            QuotaScreenClient(LlmServiceError("503 The model is overloaded")),
+            payloads,
+            SynthesisFakeClient(("W1", "W2", "W3")),
+        )
+        self.assertIsNone(result["screening"])
+        self.assertEqual(
+            {entry["paper_id"] for entry in result["downloads"]},
+            {"W1", "W2", "W3"},
+        )
+
+    def test_failed_gap_round_keeps_the_main_screening_decisions(self) -> None:
+        screen_client = QuotaScreenClient(
+            DailyQuotaExhausted("429 Limit: 20 requests per day"), fail_on="follow_up"
+        )
+        screen_client.follow_up_query = "literature review agent benchmark"
+        payloads = [
+            results_payload(record_for("W1"), record_for("W2")),
+            results_payload(record_for("W3")),
+            results_payload(),
+            results_payload(record_for("W4")),  # answered for the follow-up query
+        ]
+        result, _ = self._degraded_run(
+            screen_client, payloads, SynthesisFakeClient(("W1", "W2", "W3"))
+        )
+        self.assertIsNotNone(result["screening"])
+        self.assertEqual(
+            {entry["paper_id"] for entry in result["downloads"]},
+            {"W1", "W2", "W3"},
+        )
+        # the merged keep pass still uses one download call, not the per-query split
+        self.assertEqual(len(result["stats_per_query"]), 1)
+
+    def test_key_env_name_maps_the_unsuffixed_key(self) -> None:
+        self.assertEqual(main_module.key_env_name(1), "GEMINI_API_KEY")
+        for suffix in (2, 3, 4):
+            self.assertEqual(
+                main_module.key_env_name(suffix), f"GEMINI_API_KEY_{suffix}"
+            )
+
+    def test_build_clients_plan_key_selects_the_suffixed_key(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GEMINI_API_KEY": "AIza000",
+                "GEMINI_API_KEY_2": "AIza000",
+                "GEMINI_API_KEY_3": "AIza000",
+                "GEMINI_API_KEY_4": "AIza000_4",
+                "OLLAMA_BASE_URL": "",
+            },
+            clear=False,
+        ):
+            with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
+                main_module._build_clients(
+                    argparse.Namespace(rule_based=False, dry_run=False, plan_key=4)
+                )
+        labels = [call.kwargs.get("label") for call in client_cls.call_args_list]
+        keys = [call.kwargs.get("api_key") for call in client_cls.call_args_list]
+        self.assertEqual(keys[0], "AIza000_4")
+        self.assertEqual(labels, ["plan+screening", "notes+scoring", "report"])
+
+    def test_build_clients_missing_selected_notes_key_exits(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GEMINI_API_KEY": "AIza000",
+                "GEMINI_API_KEY_2": "",
+                "GEMINI_API_KEY_3": "AIza000",
+                "GEMINI_API_KEY_5": "",
+                "OLLAMA_BASE_URL": "",
+            },
+            clear=False,
+        ):
+            with mock.patch("literature_review.main.GeminiJsonClient"):
+                with self.assertRaises(SystemExit) as ctx:
+                    main_module._build_clients(
+                        argparse.Namespace(rule_based=False, dry_run=False, notes_key=5)
+                    )
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_build_clients_default_suffixes_need_no_new_attributes(self) -> None:
+        """Existing callers pass only rule_based/dry_run; the suffixes must default."""
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GEMINI_API_KEY": "AIza000",
+                "GEMINI_API_KEY_2": "AIza000",
+                "GEMINI_API_KEY_3": "AIza000",
+                "OLLAMA_BASE_URL": "",
+            },
+            clear=False,
+        ):
+            with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
+                main_module._build_clients(
+                    argparse.Namespace(rule_based=False, dry_run=False)
+                )
+        self.assertEqual(client_cls.call_count, 3)
 
     # -- failure path: every bad PDF aborts cleanly --------------------------
 

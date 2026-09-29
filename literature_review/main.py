@@ -26,6 +26,7 @@ import os
 import shutil
 import sys
 import time
+from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -35,9 +36,11 @@ from literature_review import embedding_retriever
 from literature_review.embedding_retriever import Encoder
 from literature_review.extraction import extract_pdf_text
 from literature_review.llm_evidence import (
+    DailyQuotaExhausted,
     GeminiJsonClient,
     JsonGenerationClient,
     LlmEvidenceError,
+    LlmServiceError,
     load_local_env,
 )
 from literature_review.ollama_client import OllamaJsonClient
@@ -310,6 +313,12 @@ def run_end_to_end(
     ``TOTAL_TARGET`` (keep downloaded entirely, maybe fills the remainder). With
     ``dry_run`` (or a missing screen client) screening is skipped and the legacy
     per-query download path runs unchanged.
+
+    A quota or provider failure during screening degrades instead of aborting:
+    a failed main screening call downloads the candidates it already retrieved
+    (no second search, since re-searching would spend quota the run does not
+    need) and leaves ``screening`` as ``None``; a failed gap follow-up call only
+    drops the follow-up queries and keeps the decisions already made.
     """
     plan = _make_plan(query, use_llm_plan=use_llm_plan, client_plan=client_plan)
     _print_plan(plan)
@@ -333,124 +342,18 @@ def run_end_to_end(
     downloaded_papers: dict[str, Paper] = {}
     paper_priority: dict[str, str] = {}
 
-    if use_screening:
-        query_candidates: dict[str, SampledCandidates] = {}
-        for planned in plan.queries:
-            query_candidates[planned.query] = sample_candidates(
-                _search_and_rank(
-                    planned.query,
-                    json_fetcher=json_fetcher,
-                    encoder=effective_encoder,
-                    paper_meta=paper_meta,
-                    ss_api_key=ss_api_key,
-                    year_from=year_from,
-                    year_to=year_to,
-                    venues=venues,
-                )
-            )
-        screening_result = screen_candidates(query_candidates, client_screen, main_query=query)
-        follow_up_queries = {
-            fu.query for fu in screening_result.gap.follow_up_queries
-        }
+    def _download_per_query(
+        produce: Callable[[], Iterator[tuple[str, list[RankedPaper]]]],
+    ) -> None:
+        """Download each ``(query, ranked)`` group against its own share of the target.
 
-        follow_up_candidates: dict[str, SampledCandidates] = {}
-        if screening_result.gap.follow_up_queries:
-            for fu in screening_result.gap.follow_up_queries:
-                follow_ups.append(
-                    {
-                        "query": fu.query,
-                        "target_gap": fu.target_gap,
-                        "reason": fu.reason,
-                    }
-                )
-                follow_up_candidates[fu.query] = sample_candidates(
-                    _search_and_rank(
-                        fu.query,
-                        json_fetcher=json_fetcher,
-                        encoder=effective_encoder,
-                        paper_meta=paper_meta,
-                        year_from=year_from,
-                        year_to=year_to,
-                        venues=venues,
-                    )
-                )
-            follow_up_screening = screen_candidates(follow_up_candidates, client_screen, main_query=query)
-            for query, decisions in follow_up_screening.decisions.items():
-                screening_result.decisions.setdefault(query, []).extend(decisions)
-
-        ranked_by_id: dict[str, RankedPaper] = {}
-        for sampled in query_candidates.values():
-            for item in sampled.papers:
-                ranked_by_id.setdefault(item.paper.paper_id, item)
-        for sampled in follow_up_candidates.values():
-            for item in sampled.papers:
-                ranked_by_id.setdefault(item.paper.paper_id, item)
-        paper_titles = {
-            paper_id: item.paper.title for paper_id, item in ranked_by_id.items()
-        }
-        # 追蹤 paper_id → 下載來源 query:後寫入者(follow-up)優先,供配額分組用
-        for query_text, decisions in screening_result.decisions.items():
-            for decision in decisions:
-                paper_queries[decision.paper_id] = query_text
-
-        keep_ranked: list[RankedPaper] = []
-        maybe_ranked: list[RankedPaper] = []
-        seen_paper_ids: set[str] = set()
-        for decisions in screening_result.decisions.values():
-            for decision in decisions:
-                if decision.paper_id in seen_paper_ids:
-                    continue
-                item = ranked_by_id.get(decision.paper_id)
-                if item is None:
-                    # defensive: screening decisions resolve from the same pool
-                    continue
-                seen_paper_ids.add(decision.paper_id)
-                if decision.priority == "keep":
-                    keep_ranked.append(item)
-                elif decision.priority == "maybe":
-                    maybe_ranked.append(item)
-        paper_priority = {
-            item.paper.paper_id: "keep" for item in keep_ranked
-        } | {item.paper.paper_id: "maybe" for item in maybe_ranked}
-
-        result = download_and_backfill(
-            [],
-            dest_dir,
-            TOTAL_TARGET,
-            fetcher=fetcher,
-            already_downloaded=already_downloaded,
-            priority_groups={"keep": keep_ranked, "maybe": maybe_ranked},
-        )
-        stats_per_query.append(result.stats.to_dict())
-        downloaded_ids = set(result.downloaded_paper_ids)
-        paper_queries = {
-            paper_id: query
-            for paper_id, query in paper_queries.items()
-            if paper_id in downloaded_ids
-        }
-        downloads.extend(
-            {"paper_id": paper_id, "path": str(path)}
-            for paper_id, path in zip(
-                result.downloaded_paper_ids, result.downloaded_paths, strict=False
-            )
-        )
-        for paper_id in result.downloaded_paper_ids:
-            item = ranked_by_id.get(paper_id)
-            if item is not None:
-                downloaded_papers[paper_id] = item.paper
-    else:
+        ``produce`` is a generator, so the legacy path can search query N+1 only
+        after query N has been downloaded and keep its original interleaving,
+        while the degraded screening path yields the candidates it has already
+        retrieved instead of searching them a second time.
+        """
         target_n = math.ceil(TOTAL_TARGET / len(plan.queries))
-        for planned in plan.queries:
-            ranked_papers = _search_and_rank(
-                planned.query,
-                json_fetcher=json_fetcher,
-                encoder=effective_encoder,
-                paper_meta=paper_meta,
-                ss_api_key=ss_api_key,
-                year_from=year_from,
-                year_to=year_to,
-                venues=venues,
-            )
+        for query_text, ranked_papers in produce():
             result = download_and_backfill(
                 ranked_papers,
                 dest_dir,
@@ -460,7 +363,7 @@ def run_end_to_end(
             )
             stats_per_query.append(result.stats.to_dict())
             for paper_id in result.downloaded_paper_ids:
-                paper_queries[paper_id] = planned.query
+                paper_queries[paper_id] = query_text
             for item in ranked_papers:
                 paper_titles.setdefault(item.paper.paper_id, item.paper.title)
             downloads.extend(
@@ -476,6 +379,161 @@ def run_end_to_end(
                 paper = papers_by_id.get(paper_id)
                 if paper is not None:
                     downloaded_papers.setdefault(paper_id, paper)
+
+    if use_screening:
+        query_candidates: dict[str, SampledCandidates] = {}
+        for planned in plan.queries:
+            query_candidates[planned.query] = sample_candidates(
+                _search_and_rank(
+                    planned.query,
+                    json_fetcher=json_fetcher,
+                    encoder=effective_encoder,
+                    paper_meta=paper_meta,
+                    ss_api_key=ss_api_key,
+                    year_from=year_from,
+                    year_to=year_to,
+                    venues=venues,
+                )
+            )
+        try:
+            screening_result = screen_candidates(query_candidates, client_screen, main_query=query)
+        except (DailyQuotaExhausted, LlmServiceError) as error:
+            # The screening key is out of quota (429) or the provider is
+            # overloaded (503). Retrying would spend more of the daily budget
+            # for nothing, so the run degrades to a plain rank-based download of
+            # the candidates already retrieved — searching them again would
+            # spend search quota the run does not need. screening_result stays
+            # None, so the output records that no screening happened.
+            print(
+                f"Screening skipped ({type(error).__name__}: {error}); downloading the "
+                "already-retrieved candidates without screening.",
+                file=sys.stderr,
+            )
+            _download_per_query(
+                lambda: (
+                    (query_text, sampled.papers)
+                    for query_text, sampled in query_candidates.items()
+                )
+            )
+        else:
+            follow_up_queries = {
+                fu.query for fu in screening_result.gap.follow_up_queries
+            }
+
+            follow_up_candidates: dict[str, SampledCandidates] = {}
+            if screening_result.gap.follow_up_queries:
+                for fu in screening_result.gap.follow_up_queries:
+                    follow_ups.append(
+                        {
+                            "query": fu.query,
+                            "target_gap": fu.target_gap,
+                            "reason": fu.reason,
+                        }
+                    )
+                    follow_up_candidates[fu.query] = sample_candidates(
+                        _search_and_rank(
+                            fu.query,
+                            json_fetcher=json_fetcher,
+                            encoder=effective_encoder,
+                            paper_meta=paper_meta,
+                            year_from=year_from,
+                            year_to=year_to,
+                            venues=venues,
+                        )
+                    )
+                try:
+                    follow_up_screening = screen_candidates(
+                        follow_up_candidates, client_screen, main_query=query
+                    )
+                except (DailyQuotaExhausted, LlmServiceError) as error:
+                    # The main screening already succeeded, so a failed gap round
+                    # only costs the follow-up queries — the keep/maybe decisions
+                    # collected so far stay valid and the run continues.
+                    print(
+                        f"Gap follow-up screening skipped ({type(error).__name__}: {error}); "
+                        "keeping the decisions from the main screening round.",
+                        file=sys.stderr,
+                    )
+                else:
+                    for query, decisions in follow_up_screening.decisions.items():
+                        screening_result.decisions.setdefault(query, []).extend(decisions)
+
+            ranked_by_id: dict[str, RankedPaper] = {}
+            for sampled in query_candidates.values():
+                for item in sampled.papers:
+                    ranked_by_id.setdefault(item.paper.paper_id, item)
+            for sampled in follow_up_candidates.values():
+                for item in sampled.papers:
+                    ranked_by_id.setdefault(item.paper.paper_id, item)
+            paper_titles = {
+                paper_id: item.paper.title for paper_id, item in ranked_by_id.items()
+            }
+            # 追蹤 paper_id → 下載來源 query:後寫入者(follow-up)優先,供配額分組用
+            for query_text, decisions in screening_result.decisions.items():
+                for decision in decisions:
+                    paper_queries[decision.paper_id] = query_text
+
+            keep_ranked: list[RankedPaper] = []
+            maybe_ranked: list[RankedPaper] = []
+            seen_paper_ids: set[str] = set()
+            for decisions in screening_result.decisions.values():
+                for decision in decisions:
+                    if decision.paper_id in seen_paper_ids:
+                        continue
+                    item = ranked_by_id.get(decision.paper_id)
+                    if item is None:
+                        # defensive: screening decisions resolve from the same pool
+                        continue
+                    seen_paper_ids.add(decision.paper_id)
+                    if decision.priority == "keep":
+                        keep_ranked.append(item)
+                    elif decision.priority == "maybe":
+                        maybe_ranked.append(item)
+            paper_priority = {
+                item.paper.paper_id: "keep" for item in keep_ranked
+            } | {item.paper.paper_id: "maybe" for item in maybe_ranked}
+
+            result = download_and_backfill(
+                [],
+                dest_dir,
+                TOTAL_TARGET,
+                fetcher=fetcher,
+                already_downloaded=already_downloaded,
+                priority_groups={"keep": keep_ranked, "maybe": maybe_ranked},
+            )
+            stats_per_query.append(result.stats.to_dict())
+            downloaded_ids = set(result.downloaded_paper_ids)
+            paper_queries = {
+                paper_id: query
+                for paper_id, query in paper_queries.items()
+                if paper_id in downloaded_ids
+            }
+            downloads.extend(
+                {"paper_id": paper_id, "path": str(path)}
+                for paper_id, path in zip(
+                    result.downloaded_paper_ids, result.downloaded_paths, strict=False
+                )
+            )
+            for paper_id in result.downloaded_paper_ids:
+                item = ranked_by_id.get(paper_id)
+                if item is not None:
+                    downloaded_papers[paper_id] = item.paper
+    else:
+
+        def _search_then_download() -> Iterator[tuple[str, list[RankedPaper]]]:
+            for planned in plan.queries:
+                yield planned.query, _search_and_rank(
+                    planned.query,
+                    json_fetcher=json_fetcher,
+                    encoder=effective_encoder,
+                    paper_meta=paper_meta,
+                    ss_api_key=ss_api_key,
+                    year_from=year_from,
+                    year_to=year_to,
+                    venues=venues,
+                )
+
+        _download_per_query(_search_then_download)
 
     if dry_run:
         papers_output = _make_papers_output(
@@ -606,6 +664,16 @@ def _make_papers_output(
     )
 
 
+def key_env_name(suffix: int) -> str:
+    """Map a key suffix to its environment variable name.
+
+    ``1`` is the original unsuffixed ``GEMINI_API_KEY``; every other suffix uses
+    the ``GEMINI_API_KEY_<N>`` convention already used by key2 / key3 and by
+    ``pairwise_eval --api-key-suffix``.
+    """
+    return "GEMINI_API_KEY" if suffix == 1 else f"GEMINI_API_KEY_{suffix}"
+
+
 def _build_clients(
     arguments: argparse.Namespace,
 ) -> tuple[
@@ -622,10 +690,15 @@ def _build_clients(
     clients load the env from their constructor already.
 
     The LLM planner is the default for a full run; it is skipped on ``--dry-run``
-    (zero keys) and on ``--rule-based`` (escape hatch). A missing ``GEMINI_API_KEY``
+    (zero keys) and on ``--rule-based`` (escape hatch). A missing planner key
     prints a warning and keeps ``client_plan`` as ``None``, letting
     :func:`_make_plan` fall back to the deterministic rule-based plan without
     aborting the run. ``--dry-run`` never inspects any key.
+
+    ``--plan-key`` / ``--notes-key`` / ``--report-key`` select which numbered key
+    each stage uses (see :func:`key_env_name`), so a stage can move to a fresh
+    key when the current one is exhausted. The planning and screening stages
+    share the planner key, since the screening client is that same client.
 
     ``client_rcs`` is built from the local Ollama endpoint when ``OLLAMA_BASE_URL``
     is configured (M6); when it is missing the client stays ``None`` and the RCS
@@ -633,26 +706,32 @@ def _build_clients(
     ``client_report`` (C2c) uses the dedicated ``GEMINI_API_KEY_3``: a full run
     without it exits with code 1 (the report has no fallback, mirroring key2).
     """
+    plan_suffix = getattr(arguments, "plan_key", 1)
+    notes_suffix = getattr(arguments, "notes_key", 2)
+    report_suffix = getattr(arguments, "report_key", 3)
     if not arguments.dry_run:
         load_local_env()
     client_plan: JsonGenerationClient | None = None
     if not arguments.dry_run and not arguments.rule_based:
-        api_key_1 = os.getenv("GEMINI_API_KEY")
+        api_key_1 = os.getenv(key_env_name(plan_suffix))
         if api_key_1:
             try:
-                client_plan = GeminiJsonClient(api_key=api_key_1)
+                client_plan = GeminiJsonClient(api_key=api_key_1, label="plan+screening")
             except LlmEvidenceError as error:
                 print(f"LLM plan unavailable, falling back to rule-based plan: {error}", file=sys.stderr)
                 client_plan = None
         else:
-            print("GEMINI_API_KEY 未設定：改用 rule-based 搜尋計畫（逃生門）", file=sys.stderr)
+            print(
+                f"{key_env_name(plan_suffix)} 未設定：改用 rule-based 搜尋計畫（逃生門）",
+                file=sys.stderr,
+            )
     client_synth: JsonGenerationClient | None = None
     if not arguments.dry_run:
-        api_key_2 = os.getenv("GEMINI_API_KEY_2")
+        api_key_2 = os.getenv(key_env_name(notes_suffix))
         if not api_key_2:
-            print("請在 .env 設定 GEMINI_API_KEY_2", file=sys.stderr)
+            print(f"請在 .env 設定 {key_env_name(notes_suffix)}", file=sys.stderr)
             raise SystemExit(1)
-        client_synth = GeminiJsonClient(api_key=api_key_2)
+        client_synth = GeminiJsonClient(api_key=api_key_2, label="notes+scoring")
     client_rcs: JsonGenerationClient | None = None
     if not arguments.dry_run:
         if os.getenv("OLLAMA_BASE_URL"):
@@ -663,11 +742,11 @@ def _build_clients(
                 client_rcs = None
     client_report: JsonGenerationClient | None = None
     if not arguments.dry_run:
-        api_key_3 = os.getenv("GEMINI_API_KEY_3")
+        api_key_3 = os.getenv(key_env_name(report_suffix))
         if not api_key_3:
-            print("請在 .env 設定 GEMINI_API_KEY_3", file=sys.stderr)
+            print(f"請在 .env 設定 {key_env_name(report_suffix)}", file=sys.stderr)
             raise SystemExit(1)
-        client_report = GeminiJsonClient(api_key=api_key_3)
+        client_report = GeminiJsonClient(api_key=api_key_3, label="report")
     return client_plan, client_synth, client_rcs, client_report
 
 
@@ -754,6 +833,27 @@ def main() -> None:
     parser.add_argument(
         "--venues",
         help="Comma-separated top venues by name (matches the built-in 17-conference list by key or alias and expands its aliases; unrecognized names filter as raw substrings with a warning); 'none' or an empty string disables the filter; default is all built-in top venues",
+    )
+    parser.add_argument(
+        "--plan-key",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Key suffix for the planner and the screening stage (1=GEMINI_API_KEY, 4=GEMINI_API_KEY_4); use a fresh key when the current one is quota-exhausted",
+    )
+    parser.add_argument(
+        "--notes-key",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Key suffix for the functional scoring and per-paper notes stage (default 2)",
+    )
+    parser.add_argument(
+        "--report-key",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Key suffix for the synthesis report stage (default 3)",
     )
     arguments = parser.parse_args()
 

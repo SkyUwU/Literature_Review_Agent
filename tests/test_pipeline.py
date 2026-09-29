@@ -454,3 +454,15 @@ class SynthesisPipelineTests(unittest.TestCase):
                     **self.policy_arguments(),
                 )
             sleep.assert_called_once_with(2.5)
+
+    def test_notes_pacing_default_respects_the_free_tier_ceiling(self) -> None:
+        """The default gap must cover 5 requests per minute (12s), not the old 4s."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch("literature_review.pipeline.time.sleep") as sleep:
+                run_synthesis_pipeline(
+                    [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)],
+                    "literature review agent",
+                    SynthesisFakeClient(),
+                    **self.policy_arguments(),
+                )
+            sleep.assert_called_once_with(13.0)

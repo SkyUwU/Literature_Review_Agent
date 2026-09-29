@@ -1,7 +1,11 @@
 """LLM-based contextual summaries for a bounded set of retrieved evidence chunks."""
 
+import hashlib
 import json
 import os
+import re
+import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -20,6 +24,15 @@ from langfuse import observe
 
 RCS_BATCH_SIZE = 4
 
+# Gemini free tier (gemini-3.6-flash): 5 requests per minute, 20 per day. Both
+# are overridable per environment; 0 disables the corresponding local guard.
+DEFAULT_REQUESTS_PER_MINUTE = 5
+DEFAULT_REQUESTS_PER_DAY = 20
+DEFAULT_429_RETRIES = 1
+# One second of slack on top of 60/rpm so a request never lands exactly on the
+# provider's own per-minute boundary.
+PACE_SLACK_SECONDS = 1.0
+
 
 class LlmEvidenceError(RuntimeError):
     """Raised for missing configuration or invalid model output."""
@@ -27,6 +40,25 @@ class LlmEvidenceError(RuntimeError):
 
 class LlmOutputSyntaxError(LlmEvidenceError):
     """Raised when a model response is not syntactically valid JSON."""
+
+
+class LlmServiceError(LlmEvidenceError):
+    """Raised for a provider-side 5xx (overloaded / unavailable).
+
+    The free tier answers a load burst with HTTP 503, which is transient but not
+    retryable within a run: retrying only burns the daily budget, so the caller
+    stops the stage and degrades instead.
+    """
+
+
+class DailyQuotaExhausted(LlmEvidenceError):
+    """Raised when a provider limit makes the request pointless to retry.
+
+    Covers the 429 "N requests per day" ceiling, any other 429 without a usable
+    ``retry in Ns`` hint, and a per-minute 429 whose hint did not clear the
+    condition within the retry budget. A rejected request still counts against
+    the provider quota, so retrying further would only spend more of it.
+    """
 
 
 class JsonGenerationClient(Protocol):
@@ -37,9 +69,27 @@ class JsonGenerationClient(Protocol):
 
 
 class GeminiJsonClient:
-    """Google Gemini implementation; the key comes from ``api_key`` or the environment."""
+    """Google Gemini implementation; the key comes from ``api_key`` or the environment.
 
-    def __init__(self, model: str = "gemini-3.6-flash", api_key: str | None = None) -> None:
+    Every call passes through a per-key :class:`_RateTracker`, so one run cannot
+    outpace the provider's per-minute ceiling or its daily one, and each call is
+    logged to stderr as ``[llm] label=... calls=n/m`` to make a real run's key
+    spend measurable (the previous runs left logs with no trace of how many
+    requests were issued).
+
+    Pacing is **per key**, so the notes key and the report key never wait on
+    each other; a full run with many batches therefore grows by roughly
+    ``60 / GEMINI_REQUESTS_PER_MINUTE`` seconds per additional key2 call.
+    ``label`` names the stage for the log (never the key value itself).
+    """
+
+    def __init__(
+        self,
+        model: str = "gemini-3.6-flash",
+        api_key: str | None = None,
+        *,
+        label: str | None = None,
+    ) -> None:
         load_local_env()
         key = api_key or os.getenv("GEMINI_API_KEY")
         if not key:
@@ -50,21 +100,195 @@ class GeminiJsonClient:
             raise LlmEvidenceError("Install dependencies with 'uv sync' before using Gemini.") from error
         self._client = genai.Client(api_key=key)
         self._model = model
+        self._label = label or "gemini"
+        self._key_id = _key_slot(key)
+        self._tracker = _tracker_for(key)
 
     @observe(name="llm_call")
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
-        interaction = self._client.interactions.create(
-            model=self._model,
-            input=prompt,
-            response_format={
-                "type": "text",
-                "mime_type": "application/json",
-                "schema": schema if schema is not None else LlmEvidenceAssessmentBatch.model_json_schema(),
-            },
+        budget = _env_int("GEMINI_429_RETRIES", DEFAULT_429_RETRIES)
+        attempt = 0
+        while True:
+            self._tracker.require_slot()
+            delay = self._tracker.wait_for_slot()
+            self._tracker.record()
+            try:
+                interaction = self._client.interactions.create(
+                    model=self._model,
+                    input=prompt,
+                    response_format={
+                        "type": "text",
+                        "mime_type": "application/json",
+                        "schema": (
+                            schema
+                            if schema is not None
+                            else LlmEvidenceAssessmentBatch.model_json_schema()
+                        ),
+                    },
+                )
+            except Exception as error:
+                kind, retry_after = classify_provider_error(error)
+                if kind == "retry_after" and attempt < budget:
+                    attempt += 1
+                    self._log(delay, f"429 retry_after={retry_after:g}s attempt={attempt}")
+                    self._tracker.pause(retry_after)
+                    continue
+                self._log(delay, f"error kind={kind}")
+                raise _translate_error(kind, error) from error
+            if not interaction.output_text:
+                self._log(delay, "error kind=empty_output")
+                raise LlmEvidenceError("Gemini returned no text output.")
+            self._log(delay, "ok")
+            return interaction.output_text
+
+    def _log(self, delay: float, status: str) -> None:
+        budget = "off" if self._tracker.requests_per_day <= 0 else self._tracker.requests_per_day
+        print(
+            f"[llm] label={self._label} key={self._key_id} delay_s={delay:.1f} "
+            f"calls={self._tracker.calls}/{budget} status={status}",
+            file=sys.stderr,
         )
-        if not interaction.output_text:
-            raise LlmEvidenceError("Gemini returned no text output.")
-        return interaction.output_text
+
+
+class _RateTracker:
+    """Per-key pacing and a process-local daily counter for one provider key.
+
+    The daily count only knows about calls made by this process, so it is a
+    guard against a single run overshooting the ceiling, not a model of the
+    provider's reset window (that window is deliberately not guessed here; a
+    cross-run overrun is the server's 429 to report). ``clock`` and ``sleeper``
+    are injectable so tests never really sleep.
+    """
+
+    def __init__(
+        self,
+        *,
+        requests_per_minute: int = DEFAULT_REQUESTS_PER_MINUTE,
+        requests_per_day: int = DEFAULT_REQUESTS_PER_DAY,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self.requests_per_day = requests_per_day
+        self.interval_seconds = (
+            0.0
+            if requests_per_minute <= 0
+            else 60.0 / requests_per_minute + PACE_SLACK_SECONDS
+        )
+        self._clock = clock
+        self._sleeper = sleeper
+        self._last_call_at: float | None = None
+        self._calls = 0
+
+    @property
+    def calls(self) -> int:
+        return self._calls
+
+    def can_call(self) -> bool:
+        return self.requests_per_day <= 0 or self._calls < self.requests_per_day
+
+    def require_slot(self) -> None:
+        """Raise before spending quota once this process has used its daily budget."""
+        if not self.can_call():
+            raise DailyQuotaExhausted(
+                f"This run already used its local budget of {self.requests_per_day} "
+                "requests for this key; not calling again."
+            )
+
+    def wait_for_slot(self) -> float:
+        """Sleep until the per-minute gap has elapsed; return the seconds slept."""
+        if self._last_call_at is None or self.interval_seconds <= 0:
+            return 0.0
+        delay = self.interval_seconds - (self._clock() - self._last_call_at)
+        if delay <= 0:
+            return 0.0
+        self._sleeper(delay)
+        return delay
+
+    def record(self) -> None:
+        self._calls += 1
+        self._last_call_at = self._clock()
+
+    def pause(self, seconds: float) -> None:
+        self._sleeper(seconds)
+
+
+def _key_slot(api_key: str) -> str:
+    """A short, non-reversible id so the call log can group calls without the key."""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:8]
+
+
+_TRACKERS: dict[str, _RateTracker] = {}
+
+
+def _tracker_for(api_key: str) -> _RateTracker:
+    """Return this process's tracker for *api_key*, building it on first use."""
+    slot = _key_slot(api_key)
+    tracker = _TRACKERS.get(slot)
+    if tracker is None:
+        tracker = _RateTracker(
+            requests_per_minute=_env_int(
+                "GEMINI_REQUESTS_PER_MINUTE", DEFAULT_REQUESTS_PER_MINUTE
+            ),
+            requests_per_day=_env_int("GEMINI_REQUESTS_PER_DAY", DEFAULT_REQUESTS_PER_DAY),
+        )
+        _TRACKERS[slot] = tracker
+    return tracker
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
+
+
+_RETRY_AFTER_RE = re.compile(r"retry in\s+([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+
+
+def classify_provider_error(error: BaseException) -> tuple[str, float]:
+    """Map a provider error to ``(kind, retry_after_seconds)``.
+
+    The kind is one of ``retry_after`` (a 429 carrying a usable ``retry in Ns``
+    hint), ``daily_quota`` (a 429 that a retry cannot fix), ``service`` (a 503 or
+    an overload message) or ``other``. ``google.genai`` puts the HTTP status on
+    ``error.code``; the message is only consulted when that is missing or when
+    the reason has to be read out of the text.
+    """
+    text = str(error)
+    lowered = text.lower()
+    code = getattr(error, "code", None)
+    is_429 = code == 429 or "429" in lowered
+    if is_429:
+        if "requests per day" in lowered or "per day" in lowered:
+            return "daily_quota", 0.0
+        match = _RETRY_AFTER_RE.search(text)
+        if match is not None:
+            return "retry_after", float(match.group(1))
+        return "daily_quota", 0.0
+    if (
+        code == 503
+        or "503" in lowered
+        or "overloaded" in lowered
+        or "unavailable" in lowered
+    ):
+        return "service", 0.0
+    return "other", 0.0
+
+
+def _translate_error(kind: str, error: BaseException) -> LlmEvidenceError:
+    if kind in {"daily_quota", "retry_after"}:
+        # A per-minute 429 lands here only once its retry hint failed to clear
+        # the limit, so the key is still limited: same degrade path as a daily
+        # 429, and never another blind retry.
+        return DailyQuotaExhausted(str(error))
+    if kind == "service":
+        return LlmServiceError(str(error))
+    if isinstance(error, LlmEvidenceError):
+        return error
+    return LlmEvidenceError(str(error))
 
 
 def load_local_env(path: str | Path = ".env") -> None:

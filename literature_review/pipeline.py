@@ -58,18 +58,23 @@ def _rcs_batch_size() -> int:
 def _notes_pacing_seconds() -> float:
     """Seconds to sleep between consecutive per-paper note calls (key2 rate guard).
 
-    Gemini free-tier is limited to 20 generate_content requests per minute per
-    model; the notes stage calls the LLM once per paper in a tight loop, so a
-    multi-paper run structurally exceeds that window (M5b Todo 6 real-run
-    evidence: two runs both failed at ``summarize_paper_notes`` with a short
-    429). This pacing spreads the calls across minutes. Zero disables it.
+    The Gemini free tier allows 5 requests per minute per model (12s minimum
+    gap), not the 20-per-minute this docstring used to claim; the previous 4s
+    default therefore issued 15 calls per minute, over the ceiling. The notes
+    stage calls the LLM once per paper in a tight loop, so a multi-paper run
+    structurally exceeds that window (M5b Todo 6 real-run evidence: two runs both
+    failed at ``summarize_paper_notes`` with a short 429). The 13s default adds
+    one second of slack to 60/5 and matches the per-key limiter in
+    ``llm_evidence``; the two overlap harmlessly, since by the time this sleep
+    finishes the limiter has already seen enough of an interval. Zero disables
+    it, as does ``NOTES_PACING_SECONDS=0`` for a provider with other limits.
     """
-    raw = os.getenv("NOTES_PACING_SECONDS", "4")
+    raw = os.getenv("NOTES_PACING_SECONDS", "13")
     try:
         value = float(raw)
     except ValueError:
-        return 4.0
-    return value if value >= 0 else 4.0
+        return 13.0
+    return value if value >= 0 else 13.0
 
 
 def run_evidence_pipeline(
@@ -198,7 +203,7 @@ def run_synthesis_pipeline(
     follow-up group, so ``select_quota_threshold`` can apply the per-query
     quota ∩ threshold rule.
     ``notes_pacing_seconds`` spaces consecutive per-paper note calls (defaults to
-    the ``NOTES_PACING_SECONDS`` env value, ~4s; see ``_notes_pacing_seconds``);
+    the ``NOTES_PACING_SECONDS`` env value, 13s; see ``_notes_pacing_seconds``);
     passing 0 disables the pacing for tests.
     ``client_report`` (C2c, key3) generates the final synthesis report; when
     omitted, ``client`` serves the report too, and the report prose is kept

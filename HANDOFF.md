@@ -407,6 +407,20 @@ Suggested sequence for the next milestones (track the current one in `.omo/STATE
 1. Unpaywall no-OA backfill for papers without an OpenAlex/SS OA link;
 2. smaller candidates tracked in `.omo/STATE.md` (e.g. functional-prompt Section interpretation, M5f embedding query representation).
 
+## Latest milestone: LLM rate limiting + key rotation (2026-09-29)
+
+Root-caused the F4 real-run failures (all four evidence logs under `.omo/evidence/f4-real-run*.log` died on key1) and gave the run a measurable, non-wasteful Gemini path.
+
+- `_RateTracker` in `llm_evidence.py`: per-key pacing (13s = `60 / GEMINI_REQUESTS_PER_MINUTE + 1`, default 5 RPM) plus a process-local `GEMINI_REQUESTS_PER_DAY` budget (default 20). The counter is deliberately *not* a rolling window — the provider's reset is not modelled, and a cross-run overrun is the server's 429 to report. Clock and sleeper are injectable, so tests never sleep.
+- `classify_provider_error` maps a provider error to `(kind, retry_after)`: 503/overload → `LlmServiceError` (stop, never retry), 429 with a daily message or without a hint → `DailyQuotaExhausted`, 429 carrying `retry in Ns` → sleep and retry up to `GEMINI_429_RETRIES` (default 1). A per-minute 429 whose retry hint fails to clear also becomes `DailyQuotaExhausted`, so it reaches the same degrade path instead of escaping as a generic error.
+- Every call logs `[llm] label=... key=<8-hex> delay_s=... calls=n/20 status=...` to stderr. The key is identified by a truncated SHA-256, never printed. This is the missing evidence the old logs lacked.
+- Key rotation: `main.key_env_name(n)` (1 → `GEMINI_API_KEY`, else `GEMINI_API_KEY_<N>`) plus `--plan-key/--notes-key/--report-key` (defaults 1/2/3). The planner and screening share the plan key.
+- Screening degradation: a quota/503 failure on the main screening call downloads the candidates it already retrieved (no second search) and reports `screening: null`; a failed gap follow-up keeps the decisions already made. Legacy per-query search-and-download keeps its original interleaving through the shared `_download_per_query` generator helper.
+- `pipeline._notes_pacing_seconds` default 4s → 13s. The old docstring claimed a 20-requests-per-minute tier; the real free tier is 5 RPM, so 4s (15 calls/min) was over the ceiling by design. Because full-run tests do not mock that sleep, `MainEntryTests.setUp` now patches it to 0 (suite 216s → 124s).
+- Suite: 478 → **504 tests, all green**; key-leak check clean.
+
+Open item: the default top-venue whitelist matches **zero** candidates for "literature review agent" (the searches return IEEE Access / Heliyon / arXiv-tier venues), so a real run downloads nothing and aborts on "All downloaded PDFs failed text extraction". Deciding between `--venues none`, widening the venue list, or changing the query is the user's call, and is unrelated to the rate-limit work.
+
 ## API and operational notes
 
 - OpenAlex was the original primary search provider because it works without an API key; since M5c it is the fallback/backfill source, but `search.py` still serves the `search`/`--rank` CLI and the SS fallback. `search.py` uses `urllib`, a User-Agent, timeout, and retries. A past Windows/Python TLS EOF error was intermittent; `curl.exe` returned HTTP 200. If it returns repeatedly, consider switching that module to `httpx`, not disabling TLS verification.

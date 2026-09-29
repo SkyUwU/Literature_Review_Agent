@@ -1,10 +1,18 @@
+import contextlib
+import io
 import json
+import os
 import re
 import unittest
+from unittest import mock
 
 from literature_review.llm_evidence import (
+    DailyQuotaExhausted,
     LlmEvidenceError,
+    LlmServiceError,
+    _RateTracker,
     build_evidence_prompt,
+    classify_provider_error,
     summarize_and_rerank,
     validate_evidence_assessments,
 )
@@ -14,6 +22,229 @@ from literature_review.models import (
     EvidenceRetrievalResponse,
     RankedEvidenceChunk,
 )
+
+
+class FakeClock:
+    """Monotonic clock that only advances when something sleeps."""
+
+    def __init__(self) -> None:
+        self.now_value = 0.0
+        self.slept: list[float] = []
+
+    def now(self) -> float:
+        return self.now_value
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now_value += seconds
+
+
+class FakeProviderError(Exception):
+    """Provider error carrying the HTTP status the way ``google.genai`` does."""
+
+    def __init__(self, message: str, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class FakeInteractions:
+    """Stands in for ``client.interactions.create`` with a scripted reply list."""
+
+    def __init__(self, script: list[str | Exception]) -> None:
+        self.script = list(script)
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        reply = self.script.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return type("Interaction", (), {"output_text": reply})()
+
+
+class FakeGeminiApi:
+    def __init__(self, script: list[str | Exception]) -> None:
+        self.interactions = FakeInteractions(script)
+
+
+def gemini_client(script: list[str | Exception], clock: FakeClock, **tracker_kwargs):
+    """Build a ``GeminiJsonClient`` around fakes, bypassing the real SDK client."""
+    from literature_review.llm_evidence import GeminiJsonClient
+
+    client = object.__new__(GeminiJsonClient)
+    client._client = FakeGeminiApi(script)
+    client._model = "test-model"
+    client._label = "test"
+    client._key_id = "slot0000"
+    client._tracker = _RateTracker(
+        clock=clock.now, sleeper=clock.sleep, **tracker_kwargs
+    )
+    return client
+
+
+class RateTrackerTest(unittest.TestCase):
+    def test_default_interval_matches_the_free_tier_ceiling(self) -> None:
+        # 5 requests per minute needs a 12s gap; the default adds 1s of slack.
+        self.assertEqual(_RateTracker().interval_seconds, 13.0)
+
+    def test_first_call_never_waits(self) -> None:
+        clock = FakeClock()
+        tracker = _RateTracker(clock=clock.now, sleeper=clock.sleep)
+        self.assertEqual(tracker.wait_for_slot(), 0.0)
+        tracker.record()
+        self.assertEqual(clock.slept, [])
+
+    def test_consecutive_calls_are_spaced_by_the_interval(self) -> None:
+        clock = FakeClock()
+        tracker = _RateTracker(clock=clock.now, sleeper=clock.sleep)
+        tracker.record()
+        self.assertEqual(tracker.wait_for_slot(), 13.0)
+        tracker.record()
+        # a call that already cost time only waits out the remainder
+        clock.now_value += 10.0
+        self.assertAlmostEqual(tracker.wait_for_slot(), 3.0)
+        self.assertEqual(tracker.calls, 2)
+
+    def test_zero_per_minute_disables_pacing(self) -> None:
+        clock = FakeClock()
+        tracker = _RateTracker(requests_per_minute=0, clock=clock.now, sleeper=clock.sleep)
+        tracker.record()
+        self.assertEqual(tracker.wait_for_slot(), 0.0)
+        self.assertEqual(clock.slept, [])
+
+    def test_daily_budget_blocks_the_call_that_would_exceed_it(self) -> None:
+        clock = FakeClock()
+        tracker = _RateTracker(
+            requests_per_day=2, clock=clock.now, sleeper=clock.sleep
+        )
+        self.assertTrue(tracker.can_call())
+        tracker.record()
+        tracker.record()
+        self.assertFalse(tracker.can_call())
+        with self.assertRaises(DailyQuotaExhausted):
+            tracker.require_slot()
+
+    def test_daily_budget_of_zero_disables_the_guard(self) -> None:
+        tracker = _RateTracker(requests_per_day=0)
+        tracker.record()
+        self.assertTrue(tracker.can_call())
+        tracker.require_slot()
+
+
+class ProviderErrorClassificationTest(unittest.TestCase):
+    def test_daily_ceiling_is_not_retryable(self) -> None:
+        error = FakeProviderError(
+            "429 RESOURCE_EXHAUSTED: Limit: 20 requests per day", code=429
+        )
+        self.assertEqual(classify_provider_error(error), ("daily_quota", 0.0))
+
+    def test_per_minute_limit_carries_a_retry_hint(self) -> None:
+        error = FakeProviderError(
+            "429 RESOURCE_EXHAUSTED: Limit: 5 requests per minute. Please retry in 37s",
+            code=429,
+        )
+        self.assertEqual(classify_provider_error(error), ("retry_after", 37.0))
+
+    def test_429_without_a_retry_hint_is_treated_as_quota(self) -> None:
+        self.assertEqual(
+            classify_provider_error(FakeProviderError("429 nope", code=429)),
+            ("daily_quota", 0.0),
+        )
+
+    def test_503_and_overload_messages_are_service_errors(self) -> None:
+        for error in (
+            FakeProviderError("503 Service Unavailable", code=503),
+            FakeProviderError("The model is overloaded. Please try again later."),
+        ):
+            self.assertEqual(classify_provider_error(error), ("service", 0.0))
+
+    def test_unrelated_errors_stay_unclassified(self) -> None:
+        error = FakeProviderError("401 UNAUTHENTICATED: bad key", code=401)
+        self.assertEqual(classify_provider_error(error), ("other", 0.0))
+
+
+class GeminiGenerateJsonTest(unittest.TestCase):
+    def _generate(self, client, prompt: str = "p") -> str:
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            text = client.generate_json(prompt, {"type": "object"})
+        return text
+
+    def test_successful_call_logs_the_key_slot_and_call_count(self) -> None:
+        clock = FakeClock()
+        client = gemini_client(['{"ok": 1}', '{"ok": 2}'], clock)
+        self.assertEqual(self._generate(client), '{"ok": 1}')
+        stream = io.StringIO()
+        with contextlib.redirect_stderr(stream):
+            client.generate_json("p", None)
+        log = stream.getvalue()
+        self.assertIn("label=test", log)
+        self.assertIn("key=slot0000", log)
+        self.assertIn("calls=2/20", log)
+        self.assertIn("status=ok", log)
+
+    def test_retry_after_429_waits_then_succeeds(self) -> None:
+        clock = FakeClock()
+        client = gemini_client(
+            [
+                FakeProviderError(
+                    "429 Limit: 5 requests per minute. Please retry in 3s", code=429
+                ),
+                '{"ok": 2}',
+            ],
+            clock,
+        )
+        with mock.patch.dict(os.environ, {"GEMINI_429_RETRIES": "1"}, clear=False):
+            self.assertEqual(self._generate(client), '{"ok": 2}')
+        self.assertEqual(len(client._client.interactions.calls), 2)
+        # the provider's 3s hint, then the remainder of the 13s pacing interval
+        self.assertEqual(clock.slept, [3.0, 10.0])
+
+    def test_retry_budget_of_zero_surfaces_the_429(self) -> None:
+        clock = FakeClock()
+        client = gemini_client(
+            [FakeProviderError("429 Limit: 5 requests per minute. retry in 3s", code=429)],
+            clock,
+        )
+        with mock.patch.dict(os.environ, {"GEMINI_429_RETRIES": "0"}, clear=False):
+            with self.assertRaises(DailyQuotaExhausted):
+                self._generate(client)
+        self.assertEqual(len(client._client.interactions.calls), 1)
+
+    def test_daily_429_is_never_retried(self) -> None:
+        clock = FakeClock()
+        client = gemini_client(
+            [FakeProviderError("429 Limit: 20 requests per day", code=429)], clock
+        )
+        with mock.patch.dict(os.environ, {"GEMINI_429_RETRIES": "5"}, clear=False):
+            with self.assertRaises(DailyQuotaExhausted):
+                self._generate(client)
+        self.assertEqual(len(client._client.interactions.calls), 1)
+
+    def test_503_stops_without_retrying(self) -> None:
+        clock = FakeClock()
+        client = gemini_client(
+            [FakeProviderError("503 The model is overloaded", code=503)] * 3, clock
+        )
+        with mock.patch.dict(os.environ, {"GEMINI_429_RETRIES": "3"}, clear=False):
+            with self.assertRaises(LlmServiceError):
+                self._generate(client)
+        self.assertEqual(len(client._client.interactions.calls), 1)
+
+    def test_exhausted_local_budget_blocks_before_calling(self) -> None:
+        clock = FakeClock()
+        client = gemini_client(['{"ok": 1}'], clock, requests_per_day=1)
+        self._generate(client)
+        with self.assertRaises(DailyQuotaExhausted):
+            self._generate(client)
+        self.assertEqual(len(client._client.interactions.calls), 1)
+
+    def test_empty_output_is_reported(self) -> None:
+        clock = FakeClock()
+        client = gemini_client([""], clock)
+        with self.assertRaises(LlmEvidenceError):
+            self._generate(client)
+
 
 
 class FakeClient:
