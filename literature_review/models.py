@@ -324,7 +324,7 @@ class FunctionalScoringPolicy(BaseModel):
     inflating the score. 0.7 is the starting value (policy-tunable).
     """
 
-    batch_size: int = Field(default=8, ge=1, le=50)
+    batch_size: int = Field(default=4, ge=1, le=50)
     top_chunks_per_paper: int = Field(default=2, ge=1, le=10)
     n_first_round: int = Field(default=2, ge=1, le=10)
     n_follow_up: int = Field(default=1, ge=1, le=10)

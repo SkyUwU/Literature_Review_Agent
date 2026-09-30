@@ -54,10 +54,10 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 ## Groq/Gemini 混合 provider
 
 - 在 `.env` 設定 `GROQ_API_KEY` 後，Groq 固定模型 `openai/gpt-oss-120b` 負責 planner、分批 screening／全域 gap 彙整、functional scoring 與 report；由 `uv sync` 安裝 Groq 官方 Python SDK，透過 Chat Completions API 呼叫。
-- 混合模式下，screening 會依約 3,000 個估計 prompt tokens 的預算切批，逐批產生每篇 keep/maybe/reject 判斷及局部涵蓋／缺漏摘要，再用一次精簡呼叫整合全域 gap 與 follow-up queries。每次 screening 呼叫（包含格式修復）至少間隔 61 秒，為 8K TPM 留出輸出空間；這是保守估算與節流，provider 的實際 tokenization／組織額度仍可能不同。候選若單篇已超出預算會直接停止並報錯，不會截斷摘要或切換模型。per-paper notes 固定用 Gemini（key 由 `--notes-key` 選擇）。任一 screening 或 notes 呼叫失敗時中止，不改由另一 provider 接手。
+- 混合模式下，screening 會依約 3,000 個估計 prompt tokens 的預算切批，逐批產生每篇 keep/maybe/reject 判斷及局部涵蓋／缺漏摘要，再用一次精簡呼叫整合全域 gap 與 follow-up queries。所有 Groq 階段共用 process 內的 TPM tracker：依每階段歷史 usage 校準輸入估值、為輸出預留額度、追蹤 Groq 回報的實際 prompt/completion/total tokens，並優先採用 response 的 remaining/reset headers。它能減少固定等待；其他 process 或同 organization 的外部呼叫仍以 provider 的 429/retry-after 為準。有 retry-after 的 TPM 429 最多有限重試；日額度錯誤不會盲目重送。候選若單篇已超出 screening 預算會直接停止並報錯，不會截斷摘要或切換模型。per-paper notes 固定用 Gemini（key 由 `--notes-key` 選擇）。任一階段失敗時中止，不改由另一 provider 接手。
 - 混合模式所需 key：`GROQ_API_KEY` 與 notes 對應的 `GEMINI_API_KEY[_N]`（預設 key2）。沒有 `GROQ_API_KEY` 時沿用原先全 Gemini 的分工。
 - Groq 503 在同一模型最多重試三次（約 15、30、60 秒加 jitter），耗盡後停止該輪。Groq 使用 JSON Schema best-effort mode，並以既有 Pydantic 驗證及有限 JSON repair 檢查輸出。文件所列免費額度會變動；完整 run 前查看 Groq Limits 與每把 Gemini key 的 AI Studio rate limit。
-- 每次 Gemini／Groq 呼叫會在 `[llm]` log 記錄 `prompt_chars` 與 `prompt_utf8_bytes`，不含 JSON schema 與 API protocol overhead，也不是 token 數估值；Groq 成功回應時另記錄 provider 回報的 `prompt_tokens`。Groq screening 另印出保守估計 tokens 與 TPM 等待秒數；估算不等於 provider tokenizer 結果，遇 413 時以錯誤內容為準。
+- 每次 Gemini／Groq 呼叫會在 `[llm]` log 記錄 `prompt_chars` 與 `prompt_utf8_bytes`，不含 JSON schema 與 API protocol overhead。Groq 呼叫另記錄 `prompt_tokens`、`completion_tokens`、`total_tokens`（provider usage）；送出前的 token 數仍是估值，成功回應及錯誤的 rate-limit headers／retry-after 用於調整下一次等待。
 - `.env` 範例為 `GROQ_API_KEY=<你的 key>`。不要提交 `.env` 或把 key 貼到聊天、log、文件。
 
 ## 執行命令

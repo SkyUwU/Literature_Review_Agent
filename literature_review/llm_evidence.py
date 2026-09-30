@@ -6,9 +6,9 @@ import os
 import random
 import re
 import sys
+import threading
 import time
-import urllib.error
-import urllib.request
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -34,6 +34,10 @@ DEFAULT_REQUESTS_PER_DAY = 20
 DEFAULT_429_RETRIES = 1
 DEFAULT_503_RETRIES = 3
 DEFAULT_503_BASE_DELAY_SECONDS = 15.0
+DEFAULT_GROQ_TPM_LIMIT = 8_000
+DEFAULT_GROQ_TPM_HEADROOM = 300
+DEFAULT_GROQ_COMPLETION_RESERVE = 800
+DEFAULT_GROQ_429_RETRIES = 2
 # One second of slack on top of 60/rpm so a request never lands exactly on the
 # provider's own per-minute boundary.
 PACE_SLACK_SECONDS = 1.0
@@ -49,6 +53,15 @@ class LlmOutputSyntaxError(LlmEvidenceError):
 
 class LlmServiceError(LlmEvidenceError):
     """Raised when a bounded retry budget for a provider-side 5xx is exhausted."""
+
+
+def _log_prompt_size(label: str, model: str, prompt: str) -> None:
+    """Log exact prompt characters and UTF-8 bytes, not an estimated token count."""
+    print(
+        f"[llm] label={label} model={model} prompt_chars={len(prompt)} "
+        f"prompt_utf8_bytes={len(prompt.encode('utf-8'))}",
+        file=sys.stderr,
+    )
 
 
 class DailyQuotaExhausted(LlmEvidenceError):
@@ -114,6 +127,7 @@ class GeminiJsonClient:
 
     @observe(name="llm_call")
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        _log_prompt_size(self._label, self._model, prompt)
         retry_budget = _env_int("GEMINI_429_RETRIES", DEFAULT_429_RETRIES)
         retry_after_attempt = 0
         service_attempt = 0
@@ -178,7 +192,6 @@ class GroqJsonClient:
     """Groq OpenAI-compatible JSON client used across the formal LLM stages."""
 
     DEFAULT_MODEL = "openai/gpt-oss-120b"
-    API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     def __init__(
         self,
@@ -191,73 +204,320 @@ class GroqJsonClient:
         key = api_key or os.getenv("GROQ_API_KEY")
         if not key:
             raise LlmEvidenceError("GROQ_API_KEY is not set in the environment.")
-        self._api_key = key
+        try:
+            from groq import Groq
+        except ImportError as error:
+            raise LlmEvidenceError(
+                "Install dependencies with 'uv sync' before using Groq."
+            ) from error
+        self._client = Groq(api_key=key, max_retries=0, timeout=180.0)
         self._model = model or self.DEFAULT_MODEL
         self._label = label or "groq"
+        self._tpm_pacer = _groq_tpm_pacer()
 
     @observe(name="llm_call")
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        _log_prompt_size(self._label, self._model, prompt)
         response_schema = schema or LlmEvidenceAssessmentBatch.model_json_schema()
-        body = {
-            "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "literature_review_output",
-                    "strict": False,
-                    "schema": response_schema,
-                },
-            },
-            "temperature": 0.2,
-            "stream": False,
-        }
-        request = urllib.request.Request(
-            self.API_URL,
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        payload = None
-        for attempt in range(4):
+        service_retries = 0
+        tpm_retries = 0
+        bypass_pacer_once = False
+        while True:
+            if not bypass_pacer_once:
+                self._tpm_pacer.wait_for_capacity(prompt, self._label)
+            bypass_pacer_once = False
+            started_at = time.monotonic()
             try:
-                with urllib.request.urlopen(request, timeout=180) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+                raw_response = self._client.chat.completions.with_raw_response.create(
+                    model=self._model,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "literature_review_output",
+                            "strict": False,
+                            "schema": response_schema,
+                        },
+                    },
+                    temperature=0.2,
+                    stream=False,
+                )
+                completion = raw_response.parse()
                 break
-            except urllib.error.HTTPError as error:
-                # Never include request headers or the key in an error message.
-                detail = error.read().decode("utf-8", errors="replace")[:1000]
-                if error.code == 503 and attempt < 3:
-                    delay = 15.0 * (2**attempt) + random.uniform(0.0, 1.0)
+            except Exception as error:
+                status_code = getattr(error, "status_code", None)
+                if status_code == 503 and service_retries < DEFAULT_503_RETRIES:
+                    delay = 15.0 * (2**service_retries) + random.uniform(0.0, 1.0)
+                    service_retries += 1
                     print(
                         f"[llm] label={self._label} model={self._model} "
-                        f"status=503 retry_in={delay:.1f}s attempt={attempt + 1}/3",
+                        f"status=503 retry_in={delay:.1f}s attempt={service_retries}/3",
                         file=sys.stderr,
                     )
                     time.sleep(delay)
                     continue
-                if 500 <= error.code < 600:
+                retry_after = _groq_tpm_retry_after(error)
+                if retry_after is not None and tpm_retries < DEFAULT_GROQ_429_RETRIES:
+                    tpm_retries += 1
+                    delay = retry_after + random.uniform(0.1, 0.5)
+                    self._tpm_pacer.update_rate_headers(
+                        getattr(getattr(error, "response", None), "headers", {})
+                    )
+                    print(
+                        f"[llm] label={self._label} model={self._model} "
+                        f"status=429 kind=tpm retry_in={delay:.1f}s "
+                        f"attempt={tpm_retries}/{DEFAULT_GROQ_429_RETRIES}",
+                        file=sys.stderr,
+                    )
+                    time.sleep(delay)
+                    # Groq's retry-after reflects organization-wide usage,
+                    # including calls outside this process; honor that reset.
+                    bypass_pacer_once = True
+                    continue
+                if status_code is not None and 500 <= status_code < 600:
                     raise LlmServiceError(
-                        f"Groq service returned HTTP {error.code} after bounded retries."
+                        f"Groq service returned HTTP {status_code} after bounded retries."
                     ) from error
-                raise LlmEvidenceError(
-                    f"Groq request failed with HTTP {error.code}: {detail}"
-                ) from error
-            except (urllib.error.URLError, TimeoutError, OSError) as error:
-                raise LlmServiceError(f"Groq request failed: {error}") from error
-            except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                raise LlmEvidenceError("Groq returned an invalid response body.") from error
+                if status_code is None and type(error).__name__ in {
+                    "APIConnectionError",
+                    "APITimeoutError",
+                }:
+                    raise LlmServiceError(f"Groq request failed: {error}") from error
+                if status_code is not None:
+                    raise LlmEvidenceError(
+                        f"Groq request failed with HTTP {status_code}: {error}"
+                    ) from error
+                raise LlmEvidenceError(f"Groq request failed: {error}") from error
 
         try:
-            content = payload["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as error:
+            content = completion.choices[0].message.content
+        except (AttributeError, IndexError, TypeError) as error:
             raise LlmEvidenceError("Groq response was missing message content.") from error
+        usage = getattr(completion, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        total_tokens = getattr(usage, "total_tokens", None)
+        self._tpm_pacer.record_usage(
+            prompt,
+            self._label,
+            started_at,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
+        self._tpm_pacer.update_rate_headers(raw_response.headers)
+        print(
+            f"[llm] label={self._label} model={self._model} "
+            f"prompt_tokens={prompt_tokens if prompt_tokens is not None else 'unknown'} "
+            f"completion_tokens={completion_tokens if completion_tokens is not None else 'unknown'} "
+            f"total_tokens={total_tokens if total_tokens is not None else 'unknown'}",
+            file=sys.stderr,
+        )
         if not isinstance(content, str) or not content.strip():
             raise LlmEvidenceError("Groq returned no text output.")
         return content.strip()
+
+
+class _GroqTpmPacer:
+    """Share measured token usage and conservative preflight estimates across Groq stages."""
+
+    WINDOW_SECONDS = 60.0
+
+    def __init__(self, limit: int, headroom: int) -> None:
+        self.limit = limit
+        self.target = max(1, limit - headroom) if limit > 0 else 0
+        self._events: deque[tuple[float, int]] = deque()
+        self._prompt_scale: dict[str, float] = {}
+        self._completion_reserve: dict[str, int] = {}
+        self._provider_remaining_tokens: int | None = None
+        self._provider_reset_at: float | None = None
+        self._lock = threading.Lock()
+
+    def _estimate(self, prompt: str, label: str) -> int:
+        chars_per_four_tokens = (len(prompt) + 3) // 4
+        return max(1, round(chars_per_four_tokens * self._prompt_scale.get(label, 1.0)))
+
+    def wait_for_capacity(self, prompt: str, label: str) -> None:
+        if self.limit <= 0:
+            return
+        estimate = self._estimate(prompt, label)
+        reserve = self._completion_reserve.get(label, DEFAULT_GROQ_COMPLETION_RESERVE)
+        requested = estimate + reserve
+        if requested > self.target:
+            raise LlmEvidenceError(
+                f"Groq {label} prompt is too large for the configured TPM budget: "
+                f"estimated input {estimate} + output reserve {reserve} > {self.target}. "
+                "Reduce this stage's batch size or input."
+            )
+        while True:
+            now = time.monotonic()
+            with self._lock:
+                wait_seconds = 0.0
+                used = 0
+                if self._provider_remaining_tokens is not None:
+                    remaining = self._provider_remaining_tokens
+                    if requested > remaining:
+                        if self._provider_reset_at is not None and self._provider_reset_at > now:
+                            reset_at = self._provider_reset_at
+                            wait_seconds = reset_at - now + 0.1
+                            used = self.limit - remaining
+                        elif self._provider_reset_at is not None:
+                            self._provider_remaining_tokens = None
+                            self._provider_reset_at = None
+                            self._events.clear()
+                            print(
+                                f"[llm] label={label} tpm_ready after_provider_reset "
+                                f"next_estimated_input={estimate} output_reserve={reserve}",
+                                file=sys.stderr,
+                            )
+                            return
+                        else:
+                            self._provider_remaining_tokens = None
+                            self._provider_reset_at = None
+                    else:
+                        self._provider_remaining_tokens = None
+                        self._provider_reset_at = None
+                        print(
+                            f"[llm] label={label} tpm_ready "
+                            f"next_estimated_input={estimate} output_reserve={reserve} "
+                            f"provider_remaining={remaining}",
+                            file=sys.stderr,
+                        )
+                        return
+                while self._events and now - self._events[0][0] >= self.WINDOW_SECONDS:
+                    self._events.popleft()
+                if self._provider_remaining_tokens is None:
+                    used = sum(tokens for _, tokens in self._events)
+                    if used + requested <= self.target:
+                        print(
+                            f"[llm] label={label} tpm_ready "
+                            f"recent_actual_tokens={used} next_estimated_input={estimate} "
+                            f"output_reserve={reserve}",
+                            file=sys.stderr,
+                        )
+                        return
+                    release_needed = used + requested - self.target
+                    releasing = 0
+                    reset_at = now
+                    for timestamp, tokens in self._events:
+                        releasing += tokens
+                        reset_at = timestamp + self.WINDOW_SECONDS
+                        if releasing >= release_needed:
+                            break
+                    wait_seconds = max(0.1, reset_at - now)
+            print(
+                f"[llm] label={label} tpm_wait_s={wait_seconds:.1f} "
+                f"recent_actual_tokens={used} next_estimated_input={estimate} "
+                f"completion_reserve={reserve}",
+                file=sys.stderr,
+            )
+            time.sleep(min(wait_seconds, self.WINDOW_SECONDS))
+
+    def record_usage(
+        self,
+        prompt: str,
+        label: str,
+        started_at: float,
+        *,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        total_tokens: int | None,
+    ) -> None:
+        char_estimate = max(1, (len(prompt) + 3) // 4)
+        actual_prompt = prompt_tokens if prompt_tokens is not None else char_estimate
+        actual_completion = (
+            completion_tokens
+            if completion_tokens is not None
+            else self._completion_reserve.get(label, DEFAULT_GROQ_COMPLETION_RESERVE)
+        )
+        actual_total = (
+            total_tokens
+            if total_tokens is not None
+            else actual_prompt + actual_completion
+        )
+        with self._lock:
+            old_scale = self._prompt_scale.get(label, actual_prompt / char_estimate)
+            measured_scale = actual_prompt / char_estimate
+            self._prompt_scale[label] = 0.5 * old_scale + 0.5 * measured_scale
+            old_reserve = self._completion_reserve.get(
+                label, DEFAULT_GROQ_COMPLETION_RESERVE
+            )
+            self._completion_reserve[label] = max(
+                384, round(0.5 * old_reserve + 0.5 * actual_completion * 1.25)
+            )
+            self._events.append((started_at, actual_total))
+
+    def update_rate_headers(self, headers: object) -> None:
+        if not hasattr(headers, "get"):
+            return
+        remaining_raw = headers.get("x-ratelimit-remaining-tokens")
+        reset_raw = headers.get("x-ratelimit-reset-tokens")
+        try:
+            remaining = int(remaining_raw) if remaining_raw is not None else None
+        except (TypeError, ValueError):
+            remaining = None
+        reset_seconds = _duration_seconds(reset_raw)
+        with self._lock:
+            if remaining is not None and remaining >= 0:
+                self._provider_remaining_tokens = remaining
+                self._provider_reset_at = (
+                    time.monotonic() + reset_seconds if reset_seconds is not None else None
+                )
+
+
+_GROQ_TPM_PACER: _GroqTpmPacer | None = None
+_GROQ_TPM_PACER_LOCK = threading.Lock()
+
+
+def _groq_tpm_pacer() -> _GroqTpmPacer:
+    global _GROQ_TPM_PACER
+    if _GROQ_TPM_PACER is None:
+        with _GROQ_TPM_PACER_LOCK:
+            if _GROQ_TPM_PACER is None:
+                _GROQ_TPM_PACER = _GroqTpmPacer(
+                    _env_int("GROQ_TPM_LIMIT", DEFAULT_GROQ_TPM_LIMIT),
+                    _env_int("GROQ_TPM_HEADROOM", DEFAULT_GROQ_TPM_HEADROOM),
+                )
+    return _GROQ_TPM_PACER
+
+
+def _groq_tpm_retry_after(error: BaseException) -> float | None:
+    """Return a bounded retry delay only for retryable per-minute token limits."""
+    if getattr(error, "status_code", None) != 429:
+        return None
+    message = str(error)
+    lowered = message.lower()
+    if "per day" in lowered or not any(
+        marker in lowered for marker in ("tokens per minute", "token per minute", "tpm")
+    ):
+        return None
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", {}) or {}
+    header_value = headers.get("retry-after") or headers.get("Retry-After")
+    if header_value is not None:
+        delay = _duration_seconds(header_value) or 0.0
+        if 0 < delay <= 90:
+            return delay
+    match = re.search(r"try again in\s+([0-9]+(?:\.[0-9]+)?)\s*s", lowered)
+    if match:
+        delay = float(match.group(1))
+        if 0 < delay <= 90:
+            return delay
+    return None
+
+
+def _duration_seconds(raw: object) -> float | None:
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|s|m)?\s*", str(raw), re.I)
+        if not match:
+            return None
+        value = float(match.group(1))
+        unit = (match.group(2) or "s").lower()
+        return value / 1000 if unit == "ms" else value * 60 if unit == "m" else value
 
 
 class _RateTracker:

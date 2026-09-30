@@ -13,7 +13,6 @@ duplicated decisions for real candidates stay fatal.
 from __future__ import annotations
 
 import sys
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
@@ -45,7 +44,6 @@ DEFAULT_PER_QUERY_TARGET = 24
 # Keep a screening prompt well below Groq's commonly used 8K TPM tier, leaving
 # room for the JSON response. This is a conservative chars/4 token estimate.
 GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS = 3_000
-GROQ_SCREENING_MIN_INTERVAL_SECONDS = 61.0
 _BUCKET_A_RATIO = 0.25
 _BUCKET_B_RATIO = 0.50
 _BUCKET_C_RATIO = 0.25
@@ -524,43 +522,12 @@ def screen_candidates(
     )
 
 
-class _PacedScreeningClient:
-    """Space every Groq screening attempt to stay under the TPM window."""
-
-    def __init__(self, client: JsonGenerationClient) -> None:
-        self._client = client
-        self._last_call: float | None = None
-
-    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
-        if self._last_call is not None:
-            remaining = GROQ_SCREENING_MIN_INTERVAL_SECONDS - (time.monotonic() - self._last_call)
-            if remaining > 0:
-                print(
-                    f"[screening] Groq TPM pacing wait_s={remaining:.1f}",
-                    file=sys.stderr,
-                )
-                time.sleep(remaining)
-        estimate = (len(prompt) + 3) // 4
-        if estimate > GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS:
-            raise ScreeningError(
-                "A Groq screening prompt exceeded the configured estimated-token budget "
-                f"({estimate}>{GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS})."
-            )
-        self._last_call = time.monotonic()
-        print(
-            f"[screening] Groq prompt_estimated_tokens={estimate}",
-            file=sys.stderr,
-        )
-        return self._client.generate_json(prompt, schema)
-
-
 def _screen_candidates_groq_batches(
     query_candidates: dict[str, SampledCandidates],
     client: JsonGenerationClient,
     main_query: str | None,
 ) -> ScreeningResult:
     """Screen bounded candidate batches, then globally combine their gap summaries."""
-    paced = _PacedScreeningClient(client)
     batches: list[dict[str, SampledCandidates]] = []
     current: dict[str, SampledCandidates] = {}
 
@@ -605,7 +572,7 @@ def _screen_candidates_groq_batches(
             f"[screening] Groq batch={index}/{len(batches)} candidates={candidate_count}",
             file=sys.stderr,
         )
-        result = _screen_batch(batch, paced, main_query)
+        result = _screen_batch(batch, client, main_query)
         for query, decisions in result.decisions.items():
             merged_decisions.setdefault(query, []).extend(decisions)
         batch_summaries.append({
@@ -633,11 +600,24 @@ def _screen_candidates_groq_batches(
         f"Queries with no candidates: {[q for q, s in query_candidates.items() if not s.papers]}\n"
         f"Batch summaries: {batch_summaries}"
     )
+    def parse_gap(raw: str) -> GapAnalysis:
+        return GapAnalysis.model_validate_json(strip_code_fence(raw))
+
+    def repair_gap(raw: str, error: BaseException) -> str:
+        return (
+            "Repair the previous response so it is valid JSON matching the supplied "
+            "GapAnalysis schema. Preserve the global covered areas, missing pieces, "
+            "and follow-up queries. Return JSON only.\n"
+            f"Validation error: {error}\nPrevious response:\n{raw}"
+        )
+
     gap = generate_validated(
-        paced,
+        client,
         GapAnalysis,
         gap_prompt,
         GapAnalysis.model_json_schema(),
+        parse=parse_gap,
+        repair_prompt=repair_gap,
     )
     return ScreeningResult(
         decisions=merged_decisions,

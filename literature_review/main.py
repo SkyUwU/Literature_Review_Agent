@@ -1,9 +1,10 @@
 """End-to-end entry point: query -> plan -> search -> rank -> download -> synthesize.
 
 One interactive query produces a :class:`SearchPlan`; every planned query is then
-searched and ranked. With a screening client (M5e, key1) each query's candidates
-are bucket-sampled, screened in one LLM call, optionally extended by one gap
-follow-up round, and downloaded in a single merged keep/maybe pass against
+searched and ranked. With a screening client (M5e) each query's candidates are
+bucket-sampled; Gemini screens the full pool in one call, while Groq screens
+token-bounded batches and then merges compact gap summaries. The pool may be
+extended by one gap follow-up round, and downloaded in a merged keep/maybe pass against
 ``TOTAL_TARGET``; without a screen client each query is downloaded independently
 with ``target_n = ceil(TOTAL_TARGET / query_count)`` (legacy per-query path). A
 shared ``already_downloaded`` set deduplicates in both paths: a paper whose id
@@ -270,6 +271,14 @@ def _search_and_rank(
         FilterPolicy(min_year=effective_year_from, venues=venues),
         encoder=encoder,
     )
+    print(
+        f"[search] query={json.dumps(query_text, ensure_ascii=False)} "
+        f"provider={response.provider} provider_total={response.total_candidates} "
+        f"with_abstract={len(response.papers)} skipped={response.skipped_candidates} "
+        f"after_year_venue_filters={len(ranked.ranked_papers)} "
+        f"year_from={effective_year_from} venue_filter={'disabled' if not venues else 'enabled'}",
+        file=sys.stderr,
+    )
     paper_meta.update(
         {
             item.paper.paper_id: (item.paper.citation_count, item.paper.venue)
@@ -398,17 +407,21 @@ def run_end_to_end(
     if use_screening:
         query_candidates: dict[str, SampledCandidates] = {}
         for planned in plan.queries:
-            query_candidates[planned.query] = sample_candidates(
-                _search_and_rank(
-                    planned.query,
-                    json_fetcher=json_fetcher,
-                    encoder=effective_encoder,
-                    paper_meta=paper_meta,
-                    ss_api_key=ss_api_key,
-                    year_from=year_from,
-                    year_to=year_to,
-                    venues=venues,
-                )
+            ranked_candidates = _search_and_rank(
+                planned.query,
+                json_fetcher=json_fetcher,
+                encoder=effective_encoder,
+                paper_meta=paper_meta,
+                ss_api_key=ss_api_key,
+                year_from=year_from,
+                year_to=year_to,
+                venues=venues,
+            )
+            query_candidates[planned.query] = sample_candidates(ranked_candidates)
+            print(
+                f"[screening] query={json.dumps(planned.query, ensure_ascii=False)} "
+                f"ranked={len(ranked_candidates)} sampled={len(query_candidates[planned.query].papers)}",
+                file=sys.stderr,
             )
         try:
             screening_result = screen_candidates(query_candidates, client_screen, main_query=query)
@@ -434,17 +447,21 @@ def run_end_to_end(
                             "reason": fu.reason,
                         }
                     )
-                    follow_up_candidates[fu.query] = sample_candidates(
-                        _search_and_rank(
-                            fu.query,
-                            json_fetcher=json_fetcher,
-                            encoder=effective_encoder,
-                            paper_meta=paper_meta,
-                            ss_api_key=ss_api_key,
-                            year_from=year_from,
-                            year_to=year_to,
-                            venues=venues,
-                        )
+                    ranked_candidates = _search_and_rank(
+                        fu.query,
+                        json_fetcher=json_fetcher,
+                        encoder=effective_encoder,
+                        paper_meta=paper_meta,
+                        ss_api_key=ss_api_key,
+                        year_from=year_from,
+                        year_to=year_to,
+                        venues=venues,
+                    )
+                    follow_up_candidates[fu.query] = sample_candidates(ranked_candidates)
+                    print(
+                        f"[screening] query={json.dumps(fu.query, ensure_ascii=False)} "
+                        f"ranked={len(ranked_candidates)} sampled={len(follow_up_candidates[fu.query].papers)}",
+                        file=sys.stderr,
                     )
                 try:
                     follow_up_screening = screen_candidates(
@@ -590,6 +607,7 @@ def run_end_to_end(
         paper_titles=paper_titles,
         paper_queries=paper_queries,
         follow_up_queries=follow_up_queries,
+        encoder=effective_encoder,
     )
     papers_output = _make_papers_output(
         query,

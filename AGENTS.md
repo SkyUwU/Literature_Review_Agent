@@ -34,7 +34,7 @@
 - 預設近三年與 top-venue whitelist 可能使候選為零；必要時可用 `--year-from`、`--year-to`、`--venues none` 做一次性覆寫，勿默默改變政策。
 - 預設下載資料夾 `data/run/` 每次真實執行會重建；報告及 papers JSON 累積在 `data/outputs/`。指定 `--dest-dir` 可選擇其他下載位置。
 - Gemini key 分工、錯誤降級、額度／速率控制及 run 命令詳見 `HANDOFF.md`；503 是服務錯誤，不能由此推斷生成內容品質。
-- 設定 `GROQ_API_KEY` 後，Groq `openai/gpt-oss-120b` 負責 plan、分批 screening 與全域 gap 彙整、scoring/report；Gemini 負責 per-paper notes。screening 每批約限制在 3,000 個估計輸入 tokens 以下，批次呼叫至少間隔 61 秒；各階段失敗時停止且不切換 provider。沒有 Groq key 時維持單次 Gemini screening；額度與 key 選擇見 `HANDOFF.md`。
+- 設定 `GROQ_API_KEY` 後，Groq `openai/gpt-oss-120b` 負責 plan、分批 screening 與全域 gap 彙整、scoring/report；Gemini 負責 per-paper notes。所有 Groq 階段共用 process 內 TPM tracker，優先讀取 provider rate-limit/reset headers，並以成功回應的實際 prompt/completion tokens 更新；有 retry-after 的 TPM 429 會有限等待重試。screening prompts 仍以約 3,000 估計輸入 tokens 為批次目標。沒有 Groq key 時維持單次 Gemini screening；額度與 key 選擇見 `HANDOFF.md`。
 
 ## 常用命令（PowerShell）
 

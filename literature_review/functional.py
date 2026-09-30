@@ -33,7 +33,7 @@ from literature_review.models import (
     PaperAssessment,
 )
 
-FUNCTIONAL_BATCH_SIZE = 8
+FUNCTIONAL_BATCH_SIZE = 4
 
 
 class FunctionalScoringError(LlmEvidenceError):
