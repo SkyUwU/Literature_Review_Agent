@@ -877,7 +877,39 @@ class MainEntryTests(unittest.TestCase):
         labels = [call.kwargs.get("label") for call in client_cls.call_args_list]
         keys = [call.kwargs.get("api_key") for call in client_cls.call_args_list]
         self.assertEqual(keys[0], "AIza000_4")
-        self.assertEqual(labels, ["plan+screening", "notes+scoring", "report"])
+        self.assertEqual(
+            labels,
+            ["plan+screening", "paper-notes", "functional-scoring", "report"],
+        )
+
+    def test_build_clients_selects_scoring_and_notes_keys_independently(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GEMINI_API_KEY_2": "AIza000_2",
+                "GEMINI_API_KEY_3": "AIza000_3",
+                "GEMINI_API_KEY_4": "AIza000_4",
+                "GEMINI_API_KEY_5": "AIza000_5",
+                "OLLAMA_BASE_URL": "",
+            },
+            clear=False,
+        ):
+            with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
+                main_module._build_clients(
+                    argparse.Namespace(
+                        rule_based=True,
+                        dry_run=False,
+                        notes_key=5,
+                        scoring_key=4,
+                        report_key=3,
+                    )
+                )
+        by_label = {
+            call.kwargs["label"]: call.kwargs["api_key"]
+            for call in client_cls.call_args_list
+        }
+        self.assertEqual(by_label["paper-notes"], "AIza000_5")
+        self.assertEqual(by_label["functional-scoring"], "AIza000_4")
 
     def test_build_clients_missing_selected_notes_key_exits(self) -> None:
         with mock.patch.dict(
@@ -914,7 +946,7 @@ class MainEntryTests(unittest.TestCase):
                 main_module._build_clients(
                     argparse.Namespace(rule_based=False, dry_run=False)
                 )
-        self.assertEqual(client_cls.call_count, 3)
+        self.assertEqual(client_cls.call_count, 4)
 
     # -- failure path: every bad PDF aborts cleanly --------------------------
 
@@ -971,10 +1003,10 @@ class MainEntryTests(unittest.TestCase):
             os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "GEMINI_API_KEY_3": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False
         ):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
+                client_plan, client_synth, client_scoring, client_rcs, client_report = main_module._build_clients(
                     argparse.Namespace(rule_based=False, dry_run=False)
                 )
-        self.assertEqual(client_cls.call_count, 3)
+        self.assertEqual(client_cls.call_count, 4)
         self.assertIsNotNone(client_plan)
         self.assertIsNotNone(client_synth)
         self.assertIsNone(client_rcs)  # OLLAMA_BASE_URL 未設定 → No fallback client
@@ -983,10 +1015,10 @@ class MainEntryTests(unittest.TestCase):
     def test_build_clients_rule_based_skips_plan_client(self) -> None:
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "GEMINI_API_KEY_3": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
+                client_plan, client_synth, client_scoring, client_rcs, client_report = main_module._build_clients(
                     argparse.Namespace(rule_based=True, dry_run=False)
                 )
-        self.assertEqual(client_cls.call_count, 2)
+        self.assertEqual(client_cls.call_count, 3)
         self.assertIsNone(client_plan)
         self.assertIsNotNone(client_synth)
         self.assertIsNone(client_rcs)
@@ -995,7 +1027,7 @@ class MainEntryTests(unittest.TestCase):
     def test_build_clients_missing_key1_falls_back_without_exit(self) -> None:
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "AIza000", "GEMINI_API_KEY_3": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
+                client_plan, client_synth, client_scoring, client_rcs, client_report = main_module._build_clients(
                     argparse.Namespace(rule_based=False, dry_run=False)
                 )
         self.assertIsNone(client_plan)
@@ -1005,7 +1037,7 @@ class MainEntryTests(unittest.TestCase):
 
     def test_build_clients_dry_run_bypasses_all_keys(self) -> None:
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "", "GEMINI_API_KEY_2": "", "GEMINI_API_KEY_3": "", "OLLAMA_BASE_URL": ""}, clear=False):
-            client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
+            client_plan, client_synth, client_scoring, client_rcs, client_report = main_module._build_clients(
                 argparse.Namespace(rule_based=False, dry_run=True)
             )
         self.assertIsNone(client_plan)
@@ -1027,7 +1059,7 @@ class MainEntryTests(unittest.TestCase):
         ):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
                 with mock.patch("literature_review.main.OllamaJsonClient") as ollama_cls:
-                    client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
+                    client_plan, client_synth, client_scoring, client_rcs, client_report = main_module._build_clients(
                         argparse.Namespace(rule_based=False, dry_run=False)
                     )
         self.assertEqual(client_cls.call_count, 3)
@@ -1049,7 +1081,7 @@ class MainEntryTests(unittest.TestCase):
                         argparse.Namespace(rule_based=False, dry_run=False)
                     )
         self.assertEqual(ctx.exception.code, 1)
-        self.assertEqual(client_cls.call_count, 1)  # 只建了 key2 synth，就因缺 key3 提早退出
+        self.assertEqual(client_cls.call_count, 2)  # notes 與 scoring 建立後，因缺 report key 提早退出
 
     def test_build_clients_loads_dotenv_when_shell_has_no_keys(self) -> None:
         """乾淨環境 + 只有 .env → _build_clients 先載入 .env，key2/key3 讀得到、不 exit。"""
@@ -1065,13 +1097,13 @@ class MainEntryTests(unittest.TestCase):
                 os.chdir(tmp)
                 with mock.patch.dict(os.environ, {}, clear=True):
                     with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
-                        client_plan, client_synth, client_rcs, client_report = main_module._build_clients(
+                        client_plan, client_synth, client_scoring, client_rcs, client_report = main_module._build_clients(
                             argparse.Namespace(rule_based=False, dry_run=False)
                         )
                     self.assertEqual(os.environ.get("GEMINI_API_KEY_2"), "from_dotenv_2")
             finally:
                 os.chdir(previous)
-        self.assertEqual(client_cls.call_count, 3)
+        self.assertEqual(client_cls.call_count, 4)
         self.assertIsNotNone(client_plan)
         self.assertIsNotNone(client_synth)
         self.assertIsNone(client_rcs)

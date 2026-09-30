@@ -269,6 +269,7 @@ def run_end_to_end(
     dest_dir: Path,
     client_plan: JsonGenerationClient | None = None,
     client_synth: JsonGenerationClient | None = None,
+    client_scoring: JsonGenerationClient | None = None,
     client_rcs: JsonGenerationClient | None = None,
     client_screen: JsonGenerationClient | None = None,
     client_report: JsonGenerationClient | None = None,
@@ -436,6 +437,7 @@ def run_end_to_end(
                             json_fetcher=json_fetcher,
                             encoder=effective_encoder,
                             paper_meta=paper_meta,
+                            ss_api_key=ss_api_key,
                             year_from=year_from,
                             year_to=year_to,
                             venues=venues,
@@ -580,6 +582,7 @@ def run_end_to_end(
         documents,
         query,
         client_synth,
+        client_scoring=client_scoring,
         client_rcs=client_rcs,
         client_report=client_report,
         paper_meta=paper_meta,
@@ -681,19 +684,19 @@ def _build_clients(
     JsonGenerationClient | None,
     JsonGenerationClient | None,
     JsonGenerationClient | None,
+    JsonGenerationClient | None,
 ]:
-    """Build the stage clients: planning uses key1, RCS may use local Ollama, synthesis uses key2, report uses key3.
+    """Build clients for planning/screening, notes, scoring, and reporting.
 
-    ``load_local_env()`` runs first for a real run (skipped on ``--dry-run``), so
-    the keys may come from a local ``.env`` even when the shell has not exported
-    them — matching the ``pipeline`` / ``pairwise_eval`` entry points, whose
-    clients load the env from their constructor already.
+    ``load_local_env()`` runs first for a real run. A dry run loads only the
+    optional OpenAlex key so authenticated metadata search works without loading
+    any Gemini keys or constructing LLM clients.
 
     The LLM planner is the default for a full run; it is skipped on ``--dry-run``
     (zero keys) and on ``--rule-based`` (escape hatch). A missing planner key
     prints a warning and keeps ``client_plan`` as ``None``, letting
     :func:`_make_plan` fall back to the deterministic rule-based plan without
-    aborting the run. ``--dry-run`` never inspects any key.
+    aborting the run. ``--dry-run`` never reads Gemini keys or constructs LLM clients.
 
     ``--plan-key`` / ``--notes-key`` / ``--report-key`` select which numbered key
     each stage uses (see :func:`key_env_name`), so a stage can move to a fresh
@@ -708,8 +711,14 @@ def _build_clients(
     """
     plan_suffix = getattr(arguments, "plan_key", 1)
     notes_suffix = getattr(arguments, "notes_key", 2)
+    scoring_suffix = getattr(arguments, "scoring_key", None)
+    scoring_key_explicit = scoring_suffix is not None
+    if scoring_suffix is None:
+        scoring_suffix = notes_suffix
     report_suffix = getattr(arguments, "report_key", 3)
-    if not arguments.dry_run:
+    if arguments.dry_run:
+        load_local_env(only={"OPENALEX_API_KEY"})
+    else:
         load_local_env()
     client_plan: JsonGenerationClient | None = None
     if not arguments.dry_run and not arguments.rule_based:
@@ -726,12 +735,21 @@ def _build_clients(
                 file=sys.stderr,
             )
     client_synth: JsonGenerationClient | None = None
+    client_scoring: JsonGenerationClient | None = None
     if not arguments.dry_run:
         api_key_2 = os.getenv(key_env_name(notes_suffix))
         if not api_key_2:
             print(f"請在 .env 設定 {key_env_name(notes_suffix)}", file=sys.stderr)
             raise SystemExit(1)
-        client_synth = GeminiJsonClient(api_key=api_key_2, label="notes+scoring")
+        client_synth = GeminiJsonClient(api_key=api_key_2, label="paper-notes")
+        if scoring_key_explicit or not os.getenv("OLLAMA_BASE_URL"):
+            api_key_scoring = os.getenv(key_env_name(scoring_suffix))
+            if not api_key_scoring:
+                print(f"請在 .env 設定 {key_env_name(scoring_suffix)}", file=sys.stderr)
+                raise SystemExit(1)
+            client_scoring = GeminiJsonClient(
+                api_key=api_key_scoring, label="functional-scoring"
+            )
     client_rcs: JsonGenerationClient | None = None
     if not arguments.dry_run:
         if os.getenv("OLLAMA_BASE_URL"):
@@ -747,7 +765,7 @@ def _build_clients(
             print(f"請在 .env 設定 {key_env_name(report_suffix)}", file=sys.stderr)
             raise SystemExit(1)
         client_report = GeminiJsonClient(api_key=api_key_3, label="report")
-    return client_plan, client_synth, client_rcs, client_report
+    return client_plan, client_synth, client_scoring, client_rcs, client_report
 
 
 def save_report_output(
@@ -846,7 +864,14 @@ def main() -> None:
         type=int,
         default=2,
         metavar="N",
-        help="Key suffix for the functional scoring and per-paper notes stage (default 2)",
+        help="Key suffix for per-paper notes (default 2)",
+    )
+    parser.add_argument(
+        "--scoring-key",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Key suffix for functional scoring (defaults to --notes-key for backward compatibility)",
     )
     parser.add_argument(
         "--report-key",
@@ -873,7 +898,7 @@ def main() -> None:
         print("No query provided; exiting.", file=sys.stderr)
         raise SystemExit(1) from None
 
-    client_plan, client_synth, client_rcs, client_report = _build_clients(arguments)
+    client_plan, client_synth, client_scoring, client_rcs, client_report = _build_clients(arguments)
 
     ss_api_key = (
         None
@@ -887,6 +912,7 @@ def main() -> None:
             dest_dir=dest_dir,
             client_plan=client_plan,
             client_synth=client_synth,
+            client_scoring=client_scoring,
             client_rcs=client_rcs,
             client_screen=client_plan,
             client_report=client_report,

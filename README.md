@@ -9,11 +9,9 @@ The goal is to turn a research idea into a traceable literature-review report:
 3. synthesize findings; and
 4. propose evidence-backed future directions.
 
-## Current milestone
+## Current system
 
-The first milestone defines validated data models. It intentionally does not call an LLM or a paper-search API yet.
-
-The second milestone searches the OpenAlex API without requiring an API key. Papers without an abstract or author metadata are skipped because the later summarization stage needs source evidence. The third milestone filters, ranks, and selects a small reading set while preserving the full search provenance.
+The project includes an end-to-end literature-review pipeline: search planning, Semantic Scholar/OpenAlex retrieval, paper filtering and ranking, optional LLM screening, open-access PDF download, full-text extraction, evidence scoring, per-paper notes, and a claim-traceable synthesis report. The early data-model and OpenAlex-only milestones are historical, not the current system state.
 
 Before retrieval, a search plan is produced from a bare query string. `literature_review.planning.create_llm_plan(query, client)` is the default planner (validated `SearchPlan`, `generated_by="llm"`); `literature_review.planning.create_rule_based_plan()` is the fallback (no key needed), used whenever the LLM planner is unavailable and always for `--dry-run`. Both keep `SearchPlan.idea` optional/`None`, so the downstream Semantic Scholar / OpenAlex search consumes one query-only contract.
 
@@ -31,7 +29,7 @@ Run the local extraction and retrieval path without any API key:
 uv run python -m literature_review.pipeline data/papers/example.pdf "literature review agent" --top-k 3 --dry-run
 ```
 
-After copying `.env.example` to `.env` and setting `GEMINI_API_KEY`, omit `--dry-run` to run the LLM stage. Start with one PDF and `--top-k 2` or `--top-k 3`. Note the `pipeline` CLI is the compare/legacy path (corpus-wide top-k across all papers combined, not per-paper); the formal end-to-end run is `literature_review.main`, which samples chunks per paper.
+After copying `.env.example` to `.env` and setting the required keys, omit `--dry-run` to run the LLM stage. Start with one PDF and `--top-k 2` or `--top-k 3`. Note the `pipeline` CLI is the compare/legacy path (corpus-wide top-k across all papers combined, not per-paper); the formal end-to-end run is `literature_review.main`, which samples chunks per paper.
 
 `literature_review.synthesis` completes the evidence-cited report with three-layer traceability: every claim flows from an `EvidenceChunk` through a per-paper note (`PaperSummary`) into the final report prose, which carries inline `[claim-N]` citation markers (A5: the programmatic `材料來源清單` maps each claim to its source chunks). Per-paper notes are built only for papers recommended as include or consider. Report generation runs as a two-stage, three-call flow (outline → report → future directions): the LLM first plans a thematic outline (2-4 sections each anchored to `claim-N` ids), then writes the report prose, then proposes future directions in a separate call — each call receives the notes payload only, never the chunk-level assessments. Future directions come from explicit limitations stated in the retrieved evidence, with a deterministic fallback when none yields a direction.
 
@@ -45,13 +43,15 @@ uv run python -m literature_review.pipeline data/papers "literature review agent
 
 ## Run the full pipeline (M3C)
 
-One interactive query produces a complete literature-review report: plan -> search/rank -> download open-access PDFs -> extract evidence -> LLM synthesis. Parameters are mostly hard-coded (`LIMIT=100`, `TOTAL_TARGET=20`, the functional policy `top_chunks_per_paper=2` / `batch_size=8` / `threshold=6.0`; `target_n = ceil(20 / query_count)`) with a research search policy: every planned query searches only the last `YEAR_WINDOW=3` years (2026 → 2024) and is hard-filtered to a top-venue whitelist (`ranking.TOP_VENUE_ALIASES`, 17 venues across ML/NLP/IR/CV/AI). Search provider (M5c): with `SEMANTIC_SCHOLAR_API_KEY` set, planned queries are searched through Semantic Scholar first; a missing key, an empty SS result, or a failed SS request falls back to OpenAlex, then SS placeholder abstracts are backfilled from OpenAlex by DOI and any paper still lacking an abstract is dropped before ranking. Paper ranking uses bge-small-en-v1.5 semantic similarity between the query and each paper's title+abstract (plus citation and recency, equal weight); `--dry-run` skips the embedding model and keeps the lexical baseline. With no key, dry-run stops after downloads:
+One interactive query produces a complete literature-review report: plan -> search/rank -> download open-access PDFs -> extract evidence -> LLM synthesis. Parameters are mostly hard-coded (`LIMIT=100`, `TOTAL_TARGET=20`, the functional policy `top_chunks_per_paper=2` / `batch_size=8` / `threshold=6.0`; `target_n = ceil(20 / query_count)`) with a research search policy: every planned query searches only the last `YEAR_WINDOW=3` years (2026 → 2024) and is hard-filtered to a top-venue whitelist (`ranking.TOP_VENUE_ALIASES`, 17 venues across ML/NLP/IR/CV/AI). Search provider (M5c): with `SEMANTIC_SCHOLAR_API_KEY` set, planned queries are searched through Semantic Scholar first; a missing key, an empty SS result, or a failed SS request falls back to OpenAlex, then SS placeholder abstracts are backfilled from OpenAlex by DOI and any paper still lacking an abstract is dropped before ranking. Paper ranking uses bge-small-en-v1.5 semantic similarity between the query and each paper's title+abstract (plus citation and recency, equal weight); `--dry-run` skips the embedding model and keeps the lexical baseline. Dry run needs no Gemini key; an OpenAlex key in `.env` is used for authenticated search:
 
 ```powershell
-uv run python -m literature_review.main --dry-run
+uv run --env-file .env python -m literature_review.main --dry-run
 ```
 
-The full run plans with the LLM planner (default, `GEMINI_API_KEY`), scores and generates per-paper notes with `GEMINI_API_KEY_2`, and produces the synthesis report with `GEMINI_API_KEY_3`. Set `SEMANTIC_SCHOLAR_API_KEY` in `.env` to make Semantic Scholar the primary search source (without it, OpenAlex is used directly). Every real run also persists the downloaded-papers list as `data/outputs/papers_%Y%m%d_%H%M%S_%f.json` (one entry per actually-downloaded PDF with full metadata, its originating query, screening priority, and on-disk path, plus a run overview) sharing the timestamp of the companion `report_*.json`; neither file is ever written by a `--dry-run`, and the folder accumulates across runs:
+The dry run does not call Gemini or require Gemini keys. If `OPENALEX_API_KEY` is in `.env`, pass `--env-file .env` so OpenAlex can authenticate the search; the main entry also loads only this optional key from `.env` during a dry run. OpenAlex currently recommends a free API key when anonymous search is unavailable.
+
+The full run plans and screens with one key (default `GEMINI_API_KEY`), performs functional scoring with `GEMINI_API_KEY_2` by default, writes per-paper notes with `GEMINI_API_KEY_2`, and produces the synthesis report with `GEMINI_API_KEY_3`. Use `--scoring-key N` and `--notes-key N` to assign separate keys; when `--scoring-key` is omitted, it follows `--notes-key` for backward compatibility. For example, `--plan-key 2 --scoring-key 3 --notes-key 4 --report-key 5` assigns four key groups. Set `SEMANTIC_SCHOLAR_API_KEY` in `.env` to make Semantic Scholar the primary search source (without it, OpenAlex is used directly). Every real run also persists the downloaded-papers list as `data/outputs/papers_%Y%m%d_%H%M%S_%f.json` (one entry per actually-downloaded PDF with full metadata, its originating query, screening priority, and on-disk path, plus a run overview) sharing the timestamp of the companion `report_*.json`; neither file is ever written by a `--dry-run`, and the folder accumulates across runs:
 
 ```powershell
 uv run python -m literature_review.main

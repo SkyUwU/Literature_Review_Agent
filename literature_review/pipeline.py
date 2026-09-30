@@ -171,6 +171,7 @@ def run_synthesis_pipeline(
     query: str,
     client: JsonGenerationClient,
     *,
+    client_scoring: JsonGenerationClient | None = None,
     client_rcs: JsonGenerationClient | None = None,
     client_report: JsonGenerationClient | None = None,
     paper_meta: dict[str, tuple[int | None, str | None]] | None = None,
@@ -193,9 +194,9 @@ def run_synthesis_pipeline(
     and ``aggregation_policy`` are kept only for CLI/legacy signature compatibility
     and are ignored (per-paper sampling is driven by
     ``FunctionalScoringPolicy.top_chunks_per_paper``).
-    ``client_rcs`` is now the *functional-scoring* client: each paper's top sampled
+    ``client_scoring`` is the *functional-scoring* client: each paper's top sampled
     chunks are scored against the main research ``query`` (batched utility scores);
-    when omitted, ``client`` serves scoring too. ``paper_titles`` feeds the scoring
+    when omitted, the legacy ``client_rcs`` or ``client`` serves scoring. ``paper_titles`` feeds the scoring
     prompt's paper-title line; ``paper_queries`` maps each paper to the query that
     downloaded it — the sub-query also drives per-paper *sampling* (S2: the top
     chunks of each paper are ranked against that paper's own query), while scoring
@@ -220,7 +221,7 @@ def run_synthesis_pipeline(
         min_words=effective_functional_policy.min_words,
     )
     all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
-    scoring_client = client_rcs or client
+    scoring_client = client_scoring or client_rcs or client
     effective_encoder = encoder if encoder is not None else default_encoder()
 
     sampled = sample_top_chunks_per_paper(
