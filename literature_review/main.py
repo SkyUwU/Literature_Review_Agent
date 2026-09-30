@@ -322,20 +322,19 @@ def run_end_to_end(
     from OpenAlex by DOI, and papers still lacking an abstract are dropped before
     ranking; when ``None`` or empty the search uses OpenAlex directly.
 
-    When ``client_screen`` is provided (M5e, reuse the key1 planner client): every
-    planned query is bucket-sampled (``sample_candidates``), all samples go into
-    one LLM screening + gap call (``screen_candidates``), the gap may produce at
+    When ``client_screen`` is provided (M5e): every planned query is
+    bucket-sampled (``sample_candidates``); ``screen_candidates`` uses one
+    full-pool call for Gemini or bounded batches plus a compact global gap call
+    for Groq. The gap may produce at
     most one follow-up round of new queries that are screened the same way, and
     the final keep/maybe decisions drive a single merged download against
     ``TOTAL_TARGET`` (keep downloaded entirely, maybe fills the remainder). With
     ``dry_run`` (or a missing screen client) screening is skipped and the legacy
     per-query download path runs unchanged.
 
-    A quota or provider failure during screening degrades instead of aborting:
-    a failed main screening call downloads the candidates it already retrieved
-    (no second search, since re-searching would spend quota the run does not
-    need) and leaves ``screening`` as ``None``; a failed gap follow-up call only
-    drops the follow-up queries and keeps the decisions already made.
+    A quota or provider failure during screening aborts the run without
+    downloading unscreened candidates; a failed gap follow-up call also aborts
+    rather than keeping incomplete screening decisions.
     """
     plan = _make_plan(query, use_llm_plan=use_llm_plan, client_plan=client_plan)
     _print_plan(plan)
@@ -366,8 +365,7 @@ def run_end_to_end(
 
         ``produce`` is a generator, so the legacy path can search query N+1 only
         after query N has been downloaded and keep its original interleaving,
-        while the degraded screening path yields the candidates it has already
-        retrieved instead of searching them a second time.
+        for the legacy no-screening path.
         """
         target_n = math.ceil(TOTAL_TARGET / len(plan.queries))
         for query_text, ranked_papers in produce():
@@ -696,22 +694,21 @@ def _build_clients(
     any model-provider keys or constructing LLM clients.
 
     The LLM planner is the default for a full run; it is skipped on ``--dry-run``
-    (zero keys) and on ``--rule-based`` (escape hatch). GROQ_API_KEY routes every
-    formal LLM stage through Groq; absent that key, the existing Gemini key
-    configuration is used. ``--dry-run`` never reads model keys or constructs
-    LLM clients.
+    (zero keys) and on ``--rule-based`` (escape hatch). With GROQ_API_KEY,
+    planning/screening/scoring/report use Groq and notes use Gemini. Without it,
+    the existing all-Gemini key configuration is used. ``--dry-run`` never reads
+    model keys or constructs LLM clients.
 
-    ``--plan-key`` / ``--notes-key`` / ``--report-key`` select which numbered key
-    each stage uses (see :func:`key_env_name`), so a stage can move to a fresh
-    key when the current one is exhausted. The planning and screening stages
-    share the planner key, since the screening client is that same client.
+    Without Groq, the existing Gemini key selectors route each stage as before.
+    With Groq enabled, planning/screening/scoring/report use Groq, while notes
+    use the Gemini key selected by ``--notes-key``. Groq screening is split into
+    token-bounded batches followed by a compact global gap synthesis.
 
     ``client_rcs`` is built from the local Ollama endpoint when ``OLLAMA_BASE_URL``
     is configured (M6); when it is missing the client stays ``None`` and the RCS
     stage falls back to the Gemini synthesis client (existing behavior).
     With Gemini, ``client_report`` uses the dedicated ``GEMINI_API_KEY_3``; with
-    Groq it shares the configured ``GROQ_API_KEY`` and fixed model with all
-    other formal LLM stages.
+    Groq it shares ``GROQ_API_KEY`` with planning and scoring.
     """
     plan_suffix = getattr(arguments, "plan_key", 1)
     notes_suffix = getattr(arguments, "notes_key", 2)
@@ -726,8 +723,13 @@ def _build_clients(
         load_local_env()
     use_groq = not arguments.dry_run and bool(os.getenv("GROQ_API_KEY"))
 
-    def build_stage_client(label: str, *, gemini_suffix: int | None = None):
-        if use_groq:
+    def build_stage_client(
+        label: str,
+        *,
+        gemini_suffix: int | None = None,
+        force_gemini: bool = False,
+    ):
+        if use_groq and not force_gemini:
             return GroqJsonClient(label=label)
         assert gemini_suffix is not None
         api_key = os.getenv(key_env_name(gemini_suffix))
@@ -757,7 +759,9 @@ def _build_clients(
     client_scoring: JsonGenerationClient | None = None
     if not arguments.dry_run:
         if use_groq:
-            client_synth = build_stage_client("paper-notes")
+            client_synth = build_stage_client(
+                "paper-notes", gemini_suffix=notes_suffix, force_gemini=True
+            )
             client_scoring = build_stage_client("functional-scoring")
         else:
             client_synth = build_stage_client("paper-notes", gemini_suffix=notes_suffix)
@@ -780,6 +784,24 @@ def _build_clients(
         else:
             client_report = build_stage_client("report", gemini_suffix=report_suffix)
     return client_plan, client_synth, client_scoring, client_rcs, client_report
+
+
+def _build_screen_client(
+    arguments: argparse.Namespace,
+    client_plan: JsonGenerationClient | None,
+) -> JsonGenerationClient | None:
+    """Build the screening client, using token-batched Groq when configured.
+
+    Without Groq, planning and screening continue to share the legacy Gemini
+    client and its single full-pool screening request.
+    """
+    if arguments.dry_run or arguments.rule_based:
+        return None
+    load_local_env()
+    if os.getenv("GROQ_API_KEY"):
+        return GroqJsonClient(label="screening")
+    else:
+        return client_plan
 
 
 def save_report_output(
@@ -913,6 +935,7 @@ def main() -> None:
         raise SystemExit(1) from None
 
     client_plan, client_synth, client_scoring, client_rcs, client_report = _build_clients(arguments)
+    client_screen = _build_screen_client(arguments, client_plan)
 
     ss_api_key = (
         None
@@ -928,7 +951,7 @@ def main() -> None:
             client_synth=client_synth,
             client_scoring=client_scoring,
             client_rcs=client_rcs,
-            client_screen=client_plan,
+            client_screen=client_screen,
             client_report=client_report,
             use_llm_plan=not arguments.rule_based and not arguments.dry_run,
             dry_run=arguments.dry_run,

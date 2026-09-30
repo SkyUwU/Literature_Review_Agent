@@ -43,7 +43,7 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 
 ## Gemini 呼叫與失敗處理
 
-- 正式流程可分配四個 Gemini key 群組：planner + screening 共用 `--plan-key`（預設 1）、functional scoring 使用 `--scoring-key`（預設沿用 `--notes-key`）、per-paper notes 使用 `--notes-key`（預設 2）、report 使用 `--report-key`（預設 3）。例如 `--plan-key 2 --scoring-key 3 --notes-key 4 --report-key 5` 可分配 Key 2–5；未指定 `--scoring-key` 時維持舊版 scoring/notes 共用同一 key。
+- 沒有 `GROQ_API_KEY` 時，正式流程可分配四個 Gemini key 群組：planner + screening 共用 `--plan-key`（預設 1）、functional scoring 使用 `--scoring-key`（預設沿用 `--notes-key`）、per-paper notes 使用 `--notes-key`（預設 2）、report 使用 `--report-key`（預設 3）。例如 `--plan-key 2 --scoring-key 3 --notes-key 4 --report-key 5` 可分配 Key 2–5；未指定 `--scoring-key` 時維持舊版 scoring/notes 共用同一 key。
 - 每把 key 有獨立速率追蹤；預設最多 20 次／process，預設約 13 秒 pacing。stderr 的 [llm] 紀錄包含 stage、key hash、等待時間、呼叫數及狀態，不會輸出完整 key。
 - Gemini 503／overload 會在同一模型、同一階段做最多 3 次 exponential backoff 重試（約 15、30、60 秒，另加少量 jitter）；這高於每 key 13 秒的 RPM pacing 間隔。SDK 內層重試設為單次，避免超出應用層次數；每次嘗試都計入本 process 的該 key 呼叫數。重試耗盡後不切換模型或降級：planner、main screening、gap follow-up screening、functional scoring、notes、report 均中止該輪。429 的 quota／retry-after 規則維持獨立，不套用 503 重試。
 - 429 依 provider 訊息分類；有 per-minute retry hint 時最多有限重試，日額度耗盡不重試。notes/scoring/report 所指定的 Gemini keys 沒有後續階段的替代降級路徑。
@@ -51,11 +51,13 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 - 啟動任何真實 run 前，請使用者確認本次會用到的每把 key 在 https://ai.dev/rate-limit 的剩餘額度。不得假設額度，也不得自動重跑整輪。
 - .env 僅為本機秘密設定；不要讀出、貼出或提交 key。Gemini 與 Semantic Scholar key 應按 stage 的實際需求準備。
 
-## Groq 全階段 provider
+## Groq/Gemini 混合 provider
 
-- 在 `.env` 設定 `GROQ_API_KEY` 後，正式路徑的 planner/screening、functional scoring、per-paper notes 與 report 都使用同一個 Groq provider 與固定模型 `openai/gpt-oss-120b`；不需安裝額外 SDK，使用 Groq OpenAI-compatible Chat Completions API。
-- `GROQ_API_KEY` 存在時優先於 Gemini keys；Groq 失敗不會切換 Gemini 或其他模型。503 在同一模型最多重試三次（約 15、30、60 秒加 jitter），耗盡後停止該輪。無 GROQ_API_KEY 才沿用現有 Gemini 路徑。
-- Groq 用 JSON Schema best-effort mode；程式仍以既有 Pydantic 驗證及有限 JSON repair 流程檢查輸出。完整 run 前應在 Groq 帳戶 Limits 頁確認可用額度；文件目前列出的該模型免費方案基礎限制為 1K requests/day、8K tokens/minute，帳戶實際限制優先。
+- 在 `.env` 設定 `GROQ_API_KEY` 後，Groq 固定模型 `openai/gpt-oss-120b` 負責 planner、分批 screening／全域 gap 彙整、functional scoring 與 report；由 `uv sync` 安裝 Groq 官方 Python SDK，透過 Chat Completions API 呼叫。
+- 混合模式下，screening 會依約 3,000 個估計 prompt tokens 的預算切批，逐批產生每篇 keep/maybe/reject 判斷及局部涵蓋／缺漏摘要，再用一次精簡呼叫整合全域 gap 與 follow-up queries。每次 screening 呼叫（包含格式修復）至少間隔 61 秒，為 8K TPM 留出輸出空間；這是保守估算與節流，provider 的實際 tokenization／組織額度仍可能不同。候選若單篇已超出預算會直接停止並報錯，不會截斷摘要或切換模型。per-paper notes 固定用 Gemini（key 由 `--notes-key` 選擇）。任一 screening 或 notes 呼叫失敗時中止，不改由另一 provider 接手。
+- 混合模式所需 key：`GROQ_API_KEY` 與 notes 對應的 `GEMINI_API_KEY[_N]`（預設 key2）。沒有 `GROQ_API_KEY` 時沿用原先全 Gemini 的分工。
+- Groq 503 在同一模型最多重試三次（約 15、30、60 秒加 jitter），耗盡後停止該輪。Groq 使用 JSON Schema best-effort mode，並以既有 Pydantic 驗證及有限 JSON repair 檢查輸出。文件所列免費額度會變動；完整 run 前查看 Groq Limits 與每把 Gemini key 的 AI Studio rate limit。
+- 每次 Gemini／Groq 呼叫會在 `[llm]` log 記錄 `prompt_chars` 與 `prompt_utf8_bytes`，不含 JSON schema 與 API protocol overhead，也不是 token 數估值；Groq 成功回應時另記錄 provider 回報的 `prompt_tokens`。Groq screening 另印出保守估計 tokens 與 TPM 等待秒數；估算不等於 provider tokenizer 結果，遇 413 時以錯誤內容為準。
 - `.env` 範例為 `GROQ_API_KEY=<你的 key>`。不要提交 `.env` 或把 key 貼到聊天、log、文件。
 
 ## 執行命令

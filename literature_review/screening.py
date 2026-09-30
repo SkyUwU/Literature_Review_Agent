@@ -13,13 +13,19 @@ duplicated decisions for real candidates stay fatal.
 from __future__ import annotations
 
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
 from pydantic import BaseModel, Field
 
-from literature_review.llm_evidence import JsonGenerationClient, generate_validated, strip_code_fence
+from literature_review.llm_evidence import (
+    GroqJsonClient,
+    JsonGenerationClient,
+    generate_validated,
+    strip_code_fence,
+)
 from literature_review.models import RankedPaper
 
 __all__ = [
@@ -36,6 +42,10 @@ __all__ = [
 
 _PRIORITIES = ("keep", "maybe", "reject")
 DEFAULT_PER_QUERY_TARGET = 24
+# Keep a screening prompt well below Groq's commonly used 8K TPM tier, leaving
+# room for the JSON response. This is a conservative chars/4 token estimate.
+GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS = 3_000
+GROQ_SCREENING_MIN_INTERVAL_SECONDS = 61.0
 _BUCKET_A_RATIO = 0.25
 _BUCKET_B_RATIO = 0.50
 _BUCKET_C_RATIO = 0.25
@@ -489,6 +499,9 @@ def screen_candidates(
     dropped with a warning. ``parse`` may be injected for tests and must return a
     ``ScreeningResult``.
     """
+    if isinstance(client, GroqJsonClient):
+        return _screen_candidates_groq_batches(query_candidates, client, main_query)
+
     prompt = build_screening_prompt(query_candidates, main_query)
     schema = _LlmScreeningOutput.model_json_schema()
 
@@ -508,4 +521,153 @@ def screen_candidates(
         schema,
         parse=parse_output,
         repair_prompt=_repair,
+    )
+
+
+class _PacedScreeningClient:
+    """Space every Groq screening attempt to stay under the TPM window."""
+
+    def __init__(self, client: JsonGenerationClient) -> None:
+        self._client = client
+        self._last_call: float | None = None
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        if self._last_call is not None:
+            remaining = GROQ_SCREENING_MIN_INTERVAL_SECONDS - (time.monotonic() - self._last_call)
+            if remaining > 0:
+                print(
+                    f"[screening] Groq TPM pacing wait_s={remaining:.1f}",
+                    file=sys.stderr,
+                )
+                time.sleep(remaining)
+        estimate = (len(prompt) + 3) // 4
+        if estimate > GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS:
+            raise ScreeningError(
+                "A Groq screening prompt exceeded the configured estimated-token budget "
+                f"({estimate}>{GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS})."
+            )
+        self._last_call = time.monotonic()
+        print(
+            f"[screening] Groq prompt_estimated_tokens={estimate}",
+            file=sys.stderr,
+        )
+        return self._client.generate_json(prompt, schema)
+
+
+def _screen_candidates_groq_batches(
+    query_candidates: dict[str, SampledCandidates],
+    client: JsonGenerationClient,
+    main_query: str | None,
+) -> ScreeningResult:
+    """Screen bounded candidate batches, then globally combine their gap summaries."""
+    paced = _PacedScreeningClient(client)
+    batches: list[dict[str, SampledCandidates]] = []
+    current: dict[str, SampledCandidates] = {}
+
+    def add_candidate(target: dict[str, SampledCandidates], query: str, item: RankedPaper,
+                      bucket: str | None) -> None:
+        sampled = target.setdefault(query, SampledCandidates(papers=[]))
+        sampled.papers.append(item)
+        if bucket is not None:
+            sampled.buckets[item.paper.paper_id] = bucket
+
+    for query, sampled in query_candidates.items():
+        for item in sampled.papers:
+            bucket = sampled.buckets.get(item.paper.paper_id)
+            candidate = {key: SampledCandidates(papers=list(value.papers), buckets=dict(value.buckets))
+                         for key, value in current.items()}
+            add_candidate(candidate, query, item, bucket)
+            prompt = build_screening_prompt(candidate, main_query)
+            if (len(prompt) + 3) // 4 > GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS:
+                if not current:
+                    raise ScreeningError(
+                        f"Candidate {item.paper.paper_id} alone exceeds the Groq screening prompt budget."
+                    )
+                batches.append(current)
+                current = {}
+                add_candidate(current, query, item, bucket)
+                if (len(build_screening_prompt(current, main_query)) + 3) // 4 > GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS:
+                    raise ScreeningError(
+                        f"Candidate {item.paper.paper_id} alone exceeds the Groq screening prompt budget."
+                    )
+            else:
+                current = candidate
+    if current:
+        batches.append(current)
+
+    merged_decisions: dict[str, list[ScreenDecision]] = {
+        query: [] for query in query_candidates
+    }
+    batch_summaries: list[dict[str, object]] = []
+    for index, batch in enumerate(batches, start=1):
+        candidate_count = sum(len(sampled.papers) for sampled in batch.values())
+        print(
+            f"[screening] Groq batch={index}/{len(batches)} candidates={candidate_count}",
+            file=sys.stderr,
+        )
+        result = _screen_batch(batch, paced, main_query)
+        for query, decisions in result.decisions.items():
+            merged_decisions.setdefault(query, []).extend(decisions)
+        batch_summaries.append({
+            "batch": index,
+            "queries": list(batch),
+            "covered_areas": result.gap.covered_areas,
+            "missing_pieces": result.gap.missing_pieces,
+        })
+
+    expected = {item.paper.paper_id for sampled in query_candidates.values() for item in sampled.papers}
+    actual = {decision.paper_id for decisions in merged_decisions.values() for decision in decisions}
+    if actual != expected:
+        raise ScreeningError(
+            f"Groq screening batches did not cover every candidate exactly once "
+            f"(missing={len(expected - actual)}, extra={len(actual - expected)})."
+        )
+
+    gap_prompt = (
+        "You are consolidating screening summaries from batches of scholarly papers. "
+        "Use only the supplied batch summaries and research topic. Return a JSON object "
+        "matching the schema with global covered_areas, missing_pieces, and up to three "
+        "precise follow_up_queries. Do not repeat initial search queries unless needed.\n\n"
+        f"Research topic: {main_query or '(not provided)'}\n"
+        f"Initial search queries: {list(query_candidates)}\n"
+        f"Queries with no candidates: {[q for q, s in query_candidates.items() if not s.papers]}\n"
+        f"Batch summaries: {batch_summaries}"
+    )
+    gap = generate_validated(
+        paced,
+        GapAnalysis,
+        gap_prompt,
+        GapAnalysis.model_json_schema(),
+    )
+    return ScreeningResult(
+        decisions=merged_decisions,
+        gap=gap,
+        screened_at=datetime.now(timezone.utc),
+    )
+
+
+def _screen_batch(
+    candidates: dict[str, SampledCandidates],
+    client: JsonGenerationClient,
+    main_query: str | None,
+) -> ScreeningResult:
+    """Resolve one batch with the standard schema and repair policy."""
+    prompt = build_screening_prompt(candidates, main_query)
+    schema = _LlmScreeningOutput.model_json_schema()
+
+    def parse(raw: str) -> ScreeningResult:
+        return _resolve_output(
+            _LlmScreeningOutput.model_validate_json(strip_code_fence(raw)), candidates
+        )
+
+    def repair(raw: str, error: BaseException) -> str:
+        return _build_screening_repair_prompt(raw, error, candidates)
+
+    return generate_validated(
+        client,
+        _LlmScreeningOutput,
+        prompt,
+        schema,
+        parse=parse,
+        repair_prompt=repair,
     )
