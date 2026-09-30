@@ -33,8 +33,7 @@ def build_demo_report() -> LiteratureReviewReport:
     )
     assessment = PaperAssessment(
         paper_id=paper.paper_id,
-        relevance_score=5,
-        evidence_quality_score=3,
+        utility_score=8.0,
         recommendation="include",
         rationale=(
             "The paper directly concerns automated literature review and can help "
@@ -48,6 +47,7 @@ def build_demo_report() -> LiteratureReviewReport:
             "can audit a generated future direction instead of trusting it blindly."
         ),
         supporting_paper_ids=[paper.paper_id],
+        supporting_chunk_ids=["arXiv:2412.13612-c1"],
     )
     return LiteratureReviewReport(
         idea=idea,

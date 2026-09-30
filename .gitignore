@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 .venv/
 data/papers/
+data/run/
+data/outputs/
 
 # Secrets: never commit API keys
 .env
@@ -10,3 +12,17 @@ data/papers/
 # Local editor and observability files
 .vscode/
 .langfuse/
+
+# Planner artifacts (committed plans live under .omo/plans/; drafts/evidence/run-state stay untracked)
+.omo/drafts/
+.omo/run-continuation/
+.omo/evidence/
+
+# opencode work artifacts (not for sync)
+.omo/notepads/
+.omo/notes/
+.omo/boulder.json
+.omo/start-work/
+
+# Local archives (packed work products; keep out of git)
+.omo_archive_*.tar.gz

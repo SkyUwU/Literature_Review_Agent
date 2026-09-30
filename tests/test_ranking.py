@@ -1,7 +1,20 @@
+import contextlib
+import io
 import unittest
+from collections.abc import Sequence
 
 from literature_review.models import FilterPolicy, Paper, SearchRequest, SearchResponse
-from literature_review.ranking import filter_and_rank, filter_papers, rank_papers
+from literature_review.ranking import (
+    TOP_VENUE_ALIASES,
+    _VENUE_BY_ALIAS,
+    default_venues,
+    filter_and_rank,
+    filter_papers,
+    normalize_venue,
+    rank_papers,
+    rank_papers_embedding,
+    resolve_venues,
+)
 
 
 def paper(title: str, year: int, citations: int) -> Paper:
@@ -14,6 +27,30 @@ def paper(title: str, year: int, citations: int) -> Paper:
         url=f"https://example.org/{title.replace(' ', '-')}",
         citation_count=citations,
     )
+
+
+class KeywordEncoder:
+    """Deterministic fake encoder: keyword presence decides the vector.
+
+    Texts containing ``keyword`` map to [1, 0] (max query similarity),
+    texts containing "negative" map to [-1, 0] (below the clip floor),
+    everything else maps to [0, 1] (orthogonal to the query).
+    """
+
+    def __init__(self, keyword: str) -> None:
+        self.keyword = keyword
+
+    def __call__(self, texts: Sequence[str]) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for text in texts:
+            lowered = text.lower()
+            if self.keyword in lowered:
+                vectors.append([1.0, 0.0])
+            elif "negative" in lowered:
+                vectors.append([-1.0, 0.0])
+            else:
+                vectors.append([0.0, 1.0])
+        return vectors
 
 
 class RankingTests(unittest.TestCase):
@@ -54,3 +91,229 @@ class RankingTests(unittest.TestCase):
         result = filter_and_rank(response, FilterPolicy(min_year=2024))
         self.assertEqual(result.search_response.provider, "openalex")
         self.assertEqual(result.ranked_papers[0].rank, 1)
+
+    # -- embedding ranking (Todo 1) -----------------------------------------
+
+    def test_embedding_ranks_by_cosine_similarity(self) -> None:
+        encoder = KeywordEncoder("semantic")
+        ranked = rank_papers_embedding(
+            [
+                paper("Unrelated Tool", 2024, 5),
+                paper("Semantic Survey", 2024, 5),
+            ],
+            "semantic ranking",
+            encoder,
+        )
+        self.assertEqual(ranked[0].paper.title, "Semantic Survey")
+        self.assertGreater(ranked[0].score, ranked[1].score)
+        self.assertEqual(ranked[0].matched_terms, [])
+        self.assertIn("Semantic ranking", ranked[0].rationale)
+
+    def test_embedding_three_components_citation_and_recency_compensate(self) -> None:
+        encoder = KeywordEncoder("semantic")
+        ranked = rank_papers_embedding(
+            [
+                paper("Semantic Paper", 2021, 0),
+                paper("Unrelated Survey", 2025, 1000),
+            ],
+            "semantic ranking",
+            encoder,
+        )
+        # cosine 1.0 + 0.1 recency vs cosine 0.0 + ~1.0 citation + 0.5 recency
+        self.assertEqual(ranked[0].paper.title, "Unrelated Survey")
+        self.assertGreater(ranked[0].score, ranked[1].score)
+
+    def test_embedding_negative_similarity_clipped_to_zero(self) -> None:
+        encoder = KeywordEncoder("semantic")
+        ranked = rank_papers_embedding(
+            [paper("Negative Paper", 2024, 0)],
+            "semantic ranking",
+            encoder,
+        )
+        self.assertEqual(ranked[0].score, 0.4)
+
+    def test_embedding_rejects_wrong_vector_count(self) -> None:
+        def broken_encoder(texts: Sequence[str]) -> list[list[float]]:
+            return [[0.0, 1.0] for _ in texts] + [[0.0, 1.0]]
+
+        with self.assertRaisesRegex(ValueError, "encoder returned 3 vectors; expected 2"):
+            rank_papers_embedding(
+                [paper("One", 2024, 0), paper("Two", 2024, 0)],
+                "semantic ranking",
+                broken_encoder,
+            )
+
+    def test_filter_and_rank_with_encoder_uses_embedding_path(self) -> None:
+        response = SearchResponse(
+            provider="openalex",
+            request=SearchRequest(query="semantic ranking"),
+            total_candidates=2,
+            papers=[
+                paper("Unrelated Tool", 2024, 5),
+                paper("Semantic Survey", 2024, 5),
+            ],
+            skipped_candidates=0,
+        )
+        result = filter_and_rank(response, FilterPolicy(min_year=2023), encoder=KeywordEncoder("semantic"))
+        self.assertEqual(result.ranked_papers[0].paper.title, "Semantic Survey")
+        self.assertEqual(result.ranked_papers[0].matched_terms, [])
+        self.assertIn("Semantic ranking", result.ranked_papers[0].rationale)
+
+    def test_filter_and_rank_without_encoder_keeps_lexical_path(self) -> None:
+        response = SearchResponse(
+            provider="openalex",
+            request=SearchRequest(query="literature review agent"),
+            total_candidates=1,
+            papers=[paper("Literature Review Agent", 2025, 10)],
+            skipped_candidates=0,
+        )
+        result = filter_and_rank(response, FilterPolicy(min_year=2024))
+        self.assertIn("Matched", result.ranked_papers[0].rationale)
+        self.assertNotEqual(result.ranked_papers[0].matched_terms, [])
+
+
+def venue_paper(venue: str | None, title: str = "Venue Test") -> Paper:
+    item = paper(title, 2025, 10)
+    item.venue = venue
+    return item
+
+
+class VenueWhitelistTests(unittest.TestCase):
+    def test_normalize_venue_strips_case_and_punctuation(self) -> None:
+        self.assertEqual(
+            normalize_venue("Proceedings of the International Conference on Learning Representations (ICLR)"),
+            "proceedingsoftheinternationalconferenceonlearningrepresentationsiclr",
+        )
+        self.assertEqual(normalize_venue("NeurIPS"), "neurips")
+        self.assertEqual(normalize_venue("  "), "")
+
+    def test_default_venues_span_keys_and_aliases_without_empties(self) -> None:
+        tokens = default_venues()
+        self.assertIn("neurips", tokens)
+        self.assertIn("iclr", tokens)
+        self.assertIn("internationalconferenceonlearningrepresentations", tokens)
+        self.assertIn("aaai", tokens)
+        self.assertIn("ijcai", tokens)
+        for token in tokens:
+            self.assertTrue(token)
+        for key in TOP_VENUE_ALIASES:
+            self.assertIn(normalize_venue(key), tokens)
+
+    def test_whitelist_keeps_alias_and_full_name_variants(self) -> None:
+        whitelist = default_venues()
+        kept = filter_papers(
+            [
+                venue_paper("NeurIPS", title="One NIPS paper"),
+                venue_paper("International Conference on Learning Representations", title="Another ICLR paper"),
+                venue_paper("ACL", title="Third ACL paper"),
+            ],
+            FilterPolicy(venues=whitelist),
+        )
+        self.assertEqual(len(kept), 3)
+
+    def test_whitelist_keeps_long_proceedings_string_by_containment(self) -> None:
+        kept = filter_papers(
+            [
+                venue_paper("Proceedings of the International Conference on Learning Representations (ICLR)")
+            ],
+            FilterPolicy(venues=default_venues()),
+        )
+        self.assertEqual(len(kept), 1)
+
+    def test_whitelist_matches_mixed_case_and_punctuation(self) -> None:
+        kept = filter_papers(
+            [venue_paper("PROC. IEEE CONF. ON COMPUTER VISION AND PATTERN RECOGNITION (CVPR)")],
+            FilterPolicy(venues=default_venues()),
+        )
+        self.assertEqual(len(kept), 1)
+
+    def test_whitelist_drops_unlisted_and_missing_venues(self) -> None:
+        filtered = filter_papers(
+            [
+                venue_paper("Journal of Test Cases"),
+                venue_paper(None),
+            ],
+            FilterPolicy(venues=("icml",)),
+        )
+        self.assertEqual(filtered, [])
+
+    def test_empty_whitelist_is_a_noop(self) -> None:
+        kept = filter_papers(
+            [
+                venue_paper("Journal of Anything", title="Journal Paper"),
+                venue_paper(None, title="Missing Venue Paper"),
+            ],
+            FilterPolicy(),
+        )
+        self.assertEqual(len(kept), 2)
+
+    def test_custom_whitelist_tokens_match_exactly(self) -> None:
+        kept = filter_papers(
+            [
+                venue_paper("ICLR workshop on learning representations"),
+                venue_paper("Something else"),
+            ],
+            FilterPolicy(venues=("iclr",)),
+        )
+        self.assertEqual([item.venue for item in kept], ["ICLR workshop on learning representations"])
+
+
+NEURIPS_EXPANDED = (
+    "neurips",
+    "nips",
+    "annualconferenceonneuralinformationprocessingsystems",
+)
+ICML_EXPANDED = ("icml", "internationalconferenceonmachinelearning")
+
+
+class ResolveVenuesTests(unittest.TestCase):
+    def test_none_selects_the_default_whitelist(self) -> None:
+        self.assertEqual(resolve_venues(None), default_venues())
+
+    def test_empty_and_whitespace_disable_the_filter(self) -> None:
+        self.assertEqual(resolve_venues(""), ())
+        self.assertEqual(resolve_venues("   "), ())
+
+    def test_none_token_disables_the_filter(self) -> None:
+        self.assertEqual(resolve_venues("none"), ())
+        self.assertEqual(resolve_venues("  NONE  "), ())
+
+    def test_all_blank_segments_disable_without_warning(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(resolve_venues(", ,"), ())
+        self.assertEqual(err.getvalue(), "")
+
+    def test_canonical_key_and_alias_expand_identically(self) -> None:
+        self.assertEqual(resolve_venues("NeurIPS"), resolve_venues("nips"))
+
+    def test_alias_expands_to_full_venue_alias_set(self) -> None:
+        self.assertEqual(resolve_venues("nips"), NEURIPS_EXPANDED)
+
+    def test_multi_venue_union_preserves_input_order(self) -> None:
+        self.assertEqual(resolve_venues("neurips, icml"), NEURIPS_EXPANDED + ICML_EXPANDED)
+
+    def test_deduplicates_repeated_names(self) -> None:
+        self.assertEqual(resolve_venues("neurips,nips"), NEURIPS_EXPANDED)
+
+    def test_all_unknown_names_disable_the_filter_with_warning(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(resolve_venues("tyop"), ())
+        self.assertIn("所有輸入均未識別頂會", err.getvalue())
+
+    def test_unknown_name_used_as_raw_token_with_warning(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(resolve_venues("nips,cvprw"), NEURIPS_EXPANDED + ("cvprw",))
+        self.assertIn("未識別頂會", err.getvalue())
+
+    def test_venue_index_maps_every_alias_to_its_canonical(self) -> None:
+        for canonical, aliases in TOP_VENUE_ALIASES.items():
+            for name in (*aliases, canonical):
+                token = normalize_venue(name)
+                if token:
+                    self.assertEqual(_VENUE_BY_ALIAS[token], canonical)
+
+    def test_unknown_case_mixing_and_full_names_are_still_matched_by_aliases(self) -> None:
+        self.assertEqual(
+            resolve_venues("international conference on machine learning"),
+            ICML_EXPANDED,
+        )

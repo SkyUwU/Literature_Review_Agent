@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -18,7 +19,7 @@ from literature_review.models import (
     SearchResponse,
     SelectionPolicy,
 )
-from literature_review.ranking import filter_and_rank
+from literature_review.ranking import filter_and_rank, resolve_venues
 from literature_review.selection import select_papers
 from literature_review.assessment import assess_selected_papers
 
@@ -26,7 +27,7 @@ OPENALEX_SEARCH_URL = "https://api.openalex.org/works"
 USER_AGENT = "LiteratureReviewAgent/0.1 (academic-project)"
 REQUESTED_FIELDS = (
     "id,title,authorships,publication_year,abstract_inverted_index,"
-    "primary_location,cited_by_count"
+    "primary_location,cited_by_count,best_oa_location,doi"
 )
 
 
@@ -55,10 +56,20 @@ def build_search_url(request: SearchRequest) -> str:
 
 
 def fetch_json(url: str) -> dict[str, Any]:
-    """Fetch JSON with a timeout and turn network failures into domain errors."""
+    """Fetch JSON with a timeout and turn network failures into domain errors.
+
+    When ``OPENALEX_API_KEY`` is set in the environment, it is sent as a bearer
+    token so OpenAlex uses the caller's dedicated daily budget instead of the
+    anonymous shared pool (the 2026 error message explicitly recommends a free
+    API key for uninterrupted access). The key stays out of the URL and logs.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    api_key = os.environ.get("OPENALEX_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     for attempt in range(3):
         try:
-            request = Request(url, headers={"User-Agent": USER_AGENT})
+            request = Request(url, headers=headers)
             with urlopen(request, timeout=20) as response:  # noqa: S310 - fixed HTTPS provider URL
                 return json.load(response)
         except HTTPError as error:
@@ -83,6 +94,21 @@ def reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str | N
     return " ".join(positions[position] for position in range(max(positions) + 1) if position in positions)
 
 
+def norm_doi(raw: object) -> str | None:
+    """Normalise a DOI to its bare lowercase form (no URL prefix), or None.
+
+    Shared by the OpenAlex and Semantic Scholar adapters so cross-source dedup
+    keys compare equal for the same paper.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = raw.strip().lower()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+    return value or None
+
+
 def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
     """Normalize one provider record; skip records without usable abstract evidence."""
     paper_id = record.get("id")
@@ -97,9 +123,17 @@ def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
 
     if not all([paper_id, title, abstract, year]) or not authors:
         return None
+    if len(abstract.strip()) < 20:
+        # Paper.abstract min_length=20 raises at construction; skip truncated
+        # OpenAlex abstracts here instead of crashing the whole search.
+        return None
+
+    best_oa = record.get("best_oa_location") or {}
+    pdf_url = best_oa.get("pdf_url")
 
     return Paper(
         paper_id=paper_id,
+        doi=norm_doi(record.get("doi")),
         title=title,
         authors=authors,
         year=year,
@@ -107,6 +141,7 @@ def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
         url=(record.get("primary_location") or {}).get("landing_page_url") or paper_id,
         venue=((record.get("primary_location") or {}).get("source") or {}).get("display_name"),
         citation_count=record.get("cited_by_count"),
+        open_access_pdf_url=pdf_url,
     )
 
 
@@ -136,6 +171,10 @@ def main() -> None:
     parser.add_argument("--year-to", type=int)
     parser.add_argument("--rank", action="store_true", help="Filter and rank the retrieved papers")
     parser.add_argument("--min-citations", type=int, default=0)
+    parser.add_argument(
+        "--venues",
+        help="Comma-separated top venues by name (matches the built-in 17-conference list by key or alias and expands its aliases; unrecognized names filter as raw substrings with a warning); 'none' or an empty string disables the filter; default is all built-in top venues",
+    )
     parser.add_argument("--top-k", type=int, help="Select the top K ranked papers for reading")
     parser.add_argument("--min-score", type=float, help="Minimum ranking score for selection")
     parser.add_argument("--assess", action="store_true", help="Create metadata-only assessments for selected papers")
@@ -158,6 +197,7 @@ def main() -> None:
         or arguments.min_score is not None
         or arguments.assess
     )
+    venues = resolve_venues(arguments.venues)
     if should_rank:
         ranked_response = filter_and_rank(
             response,
@@ -165,6 +205,7 @@ def main() -> None:
                 min_year=arguments.year_from,
                 max_year=arguments.year_to,
                 min_citation_count=arguments.min_citations,
+                venues=venues,
             ),
         )
         if arguments.top_k is not None or arguments.min_score is not None or arguments.assess:
