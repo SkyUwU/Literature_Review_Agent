@@ -30,9 +30,11 @@
 - 正式 end-to-end 入口：`literature_review.main`。Dry run 使用規則式規劃並停在下載階段，不呼叫 Gemini、不寫報告；只從 `.env` 載入可選的 `OPENALEX_API_KEY` 供搜尋驗證。
 - 每篇論文內部取樣及 functional scoring 是正式證據路徑；corpus-wide retrieval、lexical retrieval、RCS 等是 CLI／比較／legacy 路徑。
 - 真實流程的 Gemini key 選擇：planner + screening 共用 `--plan-key`；functional scoring 用 `--scoring-key`；per-paper notes 用 `--notes-key`；report 用 `--report-key`。未指定 `--scoring-key` 時，為相容舊命令而沿用 `--notes-key`。
+- Gemini 503 最多 exponential backoff 重試 3 次；重試後仍失敗就停止該輪，不降級略過 screening 或改用其他模型。
 - 預設近三年與 top-venue whitelist 可能使候選為零；必要時可用 `--year-from`、`--year-to`、`--venues none` 做一次性覆寫，勿默默改變政策。
 - 預設下載資料夾 `data/run/` 每次真實執行會重建；報告及 papers JSON 累積在 `data/outputs/`。指定 `--dest-dir` 可選擇其他下載位置。
 - Gemini key 分工、錯誤降級、額度／速率控制及 run 命令詳見 `HANDOFF.md`；503 是服務錯誤，不能由此推斷生成內容品質。
+- 設定 `GROQ_API_KEY` 可讓正式 LLM stages 全部固定使用 Groq `openai/gpt-oss-120b`；Groq 失敗時中止，不降級或切換模型。額度與設定見 `HANDOFF.md`。
 
 ## 常用命令（PowerShell）
 

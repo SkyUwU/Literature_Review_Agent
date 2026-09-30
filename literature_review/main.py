@@ -11,8 +11,9 @@ is already in the set counts as satisfied without writing a new file and
 without triggering a backfill. Real runs rank papers by bge-small-en-v1.5
 embedding similarity to title+abstract (plus citation/recency) with hard-coded
 limits ``LIMIT=100`` / ``TOTAL_TARGET=20`` / ``TOP_K_CHUNKS=32``. The LLM
-planner is the default (``GEMINI_API_KEY``); ``--rule-based`` is the escape
-hatch, and ``--dry-run`` always forces the deterministic rule-based plan with
+planner uses Groq when ``GROQ_API_KEY`` is configured, otherwise the default
+Gemini key; ``--rule-based`` is the escape hatch, and ``--dry-run`` always forces
+the deterministic rule-based plan with
 lexical ranking (no embedding model), so a dry run stops after downloads with
 no text extraction, embedding encoder, LLM, or API key touched.
 """
@@ -38,6 +39,7 @@ from literature_review.extraction import extract_pdf_text
 from literature_review.llm_evidence import (
     DailyQuotaExhausted,
     GeminiJsonClient,
+    GroqJsonClient,
     JsonGenerationClient,
     LlmEvidenceError,
     LlmServiceError,
@@ -111,6 +113,20 @@ def _make_plan(
     if use_llm_plan and client_plan is not None:
         try:
             return create_llm_plan(query, client_plan)
+        except LlmServiceError:
+            # Do not silently substitute a rule-based plan after exhausting
+            # bounded retries on a transient provider service error.
+            raise
+        except LlmEvidenceError as error:
+            # An explicitly configured Groq run must not degrade to a
+            # rule-based plan when its provider rejects or cannot serve a call.
+            if isinstance(client_plan, GroqJsonClient):
+                raise
+            print(
+                f"LLM plan unavailable, falling back to rule-based plan: {error}",
+                file=sys.stderr,
+            )
+            return create_rule_based_plan(query)
         except Exception as error:
             print(
                 f"LLM plan unavailable, falling back to rule-based plan: {error}",
@@ -399,23 +415,12 @@ def run_end_to_end(
         try:
             screening_result = screen_candidates(query_candidates, client_screen, main_query=query)
         except (DailyQuotaExhausted, LlmServiceError) as error:
-            # The screening key is out of quota (429) or the provider is
-            # overloaded (503). Retrying would spend more of the daily budget
-            # for nothing, so the run degrades to a plain rank-based download of
-            # the candidates already retrieved — searching them again would
-            # spend search quota the run does not need. screening_result stays
-            # None, so the output records that no screening happened.
             print(
-                f"Screening skipped ({type(error).__name__}: {error}); downloading the "
-                "already-retrieved candidates without screening.",
+                f"Screening failed ({type(error).__name__}: {error}); stopping the run "
+                "without downloading unscreened candidates.",
                 file=sys.stderr,
             )
-            _download_per_query(
-                lambda: (
-                    (query_text, sampled.papers)
-                    for query_text, sampled in query_candidates.items()
-                )
-            )
+            raise
         else:
             follow_up_queries = {
                 fu.query for fu in screening_result.gap.follow_up_queries
@@ -448,14 +453,12 @@ def run_end_to_end(
                         follow_up_candidates, client_screen, main_query=query
                     )
                 except (DailyQuotaExhausted, LlmServiceError) as error:
-                    # The main screening already succeeded, so a failed gap round
-                    # only costs the follow-up queries — the keep/maybe decisions
-                    # collected so far stay valid and the run continues.
                     print(
-                        f"Gap follow-up screening skipped ({type(error).__name__}: {error}); "
-                        "keeping the decisions from the main screening round.",
+                        f"Gap follow-up screening failed ({type(error).__name__}: {error}); "
+                        "stopping the run.",
                         file=sys.stderr,
                     )
+                    raise
                 else:
                     for query, decisions in follow_up_screening.decisions.items():
                         screening_result.decisions.setdefault(query, []).extend(decisions)
@@ -690,13 +693,13 @@ def _build_clients(
 
     ``load_local_env()`` runs first for a real run. A dry run loads only the
     optional OpenAlex key so authenticated metadata search works without loading
-    any Gemini keys or constructing LLM clients.
+    any model-provider keys or constructing LLM clients.
 
     The LLM planner is the default for a full run; it is skipped on ``--dry-run``
-    (zero keys) and on ``--rule-based`` (escape hatch). A missing planner key
-    prints a warning and keeps ``client_plan`` as ``None``, letting
-    :func:`_make_plan` fall back to the deterministic rule-based plan without
-    aborting the run. ``--dry-run`` never reads Gemini keys or constructs LLM clients.
+    (zero keys) and on ``--rule-based`` (escape hatch). GROQ_API_KEY routes every
+    formal LLM stage through Groq; absent that key, the existing Gemini key
+    configuration is used. ``--dry-run`` never reads model keys or constructs
+    LLM clients.
 
     ``--plan-key`` / ``--notes-key`` / ``--report-key`` select which numbered key
     each stage uses (see :func:`key_env_name`), so a stage can move to a fresh
@@ -706,8 +709,9 @@ def _build_clients(
     ``client_rcs`` is built from the local Ollama endpoint when ``OLLAMA_BASE_URL``
     is configured (M6); when it is missing the client stays ``None`` and the RCS
     stage falls back to the Gemini synthesis client (existing behavior).
-    ``client_report`` (C2c) uses the dedicated ``GEMINI_API_KEY_3``: a full run
-    without it exits with code 1 (the report has no fallback, mirroring key2).
+    With Gemini, ``client_report`` uses the dedicated ``GEMINI_API_KEY_3``; with
+    Groq it shares the configured ``GROQ_API_KEY`` and fixed model with all
+    other formal LLM stages.
     """
     plan_suffix = getattr(arguments, "plan_key", 1)
     notes_suffix = getattr(arguments, "notes_key", 2)
@@ -720,36 +724,47 @@ def _build_clients(
         load_local_env(only={"OPENALEX_API_KEY"})
     else:
         load_local_env()
+    use_groq = not arguments.dry_run and bool(os.getenv("GROQ_API_KEY"))
+
+    def build_stage_client(label: str, *, gemini_suffix: int | None = None):
+        if use_groq:
+            return GroqJsonClient(label=label)
+        assert gemini_suffix is not None
+        api_key = os.getenv(key_env_name(gemini_suffix))
+        if not api_key:
+            print(f"請在 .env 設定 {key_env_name(gemini_suffix)}", file=sys.stderr)
+            raise SystemExit(1)
+        return GeminiJsonClient(api_key=api_key, label=label)
+
     client_plan: JsonGenerationClient | None = None
     if not arguments.dry_run and not arguments.rule_based:
-        api_key_1 = os.getenv(key_env_name(plan_suffix))
-        if api_key_1:
-            try:
-                client_plan = GeminiJsonClient(api_key=api_key_1, label="plan+screening")
-            except LlmEvidenceError as error:
-                print(f"LLM plan unavailable, falling back to rule-based plan: {error}", file=sys.stderr)
-                client_plan = None
+        if use_groq:
+            client_plan = build_stage_client("plan+screening")
         else:
-            print(
-                f"{key_env_name(plan_suffix)} 未設定：改用 rule-based 搜尋計畫（逃生門）",
-                file=sys.stderr,
-            )
+            api_key_1 = os.getenv(key_env_name(plan_suffix))
+            if api_key_1:
+                try:
+                    client_plan = GeminiJsonClient(api_key=api_key_1, label="plan+screening")
+                except LlmEvidenceError as error:
+                    print(f"LLM plan unavailable, falling back to rule-based plan: {error}", file=sys.stderr)
+                    client_plan = None
+            else:
+                print(
+                    f"{key_env_name(plan_suffix)} 未設定：改用 rule-based 搜尋計畫（逃生門）",
+                    file=sys.stderr,
+                )
     client_synth: JsonGenerationClient | None = None
     client_scoring: JsonGenerationClient | None = None
     if not arguments.dry_run:
-        api_key_2 = os.getenv(key_env_name(notes_suffix))
-        if not api_key_2:
-            print(f"請在 .env 設定 {key_env_name(notes_suffix)}", file=sys.stderr)
-            raise SystemExit(1)
-        client_synth = GeminiJsonClient(api_key=api_key_2, label="paper-notes")
-        if scoring_key_explicit or not os.getenv("OLLAMA_BASE_URL"):
-            api_key_scoring = os.getenv(key_env_name(scoring_suffix))
-            if not api_key_scoring:
-                print(f"請在 .env 設定 {key_env_name(scoring_suffix)}", file=sys.stderr)
-                raise SystemExit(1)
-            client_scoring = GeminiJsonClient(
-                api_key=api_key_scoring, label="functional-scoring"
-            )
+        if use_groq:
+            client_synth = build_stage_client("paper-notes")
+            client_scoring = build_stage_client("functional-scoring")
+        else:
+            client_synth = build_stage_client("paper-notes", gemini_suffix=notes_suffix)
+            if scoring_key_explicit or not os.getenv("OLLAMA_BASE_URL"):
+                client_scoring = build_stage_client(
+                    "functional-scoring", gemini_suffix=scoring_suffix
+                )
     client_rcs: JsonGenerationClient | None = None
     if not arguments.dry_run:
         if os.getenv("OLLAMA_BASE_URL"):
@@ -760,11 +775,10 @@ def _build_clients(
                 client_rcs = None
     client_report: JsonGenerationClient | None = None
     if not arguments.dry_run:
-        api_key_3 = os.getenv(key_env_name(report_suffix))
-        if not api_key_3:
-            print(f"請在 .env 設定 {key_env_name(report_suffix)}", file=sys.stderr)
-            raise SystemExit(1)
-        client_report = GeminiJsonClient(api_key=api_key_3, label="report")
+        if use_groq:
+            client_report = build_stage_client("report")
+        else:
+            client_report = build_stage_client("report", gemini_suffix=report_suffix)
     return client_plan, client_synth, client_scoring, client_rcs, client_report
 
 

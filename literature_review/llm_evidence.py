@@ -3,9 +3,12 @@
 import hashlib
 import json
 import os
+import random
 import re
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, TypeVar
@@ -29,6 +32,8 @@ RCS_BATCH_SIZE = 4
 DEFAULT_REQUESTS_PER_MINUTE = 5
 DEFAULT_REQUESTS_PER_DAY = 20
 DEFAULT_429_RETRIES = 1
+DEFAULT_503_RETRIES = 3
+DEFAULT_503_BASE_DELAY_SECONDS = 15.0
 # One second of slack on top of 60/rpm so a request never lands exactly on the
 # provider's own per-minute boundary.
 PACE_SLACK_SECONDS = 1.0
@@ -43,12 +48,7 @@ class LlmOutputSyntaxError(LlmEvidenceError):
 
 
 class LlmServiceError(LlmEvidenceError):
-    """Raised for a provider-side 5xx (overloaded / unavailable).
-
-    The free tier answers a load burst with HTTP 503, which is transient but not
-    retryable within a run: retrying only burns the daily budget, so the caller
-    stops the stage and degrades instead.
-    """
+    """Raised when a bounded retry budget for a provider-side 5xx is exhausted."""
 
 
 class DailyQuotaExhausted(LlmEvidenceError):
@@ -98,7 +98,15 @@ class GeminiJsonClient:
             from google import genai
         except ImportError as error:
             raise LlmEvidenceError("Install dependencies with 'uv sync' before using Gemini.") from error
-        self._client = genai.Client(api_key=key)
+        # The SDK's Interactions API has its own default 5xx retry loop. Disable
+        # those nested retries so every provider attempt is paced and counted by
+        # our per-key tracker and the bounded application-level policy below.
+        self._client = genai.Client(
+            api_key=key,
+            http_options=genai.types.HttpOptions(
+                retry_options=genai.types.HttpRetryOptions(attempts=1)
+            ),
+        )
         self._model = model
         self._label = label or "gemini"
         self._key_id = _key_slot(key)
@@ -106,8 +114,9 @@ class GeminiJsonClient:
 
     @observe(name="llm_call")
     def generate_json(self, prompt: str, schema: dict | None = None) -> str:
-        budget = _env_int("GEMINI_429_RETRIES", DEFAULT_429_RETRIES)
-        attempt = 0
+        retry_budget = _env_int("GEMINI_429_RETRIES", DEFAULT_429_RETRIES)
+        retry_after_attempt = 0
+        service_attempt = 0
         while True:
             self._tracker.require_slot()
             delay = self._tracker.wait_for_slot()
@@ -128,10 +137,25 @@ class GeminiJsonClient:
                 )
             except Exception as error:
                 kind, retry_after = classify_provider_error(error)
-                if kind == "retry_after" and attempt < budget:
-                    attempt += 1
-                    self._log(delay, f"429 retry_after={retry_after:g}s attempt={attempt}")
+                if kind == "retry_after" and retry_after_attempt < retry_budget:
+                    retry_after_attempt += 1
+                    self._log(
+                        delay,
+                        f"429 retry_after={retry_after:g}s "
+                        f"attempt={retry_after_attempt}/{retry_budget}",
+                    )
                     self._tracker.pause(retry_after)
+                    continue
+                if kind == "service" and service_attempt < DEFAULT_503_RETRIES:
+                    service_attempt += 1
+                    backoff = DEFAULT_503_BASE_DELAY_SECONDS * (2 ** (service_attempt - 1))
+                    backoff += random.uniform(0.0, 1.0)
+                    self._log(
+                        delay,
+                        f"503 retry_in={backoff:.1f}s "
+                        f"attempt={service_attempt}/{DEFAULT_503_RETRIES}",
+                    )
+                    self._tracker.pause(backoff)
                     continue
                 self._log(delay, f"error kind={kind}")
                 raise _translate_error(kind, error) from error
@@ -148,6 +172,92 @@ class GeminiJsonClient:
             f"calls={self._tracker.calls}/{budget} status={status}",
             file=sys.stderr,
         )
+
+
+class GroqJsonClient:
+    """Groq OpenAI-compatible JSON client used across the formal LLM stages."""
+
+    DEFAULT_MODEL = "openai/gpt-oss-120b"
+    API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        model: str | None = None,
+        label: str | None = None,
+    ) -> None:
+        load_local_env()
+        key = api_key or os.getenv("GROQ_API_KEY")
+        if not key:
+            raise LlmEvidenceError("GROQ_API_KEY is not set in the environment.")
+        self._api_key = key
+        self._model = model or self.DEFAULT_MODEL
+        self._label = label or "groq"
+
+    @observe(name="llm_call")
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        response_schema = schema or LlmEvidenceAssessmentBatch.model_json_schema()
+        body = {
+            "model": self._model,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "literature_review_output",
+                    "strict": False,
+                    "schema": response_schema,
+                },
+            },
+            "temperature": 0.2,
+            "stream": False,
+        }
+        request = urllib.request.Request(
+            self.API_URL,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        payload = None
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(request, timeout=180) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as error:
+                # Never include request headers or the key in an error message.
+                detail = error.read().decode("utf-8", errors="replace")[:1000]
+                if error.code == 503 and attempt < 3:
+                    delay = 15.0 * (2**attempt) + random.uniform(0.0, 1.0)
+                    print(
+                        f"[llm] label={self._label} model={self._model} "
+                        f"status=503 retry_in={delay:.1f}s attempt={attempt + 1}/3",
+                        file=sys.stderr,
+                    )
+                    time.sleep(delay)
+                    continue
+                if 500 <= error.code < 600:
+                    raise LlmServiceError(
+                        f"Groq service returned HTTP {error.code} after bounded retries."
+                    ) from error
+                raise LlmEvidenceError(
+                    f"Groq request failed with HTTP {error.code}: {detail}"
+                ) from error
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
+                raise LlmServiceError(f"Groq request failed: {error}") from error
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise LlmEvidenceError("Groq returned an invalid response body.") from error
+
+        try:
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as error:
+            raise LlmEvidenceError("Groq response was missing message content.") from error
+        if not isinstance(content, str) or not content.strip():
+            raise LlmEvidenceError("Groq returned no text output.")
+        return content.strip()
 
 
 class _RateTracker:
@@ -291,8 +401,14 @@ def _translate_error(kind: str, error: BaseException) -> LlmEvidenceError:
     return LlmEvidenceError(str(error))
 
 
-def load_local_env(path: str | Path = ".env") -> None:
-    """Load simple KEY=VALUE entries only when that key is not already set."""
+def load_local_env(
+    path: str | Path = ".env", *, only: set[str] | None = None
+) -> None:
+    """Load local KEY=VALUE entries, optionally restricting the variable names.
+
+    Existing process environment values always win. ``only`` lets no-LLM flows
+    load provider credentials needed for retrieval without loading model keys.
+    """
     env_path = Path(path)
     if not env_path.is_file():
         return
@@ -302,6 +418,8 @@ def load_local_env(path: str | Path = ".env") -> None:
             continue
         key, value = line.split("=", maxsplit=1)
         key = key.strip()
+        if only is not None and key not in only:
+            continue
         if key and key not in os.environ:
             os.environ[key] = value.strip().strip('"').strip("'")
 

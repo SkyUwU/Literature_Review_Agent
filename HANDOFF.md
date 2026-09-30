@@ -45,11 +45,18 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 
 - 正式流程可分配四個 Gemini key 群組：planner + screening 共用 `--plan-key`（預設 1）、functional scoring 使用 `--scoring-key`（預設沿用 `--notes-key`）、per-paper notes 使用 `--notes-key`（預設 2）、report 使用 `--report-key`（預設 3）。例如 `--plan-key 2 --scoring-key 3 --notes-key 4 --report-key 5` 可分配 Key 2–5；未指定 `--scoring-key` 時維持舊版 scoring/notes 共用同一 key。
 - 每把 key 有獨立速率追蹤；預設最多 20 次／process，預設約 13 秒 pacing。stderr 的 [llm] 紀錄包含 stage、key hash、等待時間、呼叫數及狀態，不會輸出完整 key。
-- 503／overload 會轉成 LlmServiceError，不盲目重試。Planner 可退回 rule-based；screening 可跳過並使用已檢索候選，gap follow-up 失敗只放棄 follow-up。後段 functional scoring、notes 或 report 的錯誤可能中止該輪；應以實際 log 確認失敗階段。
+- Gemini 503／overload 會在同一模型、同一階段做最多 3 次 exponential backoff 重試（約 15、30、60 秒，另加少量 jitter）；這高於每 key 13 秒的 RPM pacing 間隔。SDK 內層重試設為單次，避免超出應用層次數；每次嘗試都計入本 process 的該 key 呼叫數。重試耗盡後不切換模型或降級：planner、main screening、gap follow-up screening、functional scoring、notes、report 均中止該輪。429 的 quota／retry-after 規則維持獨立，不套用 503 重試。
 - 429 依 provider 訊息分類；有 per-minute retry hint 時最多有限重試，日額度耗盡不重試。notes/scoring/report 所指定的 Gemini keys 沒有後續階段的替代降級路徑。
 - OpenAlex 503 若訊息指出 anonymous search paused，需使用 OPENALEX_API_KEY；OpenAlex 504 query_timeout 則表示該次搜尋逾時。Dry run 的 rule-based planner 會把輸入 query 原樣延伸為 survey/literature-review/comparison 子查詢，應輸入精簡的主題詞而非長篇研究問題。發生 timeout 時檢查 stdout 的 Search plan，縮短導致錯誤的子查詢後再執行；不要盲目重送同一條過長 query。
 - 啟動任何真實 run 前，請使用者確認本次會用到的每把 key 在 https://ai.dev/rate-limit 的剩餘額度。不得假設額度，也不得自動重跑整輪。
 - .env 僅為本機秘密設定；不要讀出、貼出或提交 key。Gemini 與 Semantic Scholar key 應按 stage 的實際需求準備。
+
+## Groq 全階段 provider
+
+- 在 `.env` 設定 `GROQ_API_KEY` 後，正式路徑的 planner/screening、functional scoring、per-paper notes 與 report 都使用同一個 Groq provider 與固定模型 `openai/gpt-oss-120b`；不需安裝額外 SDK，使用 Groq OpenAI-compatible Chat Completions API。
+- `GROQ_API_KEY` 存在時優先於 Gemini keys；Groq 失敗不會切換 Gemini 或其他模型。503 在同一模型最多重試三次（約 15、30、60 秒加 jitter），耗盡後停止該輪。無 GROQ_API_KEY 才沿用現有 Gemini 路徑。
+- Groq 用 JSON Schema best-effort mode；程式仍以既有 Pydantic 驗證及有限 JSON repair 流程檢查輸出。完整 run 前應在 Groq 帳戶 Limits 頁確認可用額度；文件目前列出的該模型免費方案基礎限制為 1K requests/day、8K tokens/minute，帳戶實際限制優先。
+- `.env` 範例為 `GROQ_API_KEY=<你的 key>`。不要提交 `.env` 或把 key 貼到聊天、log、文件。
 
 ## 執行命令
 
