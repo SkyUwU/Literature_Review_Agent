@@ -32,6 +32,12 @@ from literature_review.models import (
     LlmFunctionalAssessmentBatch,
     PaperAssessment,
 )
+from literature_review.section_stats import (
+    _CANONICAL_CATEGORIES,
+    classify_chunk_category,
+    is_abstract_chunk,
+    is_appendix_chunk,
+)
 
 FUNCTIONAL_BATCH_SIZE = 4
 
@@ -252,6 +258,117 @@ def sample_top_chunks_per_paper(
         )
         sampled[paper_id] = [chunk for chunk, _ in ranked[:top_n]]
     return sampled
+
+
+def sample_formal_chunks_per_paper(
+    paper_chunks: list[EvidenceChunk],
+    query: str,
+    *,
+    encoder: Encoder,
+    query_map: dict[str, str] | None = None,
+    paper_titles: dict[str, str] | None = None,
+) -> tuple[dict[str, list[EvidenceChunk]], dict[str, list[EvidenceChunk]]]:
+    """Select scoring and notes evidence using one per-paper embedding pass.
+
+    Functional scoring receives one top-ranked Method chunk and one Results
+    chunk; any missing slot is filled by the next distinct ranked chunk. Notes
+    receive one Abstract chunk (or one context fallback) plus at most two each
+    from Method, Evaluation Setup, Results, and Limitations/Future Work. Other
+    body chunks only backfill unused notes slots, with a hard total cap of nine.
+    Known-noise sections are dropped, and Appendix chunks remain eligible only
+    when their headings classify into one of the five evidence categories.
+    """
+    by_paper: dict[str, list[EvidenceChunk]] = {}
+    for chunk in paper_chunks:
+        by_paper.setdefault(chunk.paper_id, []).append(chunk)
+
+    scoring_by_paper: dict[str, list[EvidenceChunk]] = {}
+    notes_by_paper: dict[str, list[EvidenceChunk]] = {}
+    notes_categories = (
+        "method",
+        "evaluation_setup",
+        "results",
+        "limitations_future",
+    )
+    for paper_id in sorted(by_paper):
+        filtered = drop_noise_sections(by_paper[paper_id], drop_appendix=False)
+        titled = paper_titles or {}
+        filtered = [
+            chunk
+            for chunk in filtered
+            if not is_appendix_chunk(chunk)
+            or classify_chunk_category(chunk, paper_title=titled.get(paper_id))
+            in _CANONICAL_CATEGORIES
+        ]
+        if not filtered:
+            continue
+
+        sampling_query = (query_map or {}).get(paper_id) or query
+        query_vector = encode_query(sampling_query, encoder)
+        categories = {
+            chunk.chunk_id: classify_chunk_category(
+                chunk, paper_title=titled.get(paper_id)
+            )
+            for chunk in filtered
+        }
+
+        def _section_wrapped_text(chunk: EvidenceChunk) -> str:
+            category = categories[chunk.chunk_id]
+            return f"{category} | {chunk.section or 'other'} | {chunk.text}"
+
+        chunk_vectors = encode_chunks(filtered, encoder, text_for=_section_wrapped_text)
+        ranked = sorted(
+            zip(filtered, chunk_vectors, strict=True),
+            key=lambda item: (-_cosine(query_vector, item[1]), item[0].chunk_id),
+        )
+
+        scoring: list[EvidenceChunk] = []
+        for category in ("method", "results"):
+            candidate = next(
+                (chunk for chunk, _vector in ranked if categories[chunk.chunk_id] == category),
+                None,
+            )
+            if candidate is not None:
+                scoring.append(candidate)
+        selected_ids = {chunk.chunk_id for chunk in scoring}
+        for chunk, _vector in ranked:
+            if len(scoring) >= 2:
+                break
+            if chunk.chunk_id not in selected_ids:
+                scoring.append(chunk)
+                selected_ids.add(chunk.chunk_id)
+        if scoring:
+            scoring_by_paper[paper_id] = scoring
+
+        notes: list[EvidenceChunk] = []
+        abstract_candidates = [chunk for chunk, _vector in ranked if is_abstract_chunk(chunk)]
+        context_candidates = [
+            chunk for chunk, _vector in ranked if categories[chunk.chunk_id] == "context"
+        ]
+        first_context = abstract_candidates[0] if abstract_candidates else (
+            context_candidates[0] if context_candidates else None
+        )
+        if first_context is not None:
+            notes.append(first_context)
+        note_ids = {chunk.chunk_id for chunk in notes}
+        for category in notes_categories:
+            category_chunks = [
+                chunk for chunk, _vector in ranked if categories[chunk.chunk_id] == category
+            ]
+            for chunk in category_chunks[:2]:
+                if chunk.chunk_id not in note_ids:
+                    notes.append(chunk)
+                    note_ids.add(chunk.chunk_id)
+        for chunk, _vector in ranked:
+            if len(notes) >= 9:
+                break
+            if chunk.chunk_id not in note_ids and categories[chunk.chunk_id] == "other":
+                notes.append(chunk)
+                note_ids.add(chunk.chunk_id)
+        if notes:
+            notes_by_paper[paper_id] = notes
+
+    return scoring_by_paper, notes_by_paper
 
 
 def aggregate_functional(

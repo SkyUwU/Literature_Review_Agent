@@ -25,7 +25,7 @@ from literature_review.models import (
     PaperSummaryClaim,
 )
 from literature_review.coverage import classify_chunk, drop_noise_sections
-from literature_review.llm_evidence import GroqJsonClient
+from literature_review.llm_evidence import GroqJsonClient, OpenAIJsonClient
 from literature_review.synthesis import (
     SynthesisError,
     _bounded_chunks_for_llm,
@@ -508,6 +508,27 @@ class FakeGroqNoteClient(GroqJsonClient):
         )
 
 
+class FakeOpenAINoteClient(OpenAIJsonClient):
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        self.prompts.append(prompt)
+        chunk_id = json.loads(prompt.split("Evidence chunks: ", 1)[1])[0]["chunks"][0]["chunk_id"]
+        return json.dumps(
+            {
+                "claims": [
+                    {
+                        "text": "This claim is grounded in the supplied source chunk evidence.",
+                        "chunk_ids": [chunk_id],
+                        "aspect": "other",
+                    }
+                ],
+                "coverage_chunk_ids": [chunk_id],
+            }
+        )
+
+
 class RetryNoteClient:
     def __init__(self, valid_response: dict[str, object]) -> None:
         self.responses = ['{"claims": [', json.dumps(valid_response)]
@@ -603,6 +624,21 @@ def llm_synthesis_fixture() -> tuple[EvidenceAssessmentResponse, dict[str, list[
 
 
 class LlmPaperNotesTests(unittest.TestCase):
+    def test_openai_notes_keep_all_selected_chunks_in_one_call(self) -> None:
+        chunks = plain_chunks("p-openai", count=4)
+        client = FakeOpenAINoteClient()
+
+        summarize_paper_notes(
+            "p-openai",
+            chunks,
+            client,
+            CoveragePackPolicy(llm_input_cap=2),
+        )
+
+        self.assertEqual(len(client.prompts), 1)
+        for chunk in chunks:
+            self.assertIn(chunk.chunk_id, client.prompts[0])
+
     def test_llm_notes_happy_path(self) -> None:
         chunks = sectioned_chunks("p1")
         client = FakeNoteClient(valid_note_payload())

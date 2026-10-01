@@ -21,7 +21,7 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 → Semantic Scholar provider 層年份／venue 限制、DOI 摘要補齊、本地年份／venue 後衛、embedding paper ranking
 → bucket sampling + LLM screening（可提出 gap follow-up）
 → OA PDF 下載 → pymupdf4llm 抽取、章節切分
-→ 每篇論文內取樣 top-2 chunks → functional scoring
+→ 章節分類與 embedding 取樣（scoring: Method/Results 各 1；notes: Abstract/context 1 + 四類各至多 2，最多 9）→ functional scoring
 → per-paper claims → outline/report/directions 三階段 synthesis
 → JSON 報告及 downloaded-papers 清單
 ```
@@ -29,7 +29,7 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 重要路徑區分：
 
 - literature_review.main 是正式 end-to-end 入口。--dry-run 使用 rule-based planner，只跑至下載，不呼叫 Gemini，也不保存報告；為搜尋可載入 .env 中唯一的 OPENALEX_API_KEY。
-- 正式證據路徑以 functional.sample_top_chunks_per_paper 逐篇取樣及 functional scoring 為準；corpus-wide embedding／lexical retrieval 與 RCS 是 CLI、比較或 legacy 路徑，不是正式 synthesis pipeline。
+- 正式證據路徑以 `functional.sample_formal_chunks_per_paper` 逐篇章節分類與 embedding 取樣為準。Scoring 優先選 Method、Results 各 1 個 chunk，缺少時由其餘候選補足至 2；逐篇 notes 選 Abstract/context 1 個，再從 Method、Evaluation Setup、Results、Limitations/Future Work 各至多 2 個，總數上限 9。References／acknowledgments 排除；Appendix 僅在子章節能歸入五類時保留。每篇 chunks 僅做一次 embedding，向量供兩階段選取共用。corpus-wide embedding／lexical retrieval 與 RCS 是 CLI、比較或 legacy 路徑。
 - 報告中的 [claim-N] 連到程式組裝的 claim-to-chunk/paper provenance。生成內容只應依賴供應的 chunks；形式驗證通過不代表學術品質已經人工確認。
 - metadata／abstract 評估不等於全文評估；chunk-based synthesis 也不代表完整審閱每篇論文。
 
@@ -39,11 +39,11 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 - 預設 venue whitelist 是硬篩選；Semantic Scholar 搜尋會將已辨識 conference 名稱／alias 與 year range 傳給 provider，之後仍由本地 whitelist 核對。OpenAlex fallback 仍以本地篩選為準。`[search]` 統計列 provider 回傳、abstract 可用、年份後、venue 後及最終數量。未命中可能來自 venue 欄位缺漏／變體、期刊或預印本不在 whitelist；探索性執行可明確指定 `--venues none`，不可把它解讀為原政策下的同一實驗。
 - 每個規劃 query 分別搜尋、排名及分配下載目標；跨 query 以 DOI（無 DOI 時 title+year）去重。預設 data/run/ 每次真實執行會清空重建；使用 --dest-dir 指定位置時不清除該位置。
 - 只有成功寫入的 PDF 會列在 papers_*.json；每輪報告與 papers JSON 寫入 data/outputs/ 並共用時間戳。dry run 不寫這兩個 JSON。
-- 章節分布統計（SD）在 synthesis 時印至 stdout；它可用來判斷是否需要討論 section-aware sampling，不要在取得可查證的實際 run 數據前先改取樣策略。
+- 章節分布統計（SD）在 synthesis 時印至 stdout，統計 scoring 的選取結果。Notes 輸入最多 9 chunks；以預設 chunk 大小估計，每篇約 3,000–4,500 prompt tokens，常需約兩個 2,500-token notes batches；實際 token 數以 provider log 為準。
 
 ## Gemini 呼叫與失敗處理
 
-- 沒有 `GROQ_API_KEY` 時，正式流程可分配四個 Gemini key 群組：planner + screening 共用 `--plan-key`（預設 1）、functional scoring 使用 `--scoring-key`（預設沿用 `--notes-key`）、per-paper notes 使用 `--notes-key`（預設 2）、report 使用 `--report-key`（預設 3）。例如 `--plan-key 2 --scoring-key 3 --notes-key 4 --report-key 5` 可分配 Key 2–5；未指定 `--scoring-key` 時維持舊版 scoring/notes 共用同一 key。
+- Gemini provider mode 可分配四個 Gemini key 群組：planner + screening 共用 `--plan-key`（預設 1）、functional scoring 使用 `--scoring-key`（預設沿用 `--notes-key`）、per-paper notes 使用 `--notes-key`（預設 2）、report 使用 `--report-key`（預設 3）。例如 `--plan-key 2 --scoring-key 3 --notes-key 4 --report-key 5` 可分配 Key 2–5；未指定 `--scoring-key` 時維持舊版 scoring/notes 共用同一 key。
 - 每把 key 有獨立速率追蹤；預設最多 20 次／process，預設約 13 秒 pacing。stderr 的 [llm] 紀錄包含 stage、key hash、等待時間、呼叫數及狀態，不會輸出完整 key。
 - Gemini 503／overload 會在同一模型、同一階段做最多 3 次 exponential backoff 重試（約 15、30、60 秒，另加少量 jitter）；SDK 內層重試設為單次，避免超出應用層次數。429 依 provider 訊息分類；有 per-minute retry hint 時最多有限重試，日額度耗盡不重試。planner、screening、scoring、report 重試耗盡仍中止階段；per-paper notes 會記下失敗 paper，繼續處理其他論文並使用 checkpoint 等待續跑，不產生不完整 report。
 - OpenAlex 503 若訊息指出 anonymous search paused，需使用 OPENALEX_API_KEY；OpenAlex 504 query_timeout 則表示該次搜尋逾時。Dry run 的 rule-based planner 會把輸入 query 原樣延伸為 survey/literature-review/comparison 子查詢，應輸入精簡的主題詞而非長篇研究問題。發生 timeout 時檢查 stdout 的 Search plan，縮短導致錯誤的子查詢後再執行；不要盲目重送同一條過長 query。
@@ -52,12 +52,18 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 
 ## Groq/Gemini 混合 provider
 
-- 在 `.env` 設定 `GROQ_API_KEY` 後，Groq 固定模型 `openai/gpt-oss-120b` 負責 planner、分批 screening／全域 gap 彙整、functional scoring、per-paper notes 與 report；由 `uv sync` 安裝 Groq 官方 Python SDK，透過 Chat Completions API 呼叫。
+- 在 `.env` 設定 `GROQ_API_KEY` 後，Groq 負責 planner、分批 screening／全域 gap 彙整、functional scoring、per-paper notes 與 report；由 `uv sync` 安裝 Groq 官方 Python SDK，透過 Chat Completions API 呼叫。模型預設為 `openai/gpt-oss-120b`；`GROQ_MODEL` 可統一覆寫，`GROQ_MODEL_PLAN`、`GROQ_MODEL_SCREENING`、`GROQ_MODEL_SCORING`、`GROQ_MODEL_NOTES`、`GROQ_MODEL_REPORT` 可分別覆寫階段模型，階段值優先於全域值。使用模型前請先確認 Groq Console 中的 model ID、JSON Schema 支援與額度。
 - 混合模式下，screening 依約 3,000 個估計 prompt tokens 的預算切批；notes 依 section 切批，預設每批約 2,500 個估計 prompt tokens，可用 `GROQ_NOTES_BATCH_TOKENS` 調整。所有 Groq 階段共用 process 內 TPM tracker：依歷史 usage 校準估值、預留輸出額度、追蹤實際 tokens，並採用 provider remaining/reset headers。有 retry-after 的 TPM 429 與 503 都有界重試；日額度錯誤不盲目重送。Notes 批次輸出經 Pydantic 與 chunk ID 驗證，再保留來源 ID 本地合併，不額外呼叫 LLM 整合。任一 paper notes 失敗時先完成其他論文，checkpoint 記錄 pending paper IDs；有未完成項時不產生 report。
 - 每輪真實流程會印出 `[notes] checkpoint_id=<run-id>`，checkpoint 位於 `data/outputs/notes_checkpoints/<run-id>/`。續跑命令：`uv run --env-file .env python -m literature_review.main --resume-notes <run-id>`，並輸入相同 research query；續跑仍會重做搜尋、下載、抽取與 scoring，已完成的 notes 會重用，只補缺漏 notes。Manifest 比對 query、入選 paper、provider、policy 與來源內容，不相符即拒絕續用。沒有 `GROQ_API_KEY` 時 notes 維持 Gemini key `--notes-key`。
 - Groq 503 在同一模型最多重試三次（約 15、30、60 秒加 jitter），耗盡後停止該輪。Groq 使用 JSON Schema best-effort mode，並以既有 Pydantic 驗證及有限 JSON repair 檢查輸出。文件所列免費額度會變動；完整 run 前查看 Groq Limits 與每把 Gemini key 的 AI Studio rate limit。
 - 每次 Gemini／Groq 呼叫會在 `[llm]` log 記錄 `prompt_chars` 與 `prompt_utf8_bytes`，不含 JSON schema 與 API protocol overhead。Groq 呼叫另記錄 `prompt_tokens`、`completion_tokens`、`total_tokens`（provider usage）；送出前的 token 數仍是估值，成功回應及錯誤的 rate-limit headers／retry-after 用於調整下一次等待。
-- `.env` 範例為 `GROQ_API_KEY=<你的 key>`；`GROQ_NOTES_BATCH_TOKENS` 預設 2500。不要提交 `.env` 或把 key 貼到聊天、log、文件。
+- `.env` 範例為 `GROQ_API_KEY=<你的 key>`；`GROQ_NOTES_BATCH_TOKENS` 預設 2500。模型覆寫設定見 `.env.example`。不要提交 `.env` 或把 key 貼到聊天、log、文件。
+
+## OpenAI provider
+
+- 在 `.env` 設定 `LLM_PROVIDER=openai` 與 `OPENAI_API_KEY`，正式流程的 planner、screening、scoring、notes、report 全部使用 OpenAI 官方 SDK；SDK 預設使用 OpenAI API endpoint，不需設定 Base URL。只設 `OPENAI_API_KEY` 不會改變路由，避免同時設定多家 provider 時選錯。
+- 預設模型為 `gpt-5.6-luna`；`OPENAI_MODEL` 可統一覆寫，`OPENAI_MODEL_PLAN`、`OPENAI_MODEL_SCREENING`、`OPENAI_MODEL_SCORING`、`OPENAI_MODEL_NOTES`、`OPENAI_MODEL_REPORT` 可個別覆寫階段。OpenAI client 透過 Chat Completions JSON Schema 輸出並保留本地 Pydantic 驗證；log 記錄 provider 回報的 input/output/total tokens。`uv sync` 安裝 OpenAI SDK。
+- 若同時設有多個 provider key，`LLM_PROVIDER` 明確指定 `openai`、`groq` 或 `gemini`；若未設定，保留舊行為（有 `GROQ_API_KEY` 選 Groq，否則走 Gemini）。執行前在 OpenAI API Usage Dashboard 選對 organization/project 並查看用量、模型權限與 rate limits；Usage Dashboard 權限可能由 organization 管理者控制。不要將 `.env` 或完整 key 傳出。
 
 ## 執行命令
 
@@ -68,6 +74,9 @@ uv run python -m unittest discover -s tests -v
 uv run python -m literature_review.main --dry-run
 
 # 真實端到端流程（執行前先確認 quota、venue policy、輸出資料夾）
+uv run --env-file .env python -m literature_review.main
+
+# 選擇 OpenAI（需在 .env 設定 LLM_PROVIDER、OPENAI_API_KEY）
 uv run --env-file .env python -m literature_review.main
 
 # 例：明確停用 venue whitelist；只應作為有意識的一次性設定

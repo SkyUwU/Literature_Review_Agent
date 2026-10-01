@@ -21,7 +21,7 @@ from literature_review.embedding_retriever import Encoder, default_encoder, retr
 from literature_review.extraction import PdfExtractionError, extract_pdf_text
 from literature_review.functional import (
     aggregate_functional,
-    sample_top_chunks_per_paper,
+    sample_formal_chunks_per_paper,
     score_chunks_functionally,
     select_quota_threshold,
 )
@@ -39,7 +39,12 @@ from literature_review.models import (
     PaperSummary,
     SynthesisResponse,
 )
-from literature_review.section_stats import print_section_distribution as _print_section_distribution
+from literature_review.section_stats import (
+    _CANONICAL_CATEGORIES,
+    classify_chunk_category,
+    is_appendix_chunk,
+    print_section_distribution as _print_section_distribution,
+)
 from literature_review.synthesis import (
     SynthesisError,
     build_coverage_packs,
@@ -156,7 +161,16 @@ def _prepare_documents(
         if document.paper_id in seen_ids:
             raise ValueError(f"Duplicate paper_id {document.paper_id!r} in the supplied documents.")
         seen_ids.add(document.paper_id)
-        chunks = drop_noise_sections(chapter_chunk_document(document, chunk_policy))
+        chunks = drop_noise_sections(
+            chapter_chunk_document(document, chunk_policy), drop_appendix=False
+        )
+        chunks = [
+            chunk
+            for chunk in chunks
+            if not is_appendix_chunk(chunk)
+            or classify_chunk_category(chunk, paper_title=document.title)
+            in _CANONICAL_CATEGORIES
+        ]
         if min_words > 0:
             chunks = [chunk for chunk in chunks if len(chunk.text.split()) >= min_words]
         if chunks:
@@ -227,10 +241,9 @@ def run_synthesis_pipeline(
     scoring_client = client_scoring or client_rcs or client
     effective_encoder = encoder if encoder is not None else default_encoder()
 
-    sampled = sample_top_chunks_per_paper(
+    sampled, notes_sampled = sample_formal_chunks_per_paper(
         all_chunks,
         query,
-        top_n=effective_functional_policy.top_chunks_per_paper,
         encoder=effective_encoder,
         query_map=paper_queries,
         paper_titles=paper_titles,
@@ -285,9 +298,9 @@ def run_synthesis_pipeline(
     )
     paper_summaries: list[PaperSummary] = []
     notes_documents = [
-        (document, chunks)
+        (document, notes_sampled.get(document.paper_id, []))
         for document, chunks in prepared
-        if document.paper_id in usable_ids
+        if document.paper_id in usable_ids and notes_sampled.get(document.paper_id)
     ]
     manifest = {
         "query": query,

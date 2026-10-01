@@ -43,6 +43,7 @@ from literature_review.llm_evidence import (
     DailyQuotaExhausted,
     GeminiJsonClient,
     GroqJsonClient,
+    OpenAIJsonClient,
     JsonGenerationClient,
     LlmEvidenceError,
     LlmServiceError,
@@ -125,7 +126,7 @@ def _make_plan(
         except LlmEvidenceError as error:
             # An explicitly configured Groq run must not degrade to a
             # rule-based plan when its provider rejects or cannot serve a call.
-            if isinstance(client_plan, GroqJsonClient):
+            if isinstance(client_plan, (GroqJsonClient, OpenAIJsonClient)):
                 raise
             print(
                 f"LLM plan unavailable, falling back to rule-based plan: {error}",
@@ -733,21 +734,21 @@ def _build_clients(
     any model-provider keys or constructing LLM clients.
 
     The LLM planner is the default for a full run; it is skipped on ``--dry-run``
-    (zero keys) and on ``--rule-based`` (escape hatch). With GROQ_API_KEY,
-    planning/screening/scoring/notes/report use Groq. Without it,
-    the existing all-Gemini key configuration is used. ``--dry-run`` never reads
-    model keys or constructs LLM clients.
+    (zero keys) and on ``--rule-based`` (escape hatch). ``LLM_PROVIDER`` may
+    explicitly select ``openai``, ``groq``, or ``gemini``. When unset, the
+    existing behavior is preserved: GROQ_API_KEY selects Groq, otherwise Gemini.
+    ``--dry-run`` never reads model keys or constructs LLM clients.
 
-    Without Groq, the existing Gemini key selectors route each stage as before.
-    With Groq enabled, planning/screening/scoring/notes/report use Groq. Groq
-    screening is split into
+    In Gemini mode, the existing Gemini key selectors route each stage as before.
+    In OpenAI or Groq mode, planning/screening/scoring/notes/report use the
+    selected provider. Groq screening is split into
     token-bounded batches followed by a compact global gap synthesis.
 
     ``client_rcs`` is built from the local Ollama endpoint when ``OLLAMA_BASE_URL``
     is configured (M6); when it is missing the client stays ``None`` and the RCS
     stage falls back to the Gemini synthesis client (existing behavior).
     With Gemini, ``client_report`` uses the dedicated ``GEMINI_API_KEY_3``; with
-    Groq it shares ``GROQ_API_KEY`` with all Groq-backed stages.
+    Groq or OpenAI, the selected provider key is shared across all LLM stages.
     """
     plan_suffix = getattr(arguments, "plan_key", 1)
     notes_suffix = getattr(arguments, "notes_key", 2)
@@ -760,7 +761,15 @@ def _build_clients(
         load_local_env(only={"OPENALEX_API_KEY"})
     else:
         load_local_env()
-    use_groq = not arguments.dry_run and bool(os.getenv("GROQ_API_KEY"))
+    provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+    if provider not in {"", "openai", "groq", "gemini"}:
+        raise ValueError("LLM_PROVIDER must be one of: openai, groq, gemini.")
+    if not provider:
+        provider = "groq" if os.getenv("GROQ_API_KEY") else "gemini"
+    if arguments.dry_run:
+        provider = "gemini"  # no model-provider clients are constructed in dry-run mode
+    use_groq = provider == "groq"
+    use_openai = provider == "openai"
 
     def build_stage_client(
         label: str,
@@ -768,6 +777,8 @@ def _build_clients(
         gemini_suffix: int | None = None,
         force_gemini: bool = False,
     ):
+        if use_openai and not force_gemini:
+            return OpenAIJsonClient(label=label)
         if use_groq and not force_gemini:
             return GroqJsonClient(label=label)
         assert gemini_suffix is not None
@@ -779,7 +790,7 @@ def _build_clients(
 
     client_plan: JsonGenerationClient | None = None
     if not arguments.dry_run and not arguments.rule_based:
-        if use_groq:
+        if provider in {"openai", "groq"}:
             client_plan = build_stage_client("plan+screening")
         else:
             api_key_1 = os.getenv(key_env_name(plan_suffix))
@@ -797,7 +808,7 @@ def _build_clients(
     client_synth: JsonGenerationClient | None = None
     client_scoring: JsonGenerationClient | None = None
     if not arguments.dry_run:
-        if use_groq:
+        if provider in {"openai", "groq"}:
             client_synth = build_stage_client("paper-notes")
             client_scoring = build_stage_client("functional-scoring")
         else:
@@ -816,7 +827,7 @@ def _build_clients(
                 client_rcs = None
     client_report: JsonGenerationClient | None = None
     if not arguments.dry_run:
-        if use_groq:
+        if provider in {"openai", "groq"}:
             client_report = build_stage_client("report")
         else:
             client_report = build_stage_client("report", gemini_suffix=report_suffix)
@@ -829,13 +840,17 @@ def _build_screen_client(
 ) -> JsonGenerationClient | None:
     """Build the screening client, using token-batched Groq when configured.
 
-    Without Groq, planning and screening continue to share the legacy Gemini
-    client and its single full-pool screening request.
+    OpenAI creates a stage-specific client. Without Groq or OpenAI, planning
+    and screening share the legacy Gemini client and its single full-pool
+    screening request.
     """
     if arguments.dry_run or arguments.rule_based:
         return None
     load_local_env()
-    if os.getenv("GROQ_API_KEY"):
+    provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+    if provider == "openai":
+        return OpenAIJsonClient(label="screening")
+    if provider == "groq" or (not provider and os.getenv("GROQ_API_KEY")):
         return GroqJsonClient(label="screening")
     else:
         return client_plan

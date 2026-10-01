@@ -1,5 +1,18 @@
 # 專案狀態（盤點日期：2026-10-01）
 
+## 2026-10-01：OpenAI provider 路由
+
+- 已新增明確的 `LLM_PROVIDER=openai` 路由；OpenAI 官方 SDK 可供 plan、screening、functional scoring、per-paper notes 與 report 使用，預設模型 `gpt-5.6-luna`，支援全域及階段模型覆寫。
+- 未設定 provider selector 時維持舊路由；只放 `OPENAI_API_KEY` 不會改變既有 Groq/Gemini 選擇。OpenAI requests 使用 Chat Completions JSON Schema、SDK 有界 retry 與本地 Pydantic 驗證；程式只測 mock，沒有用實驗室 key 發 API request。
+- 驗證：OpenAI provider、notes、functional scoring 與 section stats focused tests 共 140 tests 通過；`git diff --check` 通過，key-pattern scan 無命中。未執行完整 suite 或真實 API/run。
+
+## 2026-10-01：章節分類與逐篇證據取樣
+
+- 正式 pipeline 現依 section path 分成 context、method、evaluation_setup、results、limitations_future 五類；References／acknowledgments 排除，Appendix 僅保留能歸入上述類別的子章節。
+- Functional scoring 優先取 Method 與 Results 各一個 chunk；notes 取 Abstract/context 一個，再從 Method、Evaluation Setup、Results、Limitations/Future Work 各至多兩個，最多九個。每篇候選只做一次 embedding，向量共用於兩種取樣。
+- Focused 驗證 78 tests 通過。全套測試因 `test_main` 載入本機 `.env` 後發出真實 Semantic Scholar 與 Groq 請求而中止；沒有繼續重試。這些請求不是本次變更的預期驗證步驟。
+- 未執行端到端真實 literature review run；未追蹤的 `Summer_Project.pdf` 保持原狀。
+
 ## 2026-10-01：逐篇 notes checkpoint 與 Semantic Scholar 篩選
 
 - 已完成 Groq per-paper notes：按 section 和 `GROQ_NOTES_BATCH_TOKENS`（預設 2500）切批，逐批 Pydantic/chunk ID 驗證後本地合併。Groq notes 與其他 Groq stages 共用 TPM tracker；Gemini-only 分工不變。

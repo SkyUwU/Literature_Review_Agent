@@ -192,6 +192,13 @@ class GroqJsonClient:
     """Groq OpenAI-compatible JSON client used across the formal LLM stages."""
 
     DEFAULT_MODEL = "openai/gpt-oss-120b"
+    STAGE_MODEL_ENV = {
+        "plan+screening": "GROQ_MODEL_PLAN",
+        "screening": "GROQ_MODEL_SCREENING",
+        "functional-scoring": "GROQ_MODEL_SCORING",
+        "paper-notes": "GROQ_MODEL_NOTES",
+        "report": "GROQ_MODEL_REPORT",
+    }
 
     def __init__(
         self,
@@ -211,8 +218,9 @@ class GroqJsonClient:
                 "Install dependencies with 'uv sync' before using Groq."
             ) from error
         self._client = Groq(api_key=key, max_retries=0, timeout=180.0)
-        self._model = model or self.DEFAULT_MODEL
         self._label = label or "groq"
+        stage_model = os.getenv(self.STAGE_MODEL_ENV.get(self._label, ""))
+        self._model = model or stage_model or os.getenv("GROQ_MODEL") or self.DEFAULT_MODEL
         self._tpm_pacer = _groq_tpm_pacer()
 
     @observe(name="llm_call")
@@ -315,6 +323,99 @@ class GroqJsonClient:
         )
         if not isinstance(content, str) or not content.strip():
             raise LlmEvidenceError("Groq returned no text output.")
+        return content.strip()
+
+
+class OpenAIJsonClient:
+    """OpenAI Chat Completions client for schema-validated stage outputs."""
+
+    DEFAULT_MODEL = "gpt-5.6-luna"
+    STAGE_MODEL_ENV = {
+        "plan+screening": "OPENAI_MODEL_PLAN",
+        "screening": "OPENAI_MODEL_SCREENING",
+        "functional-scoring": "OPENAI_MODEL_SCORING",
+        "paper-notes": "OPENAI_MODEL_NOTES",
+        "report": "OPENAI_MODEL_REPORT",
+    }
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        model: str | None = None,
+        label: str | None = None,
+    ) -> None:
+        load_local_env()
+        key = api_key or os.getenv("OPENAI_API_KEY")
+        if not key:
+            raise LlmEvidenceError("OPENAI_API_KEY is not set in the environment.")
+        try:
+            from openai import OpenAI
+        except ImportError as error:
+            raise LlmEvidenceError(
+                "Install dependencies with 'uv sync' before using OpenAI."
+            ) from error
+        self._client = OpenAI(api_key=key, max_retries=2, timeout=180.0)
+        self._label = label or "openai"
+        stage_model = os.getenv(self.STAGE_MODEL_ENV.get(self._label, ""))
+        self._model = model or stage_model or os.getenv("OPENAI_MODEL") or self.DEFAULT_MODEL
+
+    @observe(name="llm_call")
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        _log_prompt_size(self._label, self._model, prompt)
+        response_schema = schema or LlmEvidenceAssessmentBatch.model_json_schema()
+        try:
+            completion = self._client.chat.completions.create(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "literature_review_output",
+                        "strict": False,
+                        "schema": response_schema,
+                    },
+                },
+                temperature=0.2,
+            )
+        except Exception as error:
+            status_code = getattr(error, "status_code", None)
+            if status_code is not None and 500 <= status_code < 600:
+                raise LlmServiceError(
+                    f"OpenAI service returned HTTP {status_code} after SDK retries."
+                ) from error
+            if status_code is None and type(error).__name__ in {
+                "APIConnectionError",
+                "APITimeoutError",
+            }:
+                raise LlmServiceError(f"OpenAI request failed: {error}") from error
+            if status_code is not None:
+                raise LlmEvidenceError(
+                    f"OpenAI request failed with HTTP {status_code}: {error}"
+                ) from error
+            raise LlmEvidenceError(f"OpenAI request failed: {error}") from error
+
+        try:
+            message = completion.choices[0].message
+        except (AttributeError, IndexError, TypeError) as error:
+            raise LlmEvidenceError("OpenAI response was missing message content.") from error
+        if getattr(message, "refusal", None):
+            raise LlmEvidenceError("OpenAI refused the request instead of returning JSON.")
+        content = getattr(message, "content", None)
+        if not isinstance(content, str) or not content.strip():
+            raise LlmEvidenceError("OpenAI returned no text output.")
+
+        usage = getattr(completion, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        total_tokens = getattr(usage, "total_tokens", None)
+        print(
+            f"[llm] label={self._label} model={self._model} "
+            f"prompt_tokens={prompt_tokens if prompt_tokens is not None else 'unknown'} "
+            f"completion_tokens={completion_tokens if completion_tokens is not None else 'unknown'} "
+            f"total_tokens={total_tokens if total_tokens is not None else 'unknown'}",
+            file=sys.stderr,
+        )
         return content.strip()
 
 

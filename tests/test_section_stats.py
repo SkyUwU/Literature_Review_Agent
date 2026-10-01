@@ -5,6 +5,8 @@ from contextlib import redirect_stdout
 from literature_review.models import EvidenceChunk
 from literature_review.section_stats import (
     canonical_section_name,
+    classify_chunk_category,
+    is_appendix_chunk,
     print_section_distribution,
     render_section_distribution,
     section_distribution,
@@ -106,10 +108,34 @@ class SectionDistributionTests(unittest.TestCase):
         self.assertEqual(
             distribution,
             {
-                "p1": {"introduction": 1, "method": 2},
-                "p2": {"experiments": 1, "other": 1},
+                "p1": {"context": 1, "method": 2},
+                "p2": {"evaluation_setup": 1, "other": 1},
             },
         )
+
+    def test_category_aliases_and_nested_headings(self) -> None:
+        cases = {
+            "**Paper** > **1 Introduction**": "context",
+            "**Paper** > **3.2 Proposed Method**": "method",
+            "**Paper** > **4 Experimental Setup**": "evaluation_setup",
+            "**Paper** > **5.1 Ablation Results**": "results",
+            "**Paper** > **6 Limitations and Future Work**": "limitations_future",
+        }
+        for section, expected in cases.items():
+            with self.subTest(section=section):
+                self.assertEqual(classify_chunk_category(_chunk("p1-c1", section)), expected)
+
+    def test_generic_experiments_uses_setup_cues(self) -> None:
+        chunk = _chunk("p1-c1", "Paper > 4 Experiments")
+        chunk.text = "We use datasets, baselines, and metrics for evaluation."
+        self.assertEqual(classify_chunk_category(chunk), "evaluation_setup")
+
+    def test_appendix_subsection_is_classified_but_unmapped_is_other(self) -> None:
+        eligible = _chunk("p1-c1", "Paper > Appendix > A.1 Additional Results")
+        unknown = _chunk("p1-c2", "Paper > Appendix > C.2 Extra Proof")
+        self.assertTrue(is_appendix_chunk(eligible))
+        self.assertEqual(classify_chunk_category(eligible), "results")
+        self.assertEqual(classify_chunk_category(unknown), "other")
 
     def test_empty_and_none_safe(self) -> None:
         self.assertEqual(section_distribution({}), {})
@@ -124,7 +150,7 @@ class RenderTests(unittest.TestCase):
 
         lines = rendered.splitlines()
         self.assertIn("p1 (A Title): introduction:1 method:2", lines)
-        header = "Section distribution across 3 sampled chunks (top-level, canonicalized)"
+        header = "Section distribution across 3 sampled chunks (evidence categories)"
         self.assertIn(header, lines)
         self.assertIn("  introduction          1  (papers: 1)", lines)
         self.assertIn("  method                2  (papers: 1)", lines)

@@ -9,6 +9,7 @@ from literature_review.functional import (
     aggregate_functional,
     build_functional_prompt,
     sample_top_chunks_per_paper,
+    sample_formal_chunks_per_paper,
     score_chunks_functionally,
     select_quota_threshold,
     validate_functional_assessments,
@@ -452,6 +453,42 @@ def keyword_chunks(
 
 
 class FunctionalSamplingTests(unittest.TestCase):
+    def test_formal_sampler_selects_method_results_and_bounded_notes(self) -> None:
+        chunks = [
+            EvidenceChunk(
+                chunk_id=f"p1-c{i}", paper_id="p1", section=section,
+                page_start=i, page_end=i,
+                text=f"{term} evidence with sufficient detail for this sampling test.",
+            )
+            for i, (section, term) in enumerate([
+                ("Abstract", "method"), ("Method", "method"), ("Method", "method"),
+                ("Evaluation Setup", "method"), ("Evaluation Setup", "method"),
+                ("Results", "method"), ("Results", "method"),
+                ("Limitations", "method"), ("Limitations", "method"),
+                ("References", "method"),
+            ], start=1)
+        ]
+        scoring, notes = sample_formal_chunks_per_paper(
+            chunks, "method", encoder=KeywordEncoder("method")
+        )
+        self.assertEqual([chunk.section for chunk in scoring["p1"]], ["Method", "Results"])
+        self.assertEqual(len(notes["p1"]), 9)
+        self.assertEqual(notes["p1"][0].section, "Abstract")
+        self.assertEqual(len({chunk.chunk_id for chunk in notes["p1"]}), 9)
+        self.assertNotIn("References", [chunk.section for chunk in notes["p1"]])
+
+    def test_formal_sampler_embeds_each_eligible_chunk_once(self) -> None:
+        encoded: list[str] = []
+
+        def encoder(texts: list[str]) -> list[list[float]]:
+            encoded.extend(texts)
+            return [[1.0] for _ in texts]
+
+        chunks = keyword_chunks("p1", 2, "method", section="Method")
+        chunks += keyword_chunks("p1", 1, "method", section="Results")
+        sample_formal_chunks_per_paper(chunks, "q", encoder=encoder)
+        self.assertEqual(len(encoded), 4)  # one query plus three chunks in one pass
+
     def test_blacklisted_sections_are_dropped_before_sampling(self) -> None:
         chunks = keyword_chunks("paper-1", 3, "method")
         chunks.append(

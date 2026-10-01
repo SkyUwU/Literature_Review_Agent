@@ -539,11 +539,12 @@ class PaperSource(BaseModel):
 class CoveragePackPolicy(BaseModel):
     """Reproducible settings for bounding the evidence sent to synthesis.
 
-    ``llm_input_cap`` is a section-aware cap for single-request note providers
-    (Gemini): sections are covered first — every heading and each section's
+    ``llm_input_cap`` is a section-aware cap for Gemini notes: sections are
+    covered first — every heading and each section's
     first chunk are kept, and only when the cap overflows does selection fall
-    back to within-section strided sampling. Groq notes keep all chunks and split
-    them into section-bounded TPM-sized requests.
+    back to within-section strided sampling. OpenAI notes keep all selected
+    chunks in one request; Groq notes keep all chunks and split them into
+    section-bounded TPM-sized requests.
     """
 
     max_chunks_per_paper: int = Field(default=6, ge=1, le=50)

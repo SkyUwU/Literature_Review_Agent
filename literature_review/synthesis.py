@@ -19,6 +19,7 @@ from literature_review.coverage import (
 from literature_review.llm_evidence import (
     GroqJsonClient,
     JsonGenerationClient,
+    OpenAIJsonClient,
     generate_validated,
     strip_code_fence,
 )
@@ -672,11 +673,12 @@ def summarize_paper_notes(
     *,
     paper_title: str | None = None,
 ) -> PaperSummary:
-    """Summarize one paper; Groq receives section-bounded batches under its TPM budget."""
+    """Summarize one paper; provider-specific paths preserve all selected chunks."""
     groq_batched = isinstance(client, GroqJsonClient)
+    provider_full_input = groq_batched or isinstance(client, OpenAIJsonClient)
     supplied = (
         list(chunks)
-        if groq_batched
+        if provider_full_input
         else _bounded_chunks_for_llm(chunks, policy.llm_input_cap, paper_title=paper_title)
     )
     if not supplied:

@@ -28,14 +28,15 @@
 `ResearchIdea → SearchPlan → Semantic Scholar（必要時 OpenAlex fallback／摘要補齊）→ 年份與 venue 篩選、embedding 排序 → LLM screening → PDF 下載與抽取 → 逐篇 chunk 取樣及 functional scoring → per-paper claims → 帶 [claim-N] 引用的 synthesis report`。
 
 - 正式 end-to-end 入口：`literature_review.main`。Dry run 使用規則式規劃並停在下載階段，不呼叫 Gemini、不寫報告；只從 `.env` 載入可選的 `OPENALEX_API_KEY` 供搜尋驗證。
-- 每篇論文內部取樣及 functional scoring 是正式證據路徑；corpus-wide retrieval、lexical retrieval、RCS 等是 CLI／比較／legacy 路徑。
-- 沒有 `GROQ_API_KEY` 時，真實流程的 Gemini key 選擇為 planner + screening 共用 `--plan-key`；functional scoring 用 `--scoring-key`；per-paper notes 用 `--notes-key`；report 用 `--report-key`。未指定 `--scoring-key` 時，為相容舊命令而沿用 `--notes-key`。
+- 正式路徑先按章節分類並以 embedding 在每篇論文內挑證據：functional scoring 優先取 Method、Results 各 1 個 chunk（缺類別時補足至 2 個）；逐篇 notes 取 Abstract/context 1 個，再從 Method、Evaluation Setup、Results、Limitations/Future Work 各取至多 2 個，總數上限 9。References／acknowledgments 排除；Appendix 只保留能分類到上述類別的 chunk。corpus-wide retrieval、lexical retrieval、RCS 等是 CLI／比較／legacy 路徑。
+- Gemini provider mode 的 key 選擇為 planner + screening 共用 `--plan-key`；functional scoring 用 `--scoring-key`；per-paper notes 用 `--notes-key`；report 用 `--report-key`。未指定 `--scoring-key` 時，為相容舊命令而沿用 `--notes-key`。
 - Gemini 503 最多 exponential backoff 重試 3 次；重試後仍失敗就停止該輪，不降級略過 screening 或改用其他模型。
 - 預設近三年與 top-venue whitelist 可能使候選為零；必要時可用 `--year-from`、`--year-to`、`--venues none` 做一次性覆寫，勿默默改變政策。
 - 預設下載資料夾 `data/run/` 每次真實執行會重建；報告及 papers JSON 累積在 `data/outputs/`。指定 `--dest-dir` 可選擇其他下載位置。
 - Semantic Scholar 搜尋會將年份範圍和 top-venue 名稱一併傳給 provider；本地 whitelist 仍為最後把關。`[search]` 統計分列 provider 回傳、abstract 可用、年份後、venue 後與最終篩選數。
 - Gemini key 分工、錯誤降級、額度／速率控制及 run 命令詳見 `HANDOFF.md`；503 是服務錯誤，不能由此推斷生成內容品質。
-- 設定 `GROQ_API_KEY` 後，Groq `openai/gpt-oss-120b` 負責 plan、screening、scoring、逐篇 notes 與 report。Groq notes 按 section 分批，預設每批估計輸入 2,500 tokens（可用 `GROQ_NOTES_BATCH_TOKENS` 調整），共用 process TPM tracker；沒有 Groq key 時 notes 維持 Gemini。Notes checkpoint 位於 `data/outputs/notes_checkpoints/<run-id>/`；失敗後照 stderr 的 run ID 使用 `--resume-notes <run-id>` 續跑，所有 notes 完成才產生 report。checkpoint 綁定 query、選用 paper、provider 與來源文件內容，不符時拒絕沿用。
+- 設定 `GROQ_API_KEY` 後（且未指定其他 `LLM_PROVIDER`），Groq 負責 plan、screening、scoring、逐篇 notes 與 report。模型預設為 `openai/gpt-oss-120b`；`GROQ_MODEL` 統一覆寫所有階段，`GROQ_MODEL_PLAN`、`GROQ_MODEL_SCREENING`、`GROQ_MODEL_SCORING`、`GROQ_MODEL_NOTES`、`GROQ_MODEL_REPORT` 可個別覆寫。Groq notes 按 section 分批，預設每批估計輸入 2,500 tokens（可用 `GROQ_NOTES_BATCH_TOKENS` 調整），共用 process TPM tracker。Notes checkpoint 位於 `data/outputs/notes_checkpoints/<run-id>/`；失敗後照 stderr 的 run ID 使用 `--resume-notes <run-id>` 續跑，所有 notes 完成才產生 report。checkpoint 綁定 query、選用 paper、provider 與來源文件內容，不符時拒絕沿用。
+- 可用 `.env` 的 `LLM_PROVIDER=openai` 明確改由 OpenAI 處理所有 LLM 階段；預設 `OPENAI_MODEL=gpt-5.6-luna`，也可用 `OPENAI_MODEL_PLAN`、`OPENAI_MODEL_SCREENING`、`OPENAI_MODEL_SCORING`、`OPENAI_MODEL_NOTES`、`OPENAI_MODEL_REPORT` 個別覆寫。需設定 `OPENAI_API_KEY`。未設定 `LLM_PROVIDER` 時維持舊路由（有 Groq key 走 Groq，否則 Gemini）；OpenAI 官方 SDK 使用預設 endpoint，不需要 Base URL。真實 OpenAI run 前應確認所屬 organization/project 的用量與模型權限。
 
 ## 常用命令（PowerShell）
 
