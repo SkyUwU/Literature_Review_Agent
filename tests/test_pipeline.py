@@ -3,14 +3,29 @@ import io
 import json
 import os
 import re
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import literature_review.pipeline as pipeline_module
-from literature_review.models import ChunkPolicy, EvidenceRetrievalPolicy, FullTextDocument, PageText
-from literature_review.pipeline import expand_pdf_inputs, run_evidence_pipeline, run_synthesis_pipeline
+from literature_review.models import (
+    ChunkPolicy,
+    ChunkReference,
+    EvidenceRetrievalPolicy,
+    FullTextDocument,
+    PageText,
+    PaperSummary,
+    PaperSummaryClaim,
+)
+from literature_review.pipeline import (
+    NotesIncompleteError,
+    NotesCheckpointError,
+    expand_pdf_inputs,
+    run_evidence_pipeline,
+    run_synthesis_pipeline,
+)
 
 
 class FakeClient:
@@ -343,6 +358,112 @@ class SynthesisPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(len(markers), 1)
         self.assertTrue(set(markers).issubset(set(result.claim_chunks)))
         self.assertNotIn("## 材料來源清單", result.report)
+
+    def test_notes_checkpoint_resumes_only_missing_paper_and_blocks_partial_report(self) -> None:
+        documents = [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)]
+        checkpoint_dir = Path(tempfile.mkdtemp()) / "run-1"
+        self.addCleanup(lambda: shutil.rmtree(checkpoint_dir.parent, ignore_errors=True))
+        client = SynthesisFakeClient()
+
+        def summary_for(paper_id: str, chunks: list, *_args, **_kwargs) -> PaperSummary:
+            chunk = chunks[0]
+            return PaperSummary(
+                paper_id=paper_id,
+                claims=[
+                    PaperSummaryClaim(
+                        text=f"The study in {paper_id} reports evidence selection results for review agents.",
+                        aspect="method",
+                        evidence=[
+                            ChunkReference(
+                                chunk_id=chunk.chunk_id,
+                                paper_id=paper_id,
+                                page_start=chunk.page_start,
+                                page_end=chunk.page_end,
+                                quote=chunk.text[:240],
+                            )
+                        ],
+                    )
+                ],
+                coverage_chunk_ids=[chunk.chunk_id],
+            )
+
+        def fail_first_paper(paper_id: str, chunks: list, *args, **kwargs) -> PaperSummary:
+            if paper_id == "paper-1":
+                raise RuntimeError("temporary provider outage")
+            return summary_for(paper_id, chunks, *args, **kwargs)
+
+        with mock.patch.object(
+            pipeline_module, "summarize_paper_notes", side_effect=fail_first_paper
+        ), mock.patch.object(pipeline_module, "_notes_pacing_seconds", return_value=0):
+            with self.assertRaises(NotesIncompleteError):
+                run_synthesis_pipeline(
+                    documents,
+                    "literature review agent",
+                    client,
+                    notes_checkpoint_dir=checkpoint_dir,
+                    notes_pacing_seconds=0,
+                    **self.policy_arguments(),
+                )
+        self.assertTrue((checkpoint_dir / "manifest.json").is_file())
+        self.assertEqual(
+            len([
+                path
+                for path in checkpoint_dir.glob("*.json")
+                if path.name not in {"manifest.json", "state.json"}
+            ]),
+            1,
+        )
+        checkpoint_state = json.loads((checkpoint_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(checkpoint_state["pending_paper_ids"], ["paper-1"])
+        self.assertFalse(any(prompt.startswith("Plan a thematic outline") for prompt in client.prompts))
+
+        with mock.patch.object(
+            pipeline_module, "summarize_paper_notes", side_effect=summary_for
+        ) as summarize, mock.patch.object(
+            pipeline_module, "_notes_pacing_seconds", return_value=0
+        ):
+            client.note_paper_ids = ["paper-1", "paper-2"]
+            result = run_synthesis_pipeline(
+                documents,
+                "literature review agent",
+                client,
+                notes_checkpoint_dir=checkpoint_dir,
+                notes_pacing_seconds=0,
+                **self.policy_arguments(),
+            )
+
+        self.assertEqual([call.args[0] for call in summarize.call_args_list], ["paper-1"])
+        self.assertEqual({note.paper_id for note in result.paper_summaries}, {"paper-1", "paper-2"})
+
+    def test_notes_checkpoint_rejects_changed_query(self) -> None:
+        documents = [make_document("paper-1", PAPER_TEXT), make_document("paper-2", PAPER_TEXT)]
+        checkpoint_dir = Path(tempfile.mkdtemp()) / "run-2"
+        self.addCleanup(lambda: shutil.rmtree(checkpoint_dir.parent, ignore_errors=True))
+        with mock.patch.object(
+            pipeline_module,
+            "summarize_paper_notes",
+            side_effect=lambda paper_id, chunks, *_a, **_k: (_ for _ in ()).throw(
+                RuntimeError("provider down")
+            ),
+        ), mock.patch.object(pipeline_module, "_notes_pacing_seconds", return_value=0):
+            with self.assertRaises(NotesIncompleteError):
+                run_synthesis_pipeline(
+                    documents,
+                    "literature review agent",
+                    SynthesisFakeClient(),
+                    notes_checkpoint_dir=checkpoint_dir,
+                    notes_pacing_seconds=0,
+                    **self.policy_arguments(),
+                )
+        with self.assertRaises(NotesCheckpointError):
+            run_synthesis_pipeline(
+                documents,
+                "a different research question",
+                SynthesisFakeClient(),
+                notes_checkpoint_dir=checkpoint_dir,
+                notes_pacing_seconds=0,
+                **self.policy_arguments(),
+            )
 
     def test_synthesis_pipeline_prints_section_distribution_by_default(self) -> None:
         with contextlib.redirect_stdout(io.StringIO()) as stdout:

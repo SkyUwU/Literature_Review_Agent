@@ -18,7 +18,7 @@
 ```text
 query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 → Semantic Scholar（空結果／失敗／無 key 時使用 OpenAlex）
-→ DOI 摘要補齊、年份／venue 篩選、embedding paper ranking
+→ Semantic Scholar provider 層年份／venue 限制、DOI 摘要補齊、本地年份／venue 後衛、embedding paper ranking
 → bucket sampling + LLM screening（可提出 gap follow-up）
 → OA PDF 下載 → pymupdf4llm 抽取、章節切分
 → 每篇論文內取樣 top-2 chunks → functional scoring
@@ -36,7 +36,7 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 ## 目前已知研究與操作政策
 
 - 年份預設為最近三年（2026 年即 2024 起），並使用 FilterPolicy 作為 provider 統一後衛。
-- 預設 venue whitelist 是硬篩選；舊紀錄指出 "literature review agent" 的候選可能全被此 whitelist 排除。真實 run 前檢查候選／venue 統計；需要探索性執行時可明確指定 --venues none，不要把結果解讀為正式政策下的同一實驗。
+- 預設 venue whitelist 是硬篩選；Semantic Scholar 搜尋會將已辨識 conference 名稱／alias 與 year range 傳給 provider，之後仍由本地 whitelist 核對。OpenAlex fallback 仍以本地篩選為準。`[search]` 統計列 provider 回傳、abstract 可用、年份後、venue 後及最終數量。未命中可能來自 venue 欄位缺漏／變體、期刊或預印本不在 whitelist；探索性執行可明確指定 `--venues none`，不可把它解讀為原政策下的同一實驗。
 - 每個規劃 query 分別搜尋、排名及分配下載目標；跨 query 以 DOI（無 DOI 時 title+year）去重。預設 data/run/ 每次真實執行會清空重建；使用 --dest-dir 指定位置時不清除該位置。
 - 只有成功寫入的 PDF 會列在 papers_*.json；每輪報告與 papers JSON 寫入 data/outputs/ 並共用時間戳。dry run 不寫這兩個 JSON。
 - 章節分布統計（SD）在 synthesis 時印至 stdout；它可用來判斷是否需要討論 section-aware sampling，不要在取得可查證的實際 run 數據前先改取樣策略。
@@ -45,20 +45,19 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 
 - 沒有 `GROQ_API_KEY` 時，正式流程可分配四個 Gemini key 群組：planner + screening 共用 `--plan-key`（預設 1）、functional scoring 使用 `--scoring-key`（預設沿用 `--notes-key`）、per-paper notes 使用 `--notes-key`（預設 2）、report 使用 `--report-key`（預設 3）。例如 `--plan-key 2 --scoring-key 3 --notes-key 4 --report-key 5` 可分配 Key 2–5；未指定 `--scoring-key` 時維持舊版 scoring/notes 共用同一 key。
 - 每把 key 有獨立速率追蹤；預設最多 20 次／process，預設約 13 秒 pacing。stderr 的 [llm] 紀錄包含 stage、key hash、等待時間、呼叫數及狀態，不會輸出完整 key。
-- Gemini 503／overload 會在同一模型、同一階段做最多 3 次 exponential backoff 重試（約 15、30、60 秒，另加少量 jitter）；這高於每 key 13 秒的 RPM pacing 間隔。SDK 內層重試設為單次，避免超出應用層次數；每次嘗試都計入本 process 的該 key 呼叫數。重試耗盡後不切換模型或降級：planner、main screening、gap follow-up screening、functional scoring、notes、report 均中止該輪。429 的 quota／retry-after 規則維持獨立，不套用 503 重試。
-- 429 依 provider 訊息分類；有 per-minute retry hint 時最多有限重試，日額度耗盡不重試。notes/scoring/report 所指定的 Gemini keys 沒有後續階段的替代降級路徑。
+- Gemini 503／overload 會在同一模型、同一階段做最多 3 次 exponential backoff 重試（約 15、30、60 秒，另加少量 jitter）；SDK 內層重試設為單次，避免超出應用層次數。429 依 provider 訊息分類；有 per-minute retry hint 時最多有限重試，日額度耗盡不重試。planner、screening、scoring、report 重試耗盡仍中止階段；per-paper notes 會記下失敗 paper，繼續處理其他論文並使用 checkpoint 等待續跑，不產生不完整 report。
 - OpenAlex 503 若訊息指出 anonymous search paused，需使用 OPENALEX_API_KEY；OpenAlex 504 query_timeout 則表示該次搜尋逾時。Dry run 的 rule-based planner 會把輸入 query 原樣延伸為 survey/literature-review/comparison 子查詢，應輸入精簡的主題詞而非長篇研究問題。發生 timeout 時檢查 stdout 的 Search plan，縮短導致錯誤的子查詢後再執行；不要盲目重送同一條過長 query。
 - 啟動任何真實 run 前，請使用者確認本次會用到的每把 key 在 https://ai.dev/rate-limit 的剩餘額度。不得假設額度，也不得自動重跑整輪。
 - .env 僅為本機秘密設定；不要讀出、貼出或提交 key。Gemini 與 Semantic Scholar key 應按 stage 的實際需求準備。
 
 ## Groq/Gemini 混合 provider
 
-- 在 `.env` 設定 `GROQ_API_KEY` 後，Groq 固定模型 `openai/gpt-oss-120b` 負責 planner、分批 screening／全域 gap 彙整、functional scoring 與 report；由 `uv sync` 安裝 Groq 官方 Python SDK，透過 Chat Completions API 呼叫。
-- 混合模式下，screening 會依約 3,000 個估計 prompt tokens 的預算切批，逐批產生每篇 keep/maybe/reject 判斷及局部涵蓋／缺漏摘要，再用一次精簡呼叫整合全域 gap 與 follow-up queries。所有 Groq 階段共用 process 內的 TPM tracker：依每階段歷史 usage 校準輸入估值、為輸出預留額度、追蹤 Groq 回報的實際 prompt/completion/total tokens，並優先採用 response 的 remaining/reset headers。它能減少固定等待；其他 process 或同 organization 的外部呼叫仍以 provider 的 429/retry-after 為準。有 retry-after 的 TPM 429 最多有限重試；日額度錯誤不會盲目重送。候選若單篇已超出 screening 預算會直接停止並報錯，不會截斷摘要或切換模型。per-paper notes 固定用 Gemini（key 由 `--notes-key` 選擇）。任一階段失敗時中止，不改由另一 provider 接手。
-- 混合模式所需 key：`GROQ_API_KEY` 與 notes 對應的 `GEMINI_API_KEY[_N]`（預設 key2）。沒有 `GROQ_API_KEY` 時沿用原先全 Gemini 的分工。
+- 在 `.env` 設定 `GROQ_API_KEY` 後，Groq 固定模型 `openai/gpt-oss-120b` 負責 planner、分批 screening／全域 gap 彙整、functional scoring、per-paper notes 與 report；由 `uv sync` 安裝 Groq 官方 Python SDK，透過 Chat Completions API 呼叫。
+- 混合模式下，screening 依約 3,000 個估計 prompt tokens 的預算切批；notes 依 section 切批，預設每批約 2,500 個估計 prompt tokens，可用 `GROQ_NOTES_BATCH_TOKENS` 調整。所有 Groq 階段共用 process 內 TPM tracker：依歷史 usage 校準估值、預留輸出額度、追蹤實際 tokens，並採用 provider remaining/reset headers。有 retry-after 的 TPM 429 與 503 都有界重試；日額度錯誤不盲目重送。Notes 批次輸出經 Pydantic 與 chunk ID 驗證，再保留來源 ID 本地合併，不額外呼叫 LLM 整合。任一 paper notes 失敗時先完成其他論文，checkpoint 記錄 pending paper IDs；有未完成項時不產生 report。
+- 每輪真實流程會印出 `[notes] checkpoint_id=<run-id>`，checkpoint 位於 `data/outputs/notes_checkpoints/<run-id>/`。續跑命令：`uv run --env-file .env python -m literature_review.main --resume-notes <run-id>`，並輸入相同 research query；續跑仍會重做搜尋、下載、抽取與 scoring，已完成的 notes 會重用，只補缺漏 notes。Manifest 比對 query、入選 paper、provider、policy 與來源內容，不相符即拒絕續用。沒有 `GROQ_API_KEY` 時 notes 維持 Gemini key `--notes-key`。
 - Groq 503 在同一模型最多重試三次（約 15、30、60 秒加 jitter），耗盡後停止該輪。Groq 使用 JSON Schema best-effort mode，並以既有 Pydantic 驗證及有限 JSON repair 檢查輸出。文件所列免費額度會變動；完整 run 前查看 Groq Limits 與每把 Gemini key 的 AI Studio rate limit。
 - 每次 Gemini／Groq 呼叫會在 `[llm]` log 記錄 `prompt_chars` 與 `prompt_utf8_bytes`，不含 JSON schema 與 API protocol overhead。Groq 呼叫另記錄 `prompt_tokens`、`completion_tokens`、`total_tokens`（provider usage）；送出前的 token 數仍是估值，成功回應及錯誤的 rate-limit headers／retry-after 用於調整下一次等待。
-- `.env` 範例為 `GROQ_API_KEY=<你的 key>`。不要提交 `.env` 或把 key 貼到聊天、log、文件。
+- `.env` 範例為 `GROQ_API_KEY=<你的 key>`；`GROQ_NOTES_BATCH_TOKENS` 預設 2500。不要提交 `.env` 或把 key 貼到聊天、log、文件。
 
 ## 執行命令
 

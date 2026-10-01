@@ -80,12 +80,17 @@ class PapersOutput(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    """Search constraints supplied to one scholarly-paper provider."""
+    """Search constraints supplied to one scholarly-paper provider.
+
+    ``venues`` requests provider-side venue filtering where supported; callers
+    still apply the shared local policy as the final cross-provider check.
+    """
 
     query: str = Field(min_length=3)
     limit: int = Field(default=10, ge=1, le=100)
     year_from: int | None = Field(default=None, ge=1900, le=2100)
     year_to: int | None = Field(default=None, ge=1900, le=2100)
+    venues: tuple[str, ...] = Field(default_factory=tuple)
 
 
 class SearchResponse(BaseModel):
@@ -534,10 +539,11 @@ class PaperSource(BaseModel):
 class CoveragePackPolicy(BaseModel):
     """Reproducible settings for bounding the evidence sent to synthesis.
 
-    ``llm_input_cap`` is a section-aware budget for per-paper note input
-    (C2c): sections are covered first — every heading and each section's first
-    chunk are kept, and only when the cap overflows does selection fall back
-    to within-section strided sampling.
+    ``llm_input_cap`` is a section-aware cap for single-request note providers
+    (Gemini): sections are covered first — every heading and each section's
+    first chunk are kept, and only when the cap overflows does selection fall
+    back to within-section strided sampling. Groq notes keep all chunks and split
+    them into section-bounded TPM-sized requests.
     """
 
     max_chunks_per_paper: int = Field(default=6, ge=1, le=50)

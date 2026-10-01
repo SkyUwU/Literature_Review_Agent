@@ -1,6 +1,7 @@
 import json
 import re
 import unittest
+from unittest import mock
 
 # allow: SIZE_OK — Assignment requires appending the LLM-path cases to this exact
 # existing test module without modifying or relocating the pre-existing test cases.
@@ -24,6 +25,7 @@ from literature_review.models import (
     PaperSummaryClaim,
 )
 from literature_review.coverage import classify_chunk, drop_noise_sections
+from literature_review.llm_evidence import GroqJsonClient
 from literature_review.synthesis import (
     SynthesisError,
     _bounded_chunks_for_llm,
@@ -482,6 +484,30 @@ class FakeNoteClient:
         return json.dumps(self.response)
 
 
+class FakeGroqNoteClient(GroqJsonClient):
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    def generate_json(self, prompt: str, schema: dict | None = None) -> str:
+        self.prompts.append(prompt)
+        payload = json.loads(prompt.split("Evidence chunks: ", 1)[1])
+        section = payload[0]["section"]
+        chunk_ids = [item["chunk_id"] for item in payload[0]["chunks"]]
+        return json.dumps(
+            {
+                "claims": [
+                    {
+                        "text": f"Evidence from {chunk_id} supports the reported method and findings.",
+                        "chunk_ids": [chunk_id],
+                        "aspect": section,
+                    }
+                    for chunk_id in chunk_ids
+                ],
+                "coverage_chunk_ids": chunk_ids,
+            }
+        )
+
+
 class RetryNoteClient:
     def __init__(self, valid_response: dict[str, object]) -> None:
         self.responses = ['{"claims": [', json.dumps(valid_response)]
@@ -639,6 +665,36 @@ class LlmPaperNotesTests(unittest.TestCase):
         self.assertEqual(len(client.prompts), 2)
         self.assertIn("schema validation errors", client.prompts[1])
         self.assertEqual(note.coverage_chunk_ids, ["p1-p1-1-c1", "p1-p2-2-c4", "p1-p4-4-c8"])
+
+    def test_groq_notes_split_by_section_and_large_chunk_with_traceability(self) -> None:
+        chunks = [
+            EvidenceChunk(
+                chunk_id="p1-intro",
+                paper_id="p1",
+                page_start=1,
+                page_end=1,
+                section="Introduction",
+                text="Introduction provides a concise motivation for the proposed system.",
+            ),
+            EvidenceChunk(
+                chunk_id="p1-method",
+                paper_id="p1",
+                page_start=2,
+                page_end=3,
+                section="Method",
+                text="Method describes the proposed approach and implementation details. " * 500,
+            ),
+        ]
+        client = FakeGroqNoteClient()
+        with mock.patch.dict("os.environ", {"GROQ_NOTES_BATCH_TOKENS": "1200"}):
+            note = summarize_paper_notes("p1", chunks, client, CoveragePackPolicy())
+
+        self.assertGreaterEqual(len(client.prompts), 3)
+        self.assertEqual(note.paper_id, "p1")
+        self.assertEqual(set(note.coverage_chunk_ids), {"p1-intro", "p1-method"})
+        self.assertTrue(
+            all(reference.paper_id == "p1" for claim in note.claims for reference in claim.evidence)
+        )
 
 
 class LlmSynthesisReportTests(unittest.TestCase):

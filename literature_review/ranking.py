@@ -95,6 +95,23 @@ def _build_venue_index() -> dict[str, str]:
 _VENUE_BY_ALIAS = _build_venue_index()
 
 
+def venue_search_names(whitelist: tuple[str, ...]) -> tuple[str, ...]:
+    """Return provider-readable names for the canonical venues in a whitelist."""
+    if not whitelist:
+        return ()
+    selected = {
+        _VENUE_BY_ALIAS[token]
+        for token in whitelist
+        if token in _VENUE_BY_ALIAS
+    }
+    return tuple(
+        name
+        for canonical in TOP_VENUE_ALIASES
+        if canonical in selected
+        for name in (canonical, *TOP_VENUE_ALIASES[canonical])
+    )
+
+
 def resolve_venues(raw: str | None) -> tuple[str, ...]:
     """Resolve a ``--venues`` value into normalized whitelist tokens.
 

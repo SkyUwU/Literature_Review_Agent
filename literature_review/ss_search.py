@@ -52,6 +52,8 @@ def build_search_url(request: SearchRequest) -> str:
     }
     if request.year_from is not None or request.year_to is not None:
         parameters["year"] = f"{request.year_from or ''}-{request.year_to or ''}"
+    if request.venues:
+        parameters["venue"] = ",".join(request.venues)
     return f"{SS_SEARCH_URL}?{urlencode(parameters)}"
 
 

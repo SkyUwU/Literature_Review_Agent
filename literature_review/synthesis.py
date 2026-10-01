@@ -5,6 +5,7 @@
 # splitting them would break the mandated literature_review.synthesis import path.
 
 import json
+import os
 import re
 from typing import Final, TypeVar
 
@@ -15,7 +16,12 @@ from literature_review.coverage import (
     classify_section,
     detect_limitation_chunks,
 )
-from literature_review.llm_evidence import JsonGenerationClient, generate_validated, strip_code_fence
+from literature_review.llm_evidence import (
+    GroqJsonClient,
+    JsonGenerationClient,
+    generate_validated,
+    strip_code_fence,
+)
 from literature_review.models import (
     ChunkReference,
     CoveragePackPolicy,
@@ -666,30 +672,48 @@ def summarize_paper_notes(
     *,
     paper_title: str | None = None,
 ) -> PaperSummary:
-    """Summarize one paper into grounded reading notes through one bounded LLM call."""
-    supplied = _bounded_chunks_for_llm(chunks, policy.llm_input_cap, paper_title=paper_title)
+    """Summarize one paper; Groq receives section-bounded batches under its TPM budget."""
+    groq_batched = isinstance(client, GroqJsonClient)
+    supplied = (
+        list(chunks)
+        if groq_batched
+        else _bounded_chunks_for_llm(chunks, policy.llm_input_cap, paper_title=paper_title)
+    )
     if not supplied:
         raise SynthesisError(f"No evidence chunks available for paper {paper_id}.")
-    note = _generate_validated(
-        client, LlmPaperSummaryNote,
-        build_paper_notes_prompt(paper_id, supplied, paper_title=paper_title),
-        LlmPaperSummaryNote.model_json_schema(),
-    )
     chunk_by_id = {chunk.chunk_id: chunk for chunk in supplied}
-    unknown_ids = _check_unknown_ids(note, supplied)
-    if unknown_ids:
-        repair = _build_chunk_repair_prompt(
-            json.dumps(note.model_dump()), unknown_ids, sorted(chunk_by_id)
+    notes = []
+    if groq_batched:
+        budget = max(256, int(os.getenv("GROQ_NOTES_BATCH_TOKENS", "2500")))
+        batches = _groq_note_batches(paper_id, supplied, budget, paper_title)
+    else:
+        batches = [supplied]
+    for batch in batches:
+        note = _generate_validated(
+            client, LlmPaperSummaryNote,
+            build_paper_notes_prompt(paper_id, batch, paper_title=paper_title),
+            LlmPaperSummaryNote.model_json_schema(),
         )
-        note = _parse_llm_model(
-            LlmPaperSummaryNote, client.generate_json(repair, LlmPaperSummaryNote.model_json_schema())
-        )
-        unknown_ids = _check_unknown_ids(note, supplied)
+        unknown_ids = _check_unknown_ids(note, batch)
         if unknown_ids:
-            raise SynthesisError(
-                f"LLM note for paper {paper_id} cites unknown chunk ids: {', '.join(unknown_ids)}."
+            repair = _build_chunk_repair_prompt(
+                json.dumps(note.model_dump()), unknown_ids, sorted({c.chunk_id for c in batch})
             )
-    claims = [_claim_from_note(claim, chunk_by_id) for claim in note.claims]
+            note = _parse_llm_model(
+                LlmPaperSummaryNote,
+                client.generate_json(repair, LlmPaperSummaryNote.model_json_schema()),
+            )
+            unknown_ids = _check_unknown_ids(note, batch)
+            if unknown_ids:
+                raise SynthesisError(
+                    f"LLM note for paper {paper_id} cites unknown chunk ids: {', '.join(unknown_ids)}."
+                )
+        notes.append(note)
+    claims = [
+        _claim_from_note(claim, chunk_by_id)
+        for note in notes
+        for claim in note.claims
+    ]
     coverage_chunk_ids = sorted(
         {reference.chunk_id for claim in claims for reference in claim.evidence}
     )
@@ -700,6 +724,49 @@ def summarize_paper_notes(
         claims=claims,
         coverage_chunk_ids=coverage_chunk_ids,
     )
+
+
+def _groq_note_batches(
+    paper_id: str,
+    chunks: list[EvidenceChunk],
+    token_budget: int,
+    paper_title: str | None,
+) -> list[list[EvidenceChunk]]:
+    """Split notes by section, further dividing oversized sections/chunks."""
+    def fits(batch: list[EvidenceChunk]) -> bool:
+        prompt = build_paper_notes_prompt(paper_id, batch, paper_title=paper_title)
+        return (len(prompt) + 3) // 4 <= token_budget
+
+    def split_until_fit(chunk: EvidenceChunk) -> list[EvidenceChunk]:
+        if fits([chunk]):
+            return [chunk]
+        midpoint = len(chunk.text) // 2
+        if midpoint < 20 or len(chunk.text) - midpoint < 20:
+            raise SynthesisError(
+                f"Groq notes prompt overhead exceeds the {token_budget}-token budget."
+            )
+        left = chunk.model_copy(update={"text": chunk.text[:midpoint]})
+        right = chunk.model_copy(update={"text": chunk.text[midpoint:]})
+        return [*split_until_fit(left), *split_until_fit(right)]
+
+    batches: list[list[EvidenceChunk]] = []
+    for section_chunks in _group_chunks_by_section(chunks, paper_title).values():
+        current: list[EvidenceChunk] = []
+        for chunk in section_chunks:
+            for piece in split_until_fit(chunk):
+                candidate = [*current, piece]
+                if current and not fits(candidate):
+                    batches.append(current)
+                    current = [piece]
+                elif not fits(candidate):
+                    raise SynthesisError(
+                        f"Groq notes prompt overhead exceeds the {token_budget}-token budget."
+                    )
+                else:
+                    current = candidate
+        if current:
+            batches.append(current)
+    return batches
 
 
 def _build_notes_payload(

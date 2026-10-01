@@ -1012,6 +1012,24 @@ class MainEntryTests(unittest.TestCase):
         self.assertIsNone(client_rcs)  # OLLAMA_BASE_URL 未設定 → No fallback client
         self.assertIsNotNone(client_report)  # C2c: key3 專屬報告 client
 
+    def test_build_clients_routes_notes_to_groq_when_configured(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"GROQ_API_KEY": "test-groq-key", "OLLAMA_BASE_URL": ""},
+            clear=False,
+        ), mock.patch("literature_review.main.GeminiJsonClient") as gemini_cls, mock.patch(
+            "literature_review.main.GroqJsonClient"
+        ) as groq_cls:
+            main_module._build_clients(
+                argparse.Namespace(rule_based=False, dry_run=False)
+            )
+
+        gemini_cls.assert_not_called()
+        self.assertEqual(
+            [call.kwargs["label"] for call in groq_cls.call_args_list],
+            ["plan+screening", "paper-notes", "functional-scoring", "report"],
+        )
+
     def test_build_clients_rule_based_skips_plan_client(self) -> None:
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "AIza000", "GEMINI_API_KEY_2": "AIza000", "GEMINI_API_KEY_3": "AIza000", "OLLAMA_BASE_URL": ""}, clear=False):
             with mock.patch("literature_review.main.GeminiJsonClient") as client_cls:
@@ -1413,6 +1431,8 @@ def ss_paper(
     doi: str | None = None,
     abstract: str | None = None,
     oa: bool = True,
+    venue: str | None = None,
+    year: int = 2025,
 ) -> Paper:
     """One Semantic-Scholar-style Paper with an optional placeholder abstract."""
     return Paper(
@@ -1420,13 +1440,14 @@ def ss_paper(
         doi=doi,
         title=f"Towards {paper_id}: automated literature review agents",
         authors=["A. Author"],
-        year=2025,
+        year=year,
         abstract=(
             abstract
             if abstract is not None
             else "This paper studies automated literature review generation with evidence selection."
         ),
         url=f"https://www.semanticscholar.org/paper/{paper_id}",
+        venue=venue,
         citation_count=10,
         open_access_pdf_url=f"https://example.org/{paper_id}.pdf" if oa else None,
     )
@@ -1474,6 +1495,32 @@ class SemanticScholarSearchTests(unittest.TestCase):
         search_ss.assert_called_once()
         self.assertEqual([item.paper.paper_id for item in ranked], ["S1"])
         self.assertEqual(fetcher.calls, [])
+
+    def test_search_passes_provider_venues_and_keeps_local_whitelist(self) -> None:
+        fetcher = FakeJsonFetcher([])
+        response = ss_response(
+            ss_paper("top", venue="NeurIPS"),
+            ss_paper("journal", venue="Journal of Applied Research"),
+            ss_paper("future-year", venue="NeurIPS", year=2026),
+        )
+        with mock.patch(
+            "literature_review.main.ss_search.search_ss", return_value=response
+        ) as search_ss:
+            ranked = main_module._search_and_rank(
+                "literature review agent",
+                json_fetcher=fetcher,
+                encoder=None,
+                paper_meta={},
+                ss_api_key="secret",
+                venues=default_venues(),
+                year_to=2025,
+            )
+
+        request = search_ss.call_args.args[0]
+        self.assertIn("NeurIPS", request.venues)
+        self.assertGreaterEqual(len(request.venues), 2)
+        self.assertEqual(request.year_to, 2025)
+        self.assertEqual([item.paper.paper_id for item in ranked], ["top"])
 
     def test_search_and_rank_uses_openalex_without_key(self) -> None:
         fetcher = FakeJsonFetcher([results_payload(record_for("W1"))])

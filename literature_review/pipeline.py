@@ -1,11 +1,13 @@
 """Opt-in paths from local PDFs to ranked LLM evidence and cited synthesis."""
 
 import argparse
+import hashlib
 import glob
 import json
 import os
 import sys
 import time
+from pathlib import Path
 
 try:
     from langfuse import get_client
@@ -186,6 +188,7 @@ def run_synthesis_pipeline(
     paper_queries: dict[str, str] | None = None,
     follow_up_queries: set[str] | None = None,
     print_section_distribution: bool = True,
+    notes_checkpoint_dir: Path | None = None,
 ) -> SynthesisResponse:
     """Run section-aware chunking, per-paper functional scoring, notes, and cited synthesis.
 
@@ -281,19 +284,118 @@ def run_synthesis_pipeline(
         _notes_pacing_seconds() if notes_pacing_seconds is None else notes_pacing_seconds
     )
     paper_summaries: list[PaperSummary] = []
+    notes_documents = [
+        (document, chunks)
+        for document, chunks in prepared
+        if document.paper_id in usable_ids
+    ]
+    manifest = {
+        "query": query,
+        "usable_paper_ids": sorted(usable_ids),
+        "client": type(client).__name__,
+        "model": getattr(client, "_model", None),
+        "paper_titles": {
+            document.paper_id: (paper_titles or {}).get(document.paper_id)
+            for document, _ in notes_documents
+        },
+        "coverage_policy": coverage_policy.model_dump(mode="json"),
+        "papers": {
+            document.paper_id: hashlib.sha256(
+                document.model_dump_json().encode("utf-8")
+            ).hexdigest()
+            for document, _ in notes_documents
+        },
+    }
+    if notes_checkpoint_dir is not None:
+        notes_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = notes_checkpoint_dir / "manifest.json"
+        if manifest_path.exists():
+            try:
+                saved_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise NotesCheckpointError(
+                    f"Could not read notes checkpoint manifest: {error}"
+                ) from error
+            if saved_manifest != manifest:
+                raise NotesCheckpointError(
+                    "Notes checkpoint does not match this query, selected papers, source text, "
+                    "provider, or coverage policy."
+                )
+        else:
+            _atomic_json_write(manifest_path, manifest)
+    failed_notes: list[str] = []
+    pending_note_ids = {document.paper_id for document, _ in notes_documents}
+    checkpoint_state_path = (
+        notes_checkpoint_dir / "state.json" if notes_checkpoint_dir is not None else None
+    )
+    if checkpoint_state_path is not None:
+        _save_notes_checkpoint_state(
+            checkpoint_state_path, notes_documents, pending_note_ids
+        )
     for position, (document, chunks) in enumerate(
-        (item for item in prepared if item[0].paper_id in usable_ids)
+        notes_documents
     ):
+        checkpoint_path = (
+            notes_checkpoint_dir / f"{hashlib.sha256(document.paper_id.encode()).hexdigest()}.json"
+            if notes_checkpoint_dir is not None
+            else None
+        )
+        if checkpoint_path is not None and checkpoint_path.exists():
+            try:
+                paper_summaries.append(
+                    PaperSummary.model_validate_json(checkpoint_path.read_text(encoding="utf-8"))
+                )
+                if paper_summaries[-1].paper_id != document.paper_id:
+                    raise ValueError("checkpoint paper_id does not match its manifest entry")
+                pending_note_ids.discard(document.paper_id)
+                if checkpoint_state_path is not None:
+                    _save_notes_checkpoint_state(
+                        checkpoint_state_path, notes_documents, pending_note_ids
+                    )
+                continue
+            except (OSError, ValueError) as error:
+                raise NotesCheckpointError(
+                    f"Invalid notes checkpoint for {document.paper_id}: {error}"
+                ) from error
         if position > 0 and pacing > 0:
             time.sleep(pacing)
-        paper_summaries.append(
-            summarize_paper_notes(
+        try:
+            summary = summarize_paper_notes(
                 document.paper_id,
                 chunks,
                 client,
                 coverage_policy,
                 paper_title=(paper_titles or {}).get(document.paper_id),
             )
+            paper_summaries.append(summary)
+            if checkpoint_path is not None:
+                checkpoint_payload = summary.model_dump(mode="json")
+                for index, claim in enumerate(checkpoint_payload["claims"], start=1):
+                    if not claim.get("claim_id"):
+                        claim["claim_id"] = f"checkpoint-{index}"
+                _atomic_json_write(checkpoint_path, checkpoint_payload)
+            pending_note_ids.discard(document.paper_id)
+        except Exception as error:
+            failed_notes.append(document.paper_id)
+            print(
+                f"[notes] paper_id={document.paper_id} failed; continuing other papers: {error}",
+                file=sys.stderr,
+            )
+        if checkpoint_state_path is not None:
+            _save_notes_checkpoint_state(
+                checkpoint_state_path, notes_documents, pending_note_ids
+            )
+    if failed_notes:
+        if notes_checkpoint_dir is None:
+            recovery = "Completed notes were not checkpointed; rerun this synthesis after fixing the provider."
+        else:
+            recovery = (
+                "Completed notes were saved; rerun with "
+                f"--resume-notes {notes_checkpoint_dir.name}."
+            )
+        raise NotesIncompleteError(
+            f"Per-paper notes remain incomplete for {', '.join(failed_notes)}. "
+            f"{recovery}"
         )
     result = synthesize_report(
         None, coverage_packs, paper_summaries, client_report or client, paper_assessments=assessments, query=query
@@ -319,6 +421,37 @@ def run_synthesis_pipeline(
             "paper_sources": resolved_sources,
             "report": result.report,
         }
+    )
+
+
+class NotesCheckpointError(SynthesisError):
+    """Raised when a notes checkpoint is unreadable or belongs to another run."""
+
+
+class NotesIncompleteError(SynthesisError):
+    """Raised after continuing the notes stage when papers still need a retry run."""
+
+
+def _atomic_json_write(path: Path, payload: object) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
+def _save_notes_checkpoint_state(
+    path: Path,
+    notes_documents: list[tuple[FullTextDocument, list[EvidenceChunk]]],
+    pending_paper_ids: set[str],
+) -> None:
+    ordered_ids = [document.paper_id for document, _ in notes_documents]
+    _atomic_json_write(
+        path,
+        {
+            "pending_paper_ids": [paper_id for paper_id in ordered_ids if paper_id in pending_paper_ids],
+            "completed_paper_ids": [paper_id for paper_id in ordered_ids if paper_id not in pending_paper_ids],
+        },
     )
 
 

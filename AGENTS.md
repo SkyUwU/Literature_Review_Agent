@@ -33,8 +33,9 @@
 - Gemini 503 最多 exponential backoff 重試 3 次；重試後仍失敗就停止該輪，不降級略過 screening 或改用其他模型。
 - 預設近三年與 top-venue whitelist 可能使候選為零；必要時可用 `--year-from`、`--year-to`、`--venues none` 做一次性覆寫，勿默默改變政策。
 - 預設下載資料夾 `data/run/` 每次真實執行會重建；報告及 papers JSON 累積在 `data/outputs/`。指定 `--dest-dir` 可選擇其他下載位置。
+- Semantic Scholar 搜尋會將年份範圍和 top-venue 名稱一併傳給 provider；本地 whitelist 仍為最後把關。`[search]` 統計分列 provider 回傳、abstract 可用、年份後、venue 後與最終篩選數。
 - Gemini key 分工、錯誤降級、額度／速率控制及 run 命令詳見 `HANDOFF.md`；503 是服務錯誤，不能由此推斷生成內容品質。
-- 設定 `GROQ_API_KEY` 後，Groq `openai/gpt-oss-120b` 負責 plan、分批 screening 與全域 gap 彙整、scoring/report；Gemini 負責 per-paper notes。所有 Groq 階段共用 process 內 TPM tracker，優先讀取 provider rate-limit/reset headers，並以成功回應的實際 prompt/completion tokens 更新；有 retry-after 的 TPM 429 會有限等待重試。screening prompts 仍以約 3,000 估計輸入 tokens 為批次目標。沒有 Groq key 時維持單次 Gemini screening；額度與 key 選擇見 `HANDOFF.md`。
+- 設定 `GROQ_API_KEY` 後，Groq `openai/gpt-oss-120b` 負責 plan、screening、scoring、逐篇 notes 與 report。Groq notes 按 section 分批，預設每批估計輸入 2,500 tokens（可用 `GROQ_NOTES_BATCH_TOKENS` 調整），共用 process TPM tracker；沒有 Groq key 時 notes 維持 Gemini。Notes checkpoint 位於 `data/outputs/notes_checkpoints/<run-id>/`；失敗後照 stderr 的 run ID 使用 `--resume-notes <run-id>` 續跑，所有 notes 完成才產生 report。checkpoint 綁定 query、選用 paper、provider 與來源文件內容，不符時拒絕沿用。
 
 ## 常用命令（PowerShell）
 

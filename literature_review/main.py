@@ -25,9 +25,11 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import time
+import uuid
 from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from pathlib import Path
@@ -70,7 +72,9 @@ from literature_review.synthesis import SynthesisError
 from literature_review.ranking import (
     FilterPolicy,
     filter_and_rank,
+    filter_papers,
     resolve_venues,
+    venue_search_names,
 )
 
 LIMIT = 100
@@ -200,6 +204,7 @@ def _search_candidates(
     ss_api_key: str | None,
     year_from: int,
     year_to: int | None = None,
+    venues: tuple[str, ...] = (),
 ) -> SearchResponse:
     """Search one query through Semantic Scholar, falling back to OpenAlex.
 
@@ -207,10 +212,15 @@ def _search_candidates(
     backfilled from OpenAlex and any paper still lacking an abstract is dropped.
     A missing key, an empty Semantic Scholar result, or a failed request (for
     example repeated HTTP 429) falls back to OpenAlex unchanged. ``year_from``
-    and ``year_to`` bound the search window on the provider request itself.
+    and ``year_to`` bound the search window on the provider request itself;
+    ``venues`` are passed to Semantic Scholar and remain a local post-filter.
     """
     request = SearchRequest(
-        query=query_text, limit=LIMIT, year_from=year_from, year_to=year_to
+        query=query_text,
+        limit=LIMIT,
+        year_from=year_from,
+        year_to=year_to,
+        venues=venue_search_names(venues),
     )
     if not ss_api_key:
         return search.search_papers(request, json_fetcher=json_fetcher)
@@ -255,8 +265,8 @@ def _search_and_rank(
     the M5e bucket-sampling path, and the gap follow-up round. With ``ss_api_key``
     the search is served by Semantic Scholar, otherwise by OpenAlex. ``year_from``
     defaults to the current ``YEAR_WINDOW`` and is used both for the provider
-    request and as the min-year backstop, so the window stays consistent; a
-    non-empty ``venues`` whitelist hard-filters candidates after retrieval.
+    request and as the local year backstop. A non-empty ``venues`` whitelist is
+    sent to Semantic Scholar and remains a hard local post-filter for every source.
     """
     effective_year_from = year_from if year_from is not None else default_min_year()
     response = _search_candidates(
@@ -265,16 +275,25 @@ def _search_and_rank(
         ss_api_key=ss_api_key,
         year_from=effective_year_from,
         year_to=year_to,
+        venues=venues,
     )
+    after_year = filter_papers(
+        response.papers,
+        FilterPolicy(min_year=effective_year_from, max_year=year_to),
+    )
+    after_year_venue = filter_papers(
+        after_year, FilterPolicy(venues=venues)
+    ) if venues else after_year
     ranked = filter_and_rank(
         response,
-        FilterPolicy(min_year=effective_year_from, venues=venues),
+        FilterPolicy(min_year=effective_year_from, max_year=year_to, venues=venues),
         encoder=encoder,
     )
     print(
         f"[search] query={json.dumps(query_text, ensure_ascii=False)} "
         f"provider={response.provider} provider_total={response.total_candidates} "
         f"with_abstract={len(response.papers)} skipped={response.skipped_candidates} "
+        f"after_year={len(after_year)} after_venue={len(after_year_venue)} "
         f"after_year_venue_filters={len(ranked.ranked_papers)} "
         f"year_from={effective_year_from} venue_filter={'disabled' if not venues else 'enabled'}",
         file=sys.stderr,
@@ -307,6 +326,7 @@ def run_end_to_end(
     year_from: int | None = None,
     year_to: int | None = None,
     venues: tuple[str, ...] = (),
+    notes_checkpoint_dir: Path | None = None,
 ) -> dict[str, object]:
     """Run one full literature-review cycle for a bare query.
 
@@ -608,6 +628,7 @@ def run_end_to_end(
         paper_queries=paper_queries,
         follow_up_queries=follow_up_queries,
         encoder=effective_encoder,
+        notes_checkpoint_dir=notes_checkpoint_dir,
     )
     papers_output = _make_papers_output(
         query,
@@ -713,20 +734,20 @@ def _build_clients(
 
     The LLM planner is the default for a full run; it is skipped on ``--dry-run``
     (zero keys) and on ``--rule-based`` (escape hatch). With GROQ_API_KEY,
-    planning/screening/scoring/report use Groq and notes use Gemini. Without it,
+    planning/screening/scoring/notes/report use Groq. Without it,
     the existing all-Gemini key configuration is used. ``--dry-run`` never reads
     model keys or constructs LLM clients.
 
     Without Groq, the existing Gemini key selectors route each stage as before.
-    With Groq enabled, planning/screening/scoring/report use Groq, while notes
-    use the Gemini key selected by ``--notes-key``. Groq screening is split into
+    With Groq enabled, planning/screening/scoring/notes/report use Groq. Groq
+    screening is split into
     token-bounded batches followed by a compact global gap synthesis.
 
     ``client_rcs`` is built from the local Ollama endpoint when ``OLLAMA_BASE_URL``
     is configured (M6); when it is missing the client stays ``None`` and the RCS
     stage falls back to the Gemini synthesis client (existing behavior).
     With Gemini, ``client_report`` uses the dedicated ``GEMINI_API_KEY_3``; with
-    Groq it shares ``GROQ_API_KEY`` with planning and scoring.
+    Groq it shares ``GROQ_API_KEY`` with all Groq-backed stages.
     """
     plan_suffix = getattr(arguments, "plan_key", 1)
     notes_suffix = getattr(arguments, "notes_key", 2)
@@ -777,9 +798,7 @@ def _build_clients(
     client_scoring: JsonGenerationClient | None = None
     if not arguments.dry_run:
         if use_groq:
-            client_synth = build_stage_client(
-                "paper-notes", gemini_suffix=notes_suffix, force_gemini=True
-            )
+            client_synth = build_stage_client("paper-notes")
             client_scoring = build_stage_client("functional-scoring")
         else:
             client_synth = build_stage_client("paper-notes", gemini_suffix=notes_suffix)
@@ -907,6 +926,11 @@ def main() -> None:
         help="Comma-separated top venues by name (matches the built-in 17-conference list by key or alias and expands its aliases; unrecognized names filter as raw substrings with a warning); 'none' or an empty string disables the filter; default is all built-in top venues",
     )
     parser.add_argument(
+        "--resume-notes",
+        metavar="RUN_ID",
+        help="Resume per-paper notes from data/outputs/notes_checkpoints/RUN_ID",
+    )
+    parser.add_argument(
         "--plan-key",
         type=int,
         default=1,
@@ -935,6 +959,16 @@ def main() -> None:
         help="Key suffix for the synthesis report stage (default 3)",
     )
     arguments = parser.parse_args()
+    if arguments.resume_notes and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", arguments.resume_notes):
+        parser.error("--resume-notes must be a simple run ID (letters, digits, '_' or '-').")
+    if arguments.resume_notes and arguments.dry_run:
+        parser.error("--resume-notes requires a full run; it cannot be combined with --dry-run.")
+    if arguments.resume_notes and not (
+        Path("data/outputs/notes_checkpoints")
+        / arguments.resume_notes
+        / "manifest.json"
+    ).is_file():
+        parser.error(f"No notes checkpoint found for run ID {arguments.resume_notes!r}.")
 
     env_dest_dir = os.getenv("DEST_DIR")
     explicit_dest = arguments.dest_dir is not None or bool(env_dest_dir)
@@ -954,6 +988,18 @@ def main() -> None:
 
     client_plan, client_synth, client_scoring, client_rcs, client_report = _build_clients(arguments)
     client_screen = _build_screen_client(arguments, client_plan)
+    notes_run_id = arguments.resume_notes or uuid.uuid4().hex
+    notes_checkpoint_dir = (
+        Path("data/outputs/notes_checkpoints") / notes_run_id
+        if not arguments.dry_run
+        else None
+    )
+    if notes_checkpoint_dir is not None and not arguments.resume_notes:
+        while notes_checkpoint_dir.exists():
+            notes_run_id = uuid.uuid4().hex
+            notes_checkpoint_dir = Path("data/outputs/notes_checkpoints") / notes_run_id
+    if notes_checkpoint_dir is not None:
+        print(f"[notes] checkpoint_id={notes_run_id}", file=sys.stderr)
 
     ss_api_key = (
         None
@@ -977,6 +1023,7 @@ def main() -> None:
             year_from=arguments.year_from,
             year_to=arguments.year_to,
             venues=_resolve_venues(arguments.venues),
+            notes_checkpoint_dir=notes_checkpoint_dir,
         )
     except (LlmEvidenceError, SynthesisError, ValueError) as error:
         print(f"Pipeline failed: {error}", file=sys.stderr)

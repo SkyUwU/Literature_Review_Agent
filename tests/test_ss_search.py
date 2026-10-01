@@ -50,6 +50,23 @@ class BuildUrlTests(unittest.TestCase):
         parameters = parse_qs(urlparse(url).query)
         self.assertNotIn("year", parameters)
 
+    def test_build_search_url_includes_year_range_and_multiple_venues(self) -> None:
+        url = build_search_url(
+            SearchRequest(
+                query="literature review agent",
+                limit=10,
+                year_from=2024,
+                year_to=2026,
+                venues=("NeurIPS", "International conference on machine learning"),
+            )
+        )
+        parameters = parse_qs(urlparse(url).query)
+        self.assertEqual(parameters["year"], ["2024-2026"])
+        self.assertEqual(
+            parameters["venue"],
+            ["NeurIPS,International conference on machine learning"],
+        )
+
 
 class PaperFromSsTests(unittest.TestCase):
     def test_normalises_valid_record(self) -> None:
