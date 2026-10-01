@@ -98,7 +98,8 @@ class SearchResponse(BaseModel):
 
     provider: str
     request: SearchRequest
-    total_candidates: int = Field(ge=0)
+    total_candidates: int = Field(ge=0, description="Raw records received in this response page.")
+    total_matches: int | None = Field(default=None, ge=0, description="Provider-wide match count, when reported.")
     papers: list[Paper]
     skipped_candidates: int = Field(ge=0)
 

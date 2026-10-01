@@ -61,6 +61,7 @@ class OpenAIJsonClientTests(unittest.TestCase):
         self.assertEqual(call["model"], "gpt-5.6-luna")
         self.assertEqual(call["response_format"]["type"], "json_schema")
         self.assertEqual(call["response_format"]["json_schema"]["schema"], {"type": "object"})
+        self.assertNotIn("temperature", call)
 
     def test_explicit_openai_provider_routes_all_stages_and_screening(self) -> None:
         args = argparse.Namespace(rule_based=False, dry_run=False)

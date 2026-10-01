@@ -163,7 +163,7 @@ class ScreeningContractTests(unittest.TestCase):
             missing=["evaluation benchmarks"],
             follow_ups=[
                 {
-                    "query": "literature review agent benchmark",
+                    "query": "review agent benchmark",
                     "target_gap": "no benchmarks",
                     "reason": "fill evaluation gap",
                 }
@@ -187,7 +187,7 @@ class ScreeningContractTests(unittest.TestCase):
         self.assertEqual(result.gap.missing_pieces, ["evaluation benchmarks"])
         self.assertEqual(len(result.gap.follow_up_queries), 1)
         self.assertEqual(
-            result.gap.follow_up_queries[0].query, "literature review agent benchmark"
+            result.gap.follow_up_queries[0].query, "review agent benchmark"
         )
         self.assertIsInstance(result.screened_at, datetime)
 

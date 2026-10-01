@@ -376,7 +376,6 @@ class OpenAIJsonClient:
                         "schema": response_schema,
                     },
                 },
-                temperature=0.2,
             )
         except Exception as error:
             status_code = getattr(error, "status_code", None)

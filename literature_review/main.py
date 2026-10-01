@@ -292,7 +292,8 @@ def _search_and_rank(
     )
     print(
         f"[search] query={json.dumps(query_text, ensure_ascii=False)} "
-        f"provider={response.provider} provider_total={response.total_candidates} "
+        f"provider={response.provider} returned_candidates={response.total_candidates} "
+        f"total_matches={response.total_matches if response.total_matches is not None else 'unknown'} "
         f"with_abstract={len(response.papers)} skipped={response.skipped_candidates} "
         f"after_year={len(after_year)} after_venue={len(after_year_venue)} "
         f"after_year_venue_filters={len(ranked.ranked_papers)} "

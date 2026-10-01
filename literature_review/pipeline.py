@@ -143,14 +143,17 @@ def _prepare_documents(
     documents: list[FullTextDocument],
     chunk_policy: ChunkPolicy,
     min_words: int = 4,
+    paper_titles: dict[str, str] | None = None,
 ) -> list[tuple[FullTextDocument, list[EvidenceChunk]]]:
     """Chunk every document (section-aware), dropping noise regions, rejecting duplicates.
 
     C2b (A10): the legacy word-overlap ``chunk_document`` is replaced by the
     section-aware ``chapter_chunk_document`` (chunk ids ``{paper_id}-c{n}`` with a
     ``section`` heading path); ``drop_noise_sections`` removes
-    references/acknowledgments (and appendix) chunks so notes and functional
-    scoring never see citation noise. Chunks shorter than ``min_words`` words are
+    references/acknowledgments and unclassified appendix chunks so notes and
+    functional scoring never see citation noise. Optional ``paper_titles``
+    prevents a leading paper-title heading from classifying appendix material.
+    Chunks shorter than ``min_words`` words are
     dropped (default 4, mirroring both the legacy splitter minimum and
     ``FunctionalScoringPolicy.min_words``), so a near-empty document is skipped
     with the stderr note below.
@@ -168,7 +171,9 @@ def _prepare_documents(
             chunk
             for chunk in chunks
             if not is_appendix_chunk(chunk)
-            or classify_chunk_category(chunk, paper_title=document.title)
+            or classify_chunk_category(
+                chunk, paper_title=(paper_titles or {}).get(document.paper_id)
+            )
             in _CANONICAL_CATEGORIES
         ]
         if min_words > 0:
@@ -236,6 +241,7 @@ def run_synthesis_pipeline(
         documents,
         chunk_policy,
         min_words=effective_functional_policy.min_words,
+        paper_titles=paper_titles,
     )
     all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
     scoring_client = client_scoring or client_rcs or client

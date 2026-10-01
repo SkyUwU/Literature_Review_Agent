@@ -13,6 +13,7 @@ import literature_review.pipeline as pipeline_module
 from literature_review.models import (
     ChunkPolicy,
     ChunkReference,
+    EvidenceChunk,
     EvidenceRetrievalPolicy,
     FullTextDocument,
     PageText,
@@ -51,6 +52,68 @@ class FakeEncoder:
 
     def __call__(self, texts: list[str]) -> list[list[float]]:
         return [[0.1, 0.1 * len(text), 0.2] for text in texts]
+
+
+class PrepareDocumentsAppendixTests(unittest.TestCase):
+    def _document(self) -> FullTextDocument:
+        return FullTextDocument(
+            paper_id="paper-appendix",
+            source_path="paper.pdf",
+            extraction_method="test",
+            pages=[PageText(page_number=1, text="Usable paper text for appendix preparation tests.")],
+        )
+
+    def test_appendix_classification_with_optional_titles(self) -> None:
+        chunks = [
+            EvidenceChunk(
+                chunk_id=f"chunk-{index}",
+                paper_id="paper-appendix",
+                section=section,
+                text="Detailed evidence with enough words for the preparation policy.",
+            )
+            for index, section in enumerate([
+                "Introduction", "Appendix > Additional Results", "Appendix > Miscellaneous Material"
+            ])
+        ]
+        for titles in (None, {}, {"paper-appendix": "A Study of Agents"}):
+            with self.subTest(titles=titles), mock.patch.object(
+                pipeline_module, "chapter_chunk_document", return_value=chunks
+            ):
+                prepared = pipeline_module._prepare_documents(
+                    [self._document()], ChunkPolicy(), paper_titles=titles
+                )
+                self.assertEqual([chunk.chunk_id for chunk in prepared[0][1]], ["chunk-0", "chunk-1"])
+
+    def test_paper_title_does_not_make_unknown_appendix_eligible(self) -> None:
+        title = "Evaluation of Literature Review Agents"
+        document = self._document().model_copy(update={"pages": [PageText(
+            page_number=1,
+            text=(
+                f"# {title}\n\n## Introduction\n\n"
+                "This introduction explains the motivation and scope of the study.\n\n"
+                "## Appendix\n\n### Miscellaneous Material\n\n"
+                "This material has no recognized evidence category for the review.\n\n"
+                "### Additional Results\n\n"
+                "The additional results provide useful evidence about measured performance."
+            ),
+        )]})
+        prepared = pipeline_module._prepare_documents(
+            [document], ChunkPolicy(), paper_titles={document.paper_id: title}
+        )
+        sections = [chunk.section for chunk in prepared[0][1]]
+        self.assertTrue(any("Additional Results" in section for section in sections))
+        self.assertFalse(any("Miscellaneous Material" in section for section in sections))
+
+    def test_synthesis_passes_titles_to_document_preparation(self) -> None:
+        titles = {"paper-appendix": "Evaluation of Literature Review Agents"}
+        with mock.patch.object(
+            pipeline_module, "_prepare_documents", side_effect=RuntimeError("preparation sentinel")
+        ) as prepare:
+            with self.assertRaisesRegex(RuntimeError, "preparation sentinel"):
+                run_synthesis_pipeline(
+                    [self._document()], "review agents", FakeClient(), paper_titles=titles
+                )
+        self.assertIs(prepare.call_args.kwargs["paper_titles"], titles)
 
 
 class PipelineTests(unittest.TestCase):

@@ -92,7 +92,7 @@ class FakePlanClient:
                 "idea": "literature review agent",
                 "queries": [
                     {
-                        "query": f"literature review agent angle {index}",
+                        "query": f"review agent angle {index}",
                         "purpose": f"Covering aspect {index} of the requested review.",
                     }
                     for index in range(self.query_count)
@@ -575,7 +575,7 @@ class MainEntryTests(unittest.TestCase):
             results_payload(record_for("W1"), record_for("W2")),
             results_payload(record_for("W3")),
         ]
-        screen_client = FakeScreenClient(follow_up_query="literature review agent benchmark")
+        screen_client = FakeScreenClient(follow_up_query="review agent benchmark")
         result = run_end_to_end(
             "literature review agent",
             dest_dir=self.dest,
@@ -634,7 +634,7 @@ class MainEntryTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry.query for entry in papers.papers],
-            ["literature review agent angle 0", "literature review agent angle 1"],
+            ["review agent angle 0", "review agent angle 1"],
         )
         for entry, paper_id in zip(papers.papers, ["W1", "W2"]):
             self.assertIsNone(entry.priority)  # legacy path has no keep/maybe decision
@@ -651,9 +651,9 @@ class MainEntryTests(unittest.TestCase):
         self.assertEqual(
             papers.run["planned_queries"],
             [
-                "literature review agent angle 0",
-                "literature review agent angle 1",
-                "literature review agent angle 2",
+                "review agent angle 0",
+                "review agent angle 1",
+                "review agent angle 2",
             ],
         )
         self.assertEqual(papers.run["follow_ups"], [])
@@ -716,7 +716,7 @@ class MainEntryTests(unittest.TestCase):
         self.assertEqual(papers.run["failed_extractions"], [])
 
     def test_screen_client_full_run_with_follow_up(self) -> None:
-        screen_client = FakeScreenClient(follow_up_query="literature review agent benchmark")
+        screen_client = FakeScreenClient(follow_up_query="review agent benchmark")
         payloads = [
             results_payload(record_for("W1"), record_for("W2")),
             results_payload(record_for("W3")),
@@ -751,7 +751,7 @@ class MainEntryTests(unittest.TestCase):
             result["follow_ups"],
             [
                 {
-                    "query": "literature review agent benchmark",
+                    "query": "review agent benchmark",
                     "target_gap": "missing benchmark family",
                     "reason": "fill the evaluation gap",
                 }
@@ -833,7 +833,7 @@ class MainEntryTests(unittest.TestCase):
         screen_client = QuotaScreenClient(
             DailyQuotaExhausted("429 Limit: 20 requests per day"), fail_on="follow_up"
         )
-        screen_client.follow_up_query = "literature review agent benchmark"
+        screen_client.follow_up_query = "review agent benchmark"
         payloads = [
             results_payload(record_for("W1"), record_for("W2")),
             results_payload(record_for("W3")),

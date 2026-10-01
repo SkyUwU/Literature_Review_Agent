@@ -35,6 +35,9 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 
 ## 目前已知研究與操作政策
 
+- LLM 初始規劃與 screening 補蒐共用短 query 規則：每條 2–4 個空白分隔詞，詳細需求放在 `purpose`／`target_gap`／`reason`。本地驗證不合格時沿用既有一次 repair 預算，不截斷 query、不增加重試。Rule-based dry-run 的原有 query 延伸方式保留。
+- 補蒐全數零候選時，不呼叫 screening LLM；記錄缺口仍未補足，保留初始已驗證的 decisions 繼續下載。部分 query 為零時仍篩選實際候選；任何有候選的 screening 驗證失敗仍中止。`priority` schema 明列 `keep`／`maybe`／`reject`。
+- `[search] returned_candidates` 是這頁收到的原始 records 數；`total_matches` 是 provider 回報的全部命中數，未提供時為 `unknown`。例如 `returned_candidates=100 total_matches=216 with_abstract=97 skipped=3` 表示只收到 100 筆，97 筆通過 metadata／abstract 處理。`SearchResponse.total_candidates` 統一為實收筆數，新增 optional `total_matches` 保存總命中數；舊 `provider_total` log 名稱已移除。
 - 年份預設為最近三年（2026 年即 2024 起），並使用 FilterPolicy 作為 provider 統一後衛。
 - 預設 venue whitelist 是硬篩選；Semantic Scholar 搜尋會將已辨識 conference 名稱／alias 與 year range 傳給 provider，之後仍由本地 whitelist 核對。OpenAlex fallback 仍以本地篩選為準。`[search]` 統計列 provider 回傳、abstract 可用、年份後、venue 後及最終數量。未命中可能來自 venue 欄位缺漏／變體、期刊或預印本不在 whitelist；探索性執行可明確指定 `--venues none`，不可把它解讀為原政策下的同一實驗。
 - 每個規劃 query 分別搜尋、排名及分配下載目標；跨 query 以 DOI（無 DOI 時 title+year）去重。預設 data/run/ 每次真實執行會清空重建；使用 --dest-dir 指定位置時不清除該位置。

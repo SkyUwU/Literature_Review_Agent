@@ -9,6 +9,7 @@ from literature_review.llm_evidence import (
     strip_code_fence,
 )
 from literature_review.models import PlannedQuery, SearchPlan
+from literature_review.query_policy import SHORT_QUERY_GUIDANCE, validate_short_query
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,7 @@ def build_llm_plan_prompt(query: str) -> str:
         "structured search plan as exactly one JSON object matching the provided schema.\n\n"
         f"Researcher query: {query}\n\n"
         "Query design rules:\n"
+        f"- {SHORT_QUERY_GUIDANCE}\n"
         "- First decompose the idea into 3 complementary research dimensions: "
         "(1) the core task name, (2) key methodology, and (3) evaluation benchmarks "
         "and mainstream comparisons. Generate a short keyword pool for each dimension "
@@ -144,7 +146,10 @@ def _format_plan_error(error: BaseException) -> str:
 def _parse_plan(raw_output: str) -> SearchPlan:
     """Validate one candidate plan object, raising PlanningError on failure."""
     try:
-        return SearchPlan.model_validate_json(strip_code_fence(raw_output))
+        plan = SearchPlan.model_validate_json(strip_code_fence(raw_output))
+        for planned in plan.queries:
+            planned.query = validate_short_query(planned.query)
+        return plan
     except ValueError as error:
         raise PlanningError(f"LLM plan failed validation ({_format_plan_error(error)}).") from error
 
@@ -155,6 +160,7 @@ def _build_plan_repair_prompt(raw_output: str, error: BaseException) -> str:
         "The previous response was not a valid search plan. Return a repaired version as "
         "exactly one JSON object matching the schema, without Markdown or explanation. "
         f"Validation error: {_format_plan_error(error)}\n"
+        f"{SHORT_QUERY_GUIDANCE}\n"
         f"Previous response:\n{raw_output}"
     )
 
@@ -167,6 +173,7 @@ def _build_overlap_repair_prompt(queries: list[str], query: str) -> str:
         "Rewrite each sub-query so it targets a distinct facet of the researcher "
         "query and uses different keywords, synonyms, or alternative phrasings, "
         "while staying on topic.\n"
+        f"{SHORT_QUERY_GUIDANCE}\n"
         f"Researcher query: {query}\n"
         f"Previous queries:\n{query_list}\n"
         "Return exactly one JSON object matching the schema, without Markdown or "

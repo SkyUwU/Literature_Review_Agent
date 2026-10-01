@@ -157,7 +157,8 @@ def search_papers(
     return SearchResponse(
         provider="openalex",
         request=request,
-        total_candidates=(payload.get("meta") or {}).get("count", len(records)),
+        total_candidates=len(records),
+        total_matches=(payload.get("meta") or {}).get("count"),
         papers=papers,
         skipped_candidates=len(records) - len(papers),
     )

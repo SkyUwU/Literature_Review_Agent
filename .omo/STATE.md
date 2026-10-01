@@ -1,10 +1,27 @@
 # 專案狀態（盤點日期：2026-10-01）
 
+## 2026-10-01：補蒐 query、零候選 screening 與搜尋計數
+
+- 初始 LLM planner 與補蒐共用 2–4 詞 query 規則及本地驗證；超長輸出沿用一次 repair，不直接截斷。Rule-based planner 保持舊行為。
+- Screening prompt 的 follow-up 範例改為 `query`／`target_gap`／`reason` 物件，範例可通過 schema；Groq gap aggregation／repair 同樣套用短 query 規則。Decision priority 改為 Literal enum。
+- 零候選 pool 不呼叫 LLM，回傳空 decisions 與未解決缺口；全空補蒐保留初始 screening decisions，混合空／非空 query 只評估存在的候選。有候選而驗證失敗仍停止。
+- OpenAlex／SS 統一 `total_candidates` 為實收 records，新增 optional `total_matches`；log 改為 `returned_candidates` 與 `total_matches`，不再將 OpenAlex 全部命中數誤標為實收候選。
+- 驗證：五組 focused suite 81 tests 通過；其後含新增 prompt-schema 測試、SS routing 與端到端 fake flow 的 22 tests 通過，合計 93 個不同測試。`git diff --check` 通過；沒有完整 suite 或真實 API/run。
+- Venue metadata 補查與 chunk 頁碼追溯尚未實作，搜尋來源與 venue whitelist 政策保持不變。
+
+## 2026-10-01：附錄準備階段 title 介面修正
+
+- `_prepare_documents()` 改由 optional `paper_titles` mapping 取得標題；正式 synthesis 傳入既有 mapping，不再存取 `FullTextDocument` 不存在的 `title` 欄位。
+- 新增 regression tests：附錄在有／無標題時的保留與排除、論文標題以 Evaluation 開頭時不誤保留未知附錄，以及 synthesis 的標題傳遞。
+- 驗證：pipeline 22 tests、section stats 11 tests 共 33 tests 通過；未執行完整 suite 或真實 API/run。
+- 後續分開處理發表位置證據整合與 chunk 頁碼追溯；本里程碑未修改搜尋、venue 政策或頁碼處理。
+
 ## 2026-10-01：OpenAI provider 路由
 
 - 已新增明確的 `LLM_PROVIDER=openai` 路由；OpenAI 官方 SDK 可供 plan、screening、functional scoring、per-paper notes 與 report 使用，預設模型 `gpt-5.6-luna`，支援全域及階段模型覆寫。
 - 未設定 provider selector 時維持舊路由；只放 `OPENAI_API_KEY` 不會改變既有 Groq/Gemini 選擇。OpenAI requests 使用 Chat Completions JSON Schema、SDK 有界 retry 與本地 Pydantic 驗證；程式只測 mock，沒有用實驗室 key 發 API request。
-- 驗證：OpenAI provider、notes、functional scoring 與 section stats focused tests 共 140 tests 通過；`git diff --check` 通過，key-pattern scan 無命中。未執行完整 suite 或真實 API/run。
+- GPT-5.6 Luna 不接受 `temperature=0.2`；OpenAI client 現省略該參數，採用模型預設值。
+- 驗證：OpenAI provider、notes、functional scoring 與 section stats focused tests 共 140 tests 通過；後續 temperature 修正的 provider mock test 通過。`git diff --check` 通過，key-pattern scan 無命中。未執行完整 suite 或真實 API/run。
 
 ## 2026-10-01：章節分類與逐篇證據取樣
 

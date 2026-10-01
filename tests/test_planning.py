@@ -98,7 +98,7 @@ def overlapping_plan() -> dict[str, object]:
     return {
         "queries": [
             {"query": "literature review agent AI", "purpose": "Find core papers on AI literature review agents."},
-            {"query": "AI literature review agent tools", "purpose": "Find tooling papers for AI literature review agents."},
+            {"query": "AI literature review agent", "purpose": "Find tooling papers for AI literature review agents."},
             {"query": "agent-based literature review systems", "purpose": "Find system papers for agent-based literature review."},
         ],
         "perspectives": ["core topic"],
@@ -142,10 +142,10 @@ class LlmPlanOverlapRepairTests(unittest.TestCase):
         equal_overlap = dict(overlapping_plan())
         equal_overlap["queries"] = [
             {"query": "literature review agent AI", "purpose": "Find core papers on AI literature review agents."},
-            {"query": "AI literature review agent tools", "purpose": "Find tooling papers for AI literature review agents."},
+            {"query": "AI literature review agent", "purpose": "Find tooling papers for AI literature review agents."},
             {"query": "literature review agent systems", "purpose": "Find system papers for literature review agents."},
         ]
-        self.assertEqual(max_query_overlap([q["query"] for q in equal_overlap["queries"]]), 0.8)
+        self.assertEqual(max_query_overlap([q["query"] for q in equal_overlap["queries"]]), 1.0)
         client = FakePlanClient([json.dumps(overlapping_plan()), json.dumps(equal_overlap)])
 
         plan = create_llm_plan("literature review agent", client)

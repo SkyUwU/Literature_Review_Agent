@@ -150,6 +150,7 @@ def search_ss(request: SearchRequest, *, api_key: str) -> SearchResponse:
         provider="semantic_scholar",
         request=request,
         total_candidates=len(records),
+        total_matches=payload.get("total"),
         papers=papers,
         skipped_candidates=len(records) - len(papers),
     )

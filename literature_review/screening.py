@@ -15,9 +15,9 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Callable, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from literature_review.llm_evidence import (
     GroqJsonClient,
@@ -26,6 +26,7 @@ from literature_review.llm_evidence import (
     strip_code_fence,
 )
 from literature_review.models import RankedPaper
+from literature_review.query_policy import SHORT_QUERY_GUIDANCE, validate_short_query
 
 __all__ = [
     "FollowUpQuery",
@@ -66,7 +67,7 @@ class ScreenDecision(BaseModel):
     """One keep/maybe/reject decision for a candidate paper, resolved to its id."""
 
     paper_id: str
-    priority: str = Field(pattern="^(keep|maybe|reject)$")
+    priority: Literal["keep", "maybe", "reject"]
     reason: str = Field(min_length=5, description="Decision rationale; required for every priority.")
     paper_title: str = Field(min_length=1, description="Trusted title copied back by the program.")
 
@@ -74,9 +75,14 @@ class ScreenDecision(BaseModel):
 class FollowUpQuery(BaseModel):
     """One follow-up search query suggested by the gap analysis."""
 
-    query: str = Field(min_length=3)
+    query: str = Field(min_length=3, description="A focused search phrase of 2-4 whitespace-separated words.")
     target_gap: str = Field(min_length=3)
     reason: str = Field(min_length=3)
+
+    @field_validator("query")
+    @classmethod
+    def short_query(cls, value: str) -> str:
+        return validate_short_query(value)
 
 
 class GapAnalysis(BaseModel):
@@ -99,7 +105,7 @@ class _LlmScreenDecision(BaseModel):
     """LLM-facing decision keyed by the document id shown in the prompt."""
 
     doc_id: str = Field(min_length=1, pattern=r"^\[?DOC_\d+\]?$")
-    priority: str = Field(pattern="^(keep|maybe|reject)$")
+    priority: Literal["keep", "maybe", "reject"]
     reason: str = Field(min_length=5)
 
 
@@ -299,15 +305,18 @@ _OUTPUT_TEXT = (
     "   - `follow_up_queries`: 1-3 precise search queries that would fill the gaps "
     "(must target the missing aspects and avoid repeating the initial sub-queries "
     "above; empty list [] if coverage is sufficient).\n\n"
+    f"{SHORT_QUERY_GUIDANCE}\n"
+    "Each follow-up is an object with query, target_gap, and reason strings.\n\n"
     "Form example:\n"
     "{\n"
     '  "decisions": [\n'
-    '    {"doc_id": "[DOC_1]", "priority": "keep", "reason": "..."},\n'
-    '    {"doc_id": "[DOC_2]", "priority": "maybe", "reason": "..."}\n'
+    '    {"doc_id": "[DOC_1]", "priority": "keep", "reason": "Directly relevant methodology."},\n'
+    '    {"doc_id": "[DOC_2]", "priority": "maybe", "reason": "Potentially useful comparison evidence."}\n'
     "  ],\n"
     '  "covered_areas": ["..."],\n'
     '  "missing_pieces": ["..."],\n'
-    '  "follow_up_queries": ["..."]\n'
+    '  "follow_up_queries": [{"query": "literature review citation evaluation", '
+    '"target_gap": "citation correctness evaluation", "reason": "Fill the evaluation gap"}]\n'
     "}\n\n"
     "No Markdown, no explanation, no preamble. Your reply must be the JSON object "
     "itself and nothing else."
@@ -416,6 +425,9 @@ def _build_screening_repair_prompt(
         f"{lines}\n"
         "Include decisions for ALL candidates and keep the covered/missing/follow-up "
         "analysis. No Markdown or explanation.\n"
+        "Use only keep, maybe, or reject for priority; never high/medium/low.\n"
+        f"{SHORT_QUERY_GUIDANCE}\n"
+        "Follow-up queries must be objects with query, target_gap, and reason.\n"
         f"Previous output:\n{raw_output}"
     )
 
@@ -495,8 +507,16 @@ def screen_candidates(
     validation **or cannot be resolved** back to the supplied candidate document ids
     (missing / duplicated). Unknown doc ids (hallucinated papers outside the list) are
     dropped with a warning. ``parse`` may be injected for tests and must return a
-    ``ScreeningResult``.
+    ``ScreeningResult``. A pool with no candidates returns empty decisions and
+    explicit unresolved retrieval gaps without making an LLM call.
     """
+    if not any(sampled.papers for sampled in query_candidates.values()):
+        print("[screening] skipped: no candidates; retrieval gaps remain unresolved.", file=sys.stderr)
+        return ScreeningResult(
+            decisions={query: [] for query in query_candidates},
+            gap=GapAnalysis(missing_pieces=[f"No candidates retrieved for: {query}" for query in query_candidates]),
+            screened_at=datetime.now(timezone.utc),
+        )
     if isinstance(client, GroqJsonClient):
         return _screen_candidates_groq_batches(query_candidates, client, main_query)
 
@@ -595,6 +615,8 @@ def _screen_candidates_groq_batches(
         "Use only the supplied batch summaries and research topic. Return a JSON object "
         "matching the schema with global covered_areas, missing_pieces, and up to three "
         "precise follow_up_queries. Do not repeat initial search queries unless needed.\n\n"
+        f"{SHORT_QUERY_GUIDANCE}\n"
+        "Each follow-up is an object with query, target_gap, and reason strings.\n"
         f"Research topic: {main_query or '(not provided)'}\n"
         f"Initial search queries: {list(query_candidates)}\n"
         f"Queries with no candidates: {[q for q, s in query_candidates.items() if not s.papers]}\n"
@@ -608,6 +630,7 @@ def _screen_candidates_groq_batches(
             "Repair the previous response so it is valid JSON matching the supplied "
             "GapAnalysis schema. Preserve the global covered areas, missing pieces, "
             "and follow-up queries. Return JSON only.\n"
+            f"{SHORT_QUERY_GUIDANCE}\n"
             f"Validation error: {error}\nPrevious response:\n{raw}"
         )
 
