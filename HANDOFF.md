@@ -35,6 +35,8 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 
 ## 目前已知研究與操作政策
 
+- 發表位置與 PDF host 分開：`Paper.publication_venues` 保存 provider、metadata path、source ID/type/link；`pdf_host` 僅為配置的 PDF URL hostname（不代表 redirect 最終 host）。`venue_verification=provider_reported` 表示 provider metadata，不能解讀為正式論文集／OpenReview 接收查證；找不到發表來源時為 `unconfirmed`。
+- SS 額外讀取 `publicationVenue`（缺漏時相容舊 `venue`）。OpenAlex 檢查 primary、全部 locations 與 best-OA 的非 repository／非 submittedVersion 來源；本地 whitelist 比對所有記錄的發表來源，PDF 在 arXiv 不構成排除條件，只有 arXiv 則不能推定頂會。Legacy `venue` 欄位保留供舊路徑使用。尚未加入官方 proceedings／OpenReview 補查或 Student Abstract track 排除政策。
 - LLM 初始規劃與 screening 補蒐共用短 query 規則：每條 2–4 個空白分隔詞，詳細需求放在 `purpose`／`target_gap`／`reason`。本地驗證不合格時沿用既有一次 repair 預算，不截斷 query、不增加重試。Rule-based dry-run 的原有 query 延伸方式保留。
 - 補蒐全數零候選時，不呼叫 screening LLM；記錄缺口仍未補足，保留初始已驗證的 decisions 繼續下載。部分 query 為零時仍篩選實際候選；任何有候選的 screening 驗證失敗仍中止。`priority` schema 明列 `keep`／`maybe`／`reject`。
 - `[search] returned_candidates` 是這頁收到的原始 records 數；`total_matches` 是 provider 回報的全部命中數，未提供時為 `unknown`。例如 `returned_candidates=100 total_matches=216 with_abstract=97 skipped=3` 表示只收到 100 筆，97 筆通過 metadata／abstract 處理。`SearchResponse.total_candidates` 統一為實收筆數，新增 optional `total_matches` 保存總命中數；舊 `provider_total` log 名稱已移除。

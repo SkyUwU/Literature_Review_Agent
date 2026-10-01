@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, computed_field, model_validator
 
 
 class ResearchIdea(BaseModel):
@@ -42,6 +42,22 @@ class SearchPlan(BaseModel):
     rationale: str = Field(min_length=20)
 
 
+class PublicationVenue(BaseModel):
+    """Provider-reported publication metadata, distinct from a PDF host.
+
+    This is provenance for a candidate venue, not independent confirmation of
+    conference acceptance or of the main-conference track.
+    """
+
+    name: str = Field(min_length=1)
+    provider: Literal["semantic_scholar", "openalex"]
+    metadata_path: str = Field(min_length=1)
+    source_id: str | None = None
+    source_type: str | None = None
+    source_url: str | None = None
+    verification: Literal["provider_reported"] = "provider_reported"
+
+
 class Paper(BaseModel):
     """Metadata and available evidence for one candidate paper."""
 
@@ -56,10 +72,22 @@ class Paper(BaseModel):
     abstract: str = Field(min_length=20)
     url: HttpUrl
     venue: str | None = None
+    publication_venues: list[PublicationVenue] = Field(default_factory=list)
     citation_count: int | None = Field(default=None, ge=0)
     open_access_pdf_url: HttpUrl | None = Field(
-        default=None, description="OpenAlex best OA location PDF URL, when available."
+        default=None, description="Provider-reported OA PDF URL, independent of publication venue."
     )
+
+    @computed_field
+    @property
+    def pdf_host(self) -> str | None:
+        """Hostname of the configured PDF URL; redirects are not inspected."""
+        return self.open_access_pdf_url.host if self.open_access_pdf_url else None
+
+    @computed_field
+    @property
+    def venue_verification(self) -> Literal["provider_reported", "unconfirmed"]:
+        return "provider_reported" if self.publication_venues else "unconfirmed"
 
 
 class DownloadedPaperEntry(BaseModel):

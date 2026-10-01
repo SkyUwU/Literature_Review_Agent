@@ -21,13 +21,14 @@ from literature_review.models import (
 )
 from literature_review.ranking import filter_and_rank, resolve_venues
 from literature_review.selection import select_papers
+from literature_review.publication import openalex_publication_venues
 from literature_review.assessment import assess_selected_papers
 
 OPENALEX_SEARCH_URL = "https://api.openalex.org/works"
 USER_AGENT = "LiteratureReviewAgent/0.1 (academic-project)"
 REQUESTED_FIELDS = (
     "id,title,authorships,publication_year,abstract_inverted_index,"
-    "primary_location,cited_by_count,best_oa_location,doi"
+    "primary_location,locations,cited_by_count,best_oa_location,doi"
 )
 
 
@@ -130,6 +131,7 @@ def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
 
     best_oa = record.get("best_oa_location") or {}
     pdf_url = best_oa.get("pdf_url")
+    publication_venues = openalex_publication_venues(record)
 
     return Paper(
         paper_id=paper_id,
@@ -139,7 +141,8 @@ def paper_from_openalex(record: dict[str, Any]) -> Paper | None:
         year=year,
         abstract=abstract,
         url=(record.get("primary_location") or {}).get("landing_page_url") or paper_id,
-        venue=((record.get("primary_location") or {}).get("source") or {}).get("display_name"),
+        venue=publication_venues[0].name if publication_venues else None,
+        publication_venues=publication_venues,
         citation_count=record.get("cited_by_count"),
         open_access_pdf_url=pdf_url,
     )

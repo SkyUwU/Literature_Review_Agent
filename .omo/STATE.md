@@ -1,5 +1,19 @@
 # 專案狀態（盤點日期：2026-10-01）
 
+## 2026-10-01：發表位置與 PDF host 分離（provider metadata 階段）
+
+- `Paper` 新增 `publication_venues` provenance（provider、metadata path、source ID/type/link）；computed `pdf_host` 記錄配置 URL hostname，`venue_verification` 區分 `provider_reported` 與 `unconfirmed`。舊 JSON／手動 Paper 與 legacy venue 保持可讀。
+- SS 讀取 structured `publicationVenue`；OpenAlex 請求 `locations` 並檢查所有非 repository／非 submittedVersion 來源。本地 whitelist 比對所有發表來源；不從 PDF URL 推斷會議，arXiv-only 不推定頂會。
+- 測試：89 個 focused tests 通過，涵蓋 publication metadata、search adapters、ranking、query regression 與 SS routing；未執行完整 suite 或真實 API/run。`git diff --check` 通過。
+- 僅完成 provider metadata 分離，不代表已確認正式會議接收；官方 proceedings／OpenReview 補查、track（Student Abstract／workshop／Findings）政策、分頁、bulk search、seed 擴展、quote／頁碼仍未實作。先前 query 覆蓋修正保留。
+
+## 2026-10-01：補蒐迴圈覆蓋原始 query 修正
+
+- 合併補蒐 decisions 的迴圈變數由 `query` 改為 `follow_up_query`，避免覆蓋原始研究問題並影響 functional scoring、synthesis、notes manifest 與 `papers.run.query`。
+- Regression tests 核對全空／混合補蒐完成後，synthesis 仍收到原始 query、papers run 保存原始 query，逐篇搜尋來源分組則保持原本子查詢。12 個 focused tests 通過，未執行完整 suite 或真實 API/run。
+- 使用者授權刪除錯誤輸出對應的 checkpoint `c18bd3dc81f241ec988828b37cbc05bf`；刪除前比對 manifest 的錯誤 query 與 report paper IDs。保留舊 report／papers JSON、PDF 及其他 checkpoint，供診斷比較。
+- 重新評分與生成正確報告需使用者提供原始 research query；錯誤 JSON／manifest 無法還原原始文字。OA 補齊、排除紀錄、頁碼與 quote 改善仍為後續工作。
+
 ## 2026-10-01：補蒐 query、零候選 screening 與搜尋計數
 
 - 初始 LLM planner 與補蒐共用 2–4 詞 query 規則及本地驗證；超長輸出沿用一次 repair，不直接截斷。Rule-based planner 保持舊行為。

@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 
 from literature_review.models import Paper, SearchRequest, SearchResponse
 from literature_review.search import norm_doi
+from literature_review.publication import ss_publication_venues
 
 SS_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 SS_FIELDS = (
@@ -29,6 +30,7 @@ SS_FIELDS = (
     "citationCount",
     "openAccessPdf",
     "venue",
+    "publicationVenue",
     "url",
 )
 SS_PACE_SECONDS = 2.0  # 2x the keyed 1 RPS limit, so a 429 stays rare
@@ -126,6 +128,7 @@ def paper_from_ss(record: dict[str, Any]) -> Paper | None:
 
     pdf = record.get("openAccessPdf") or {}
     url = record.get("url") or f"https://www.semanticscholar.org/paper/{paper_id}"
+    publication_venues = ss_publication_venues(record)
 
     return Paper(
         paper_id=paper_id,
@@ -135,7 +138,8 @@ def paper_from_ss(record: dict[str, Any]) -> Paper | None:
         year=year,
         abstract=abstract,
         url=url,
-        venue=record.get("venue") or None,
+        venue=publication_venues[0].name if publication_venues else None,
+        publication_venues=publication_venues,
         citation_count=record.get("citationCount") or 0,
         open_access_pdf_url=pdf.get("url") or None,
     )

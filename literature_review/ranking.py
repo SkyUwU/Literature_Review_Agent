@@ -179,7 +179,11 @@ def filter_papers(papers: list[Paper], policy: FilterPolicy) -> list[Paper]:
             continue
         if citation_count < policy.min_citation_count:
             continue
-        if policy.venues and not _matches_venues(paper.venue, policy.venues):
+        reported_venues = (
+            [venue.name for venue in paper.publication_venues]
+            if paper.publication_venues else [paper.venue]
+        )
+        if policy.venues and not any(_matches_venues(venue, policy.venues) for venue in reported_venues):
             continue
         current = by_title.get(normalized_title)
         if current is None or duplicate_preference_key(paper) > duplicate_preference_key(current):

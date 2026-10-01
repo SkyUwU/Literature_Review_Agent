@@ -130,6 +130,11 @@ class EmptyFollowUpTests(unittest.TestCase):
             )
             groups = download.call_args.kwargs["priority_groups"]
             synth.assert_called_once()
+            self.assertEqual(synth.call_args.args[1], "review agents")
+            self.assertEqual(result["papers"].run["query"], "review agents")
+            self.assertEqual(synth.call_args.kwargs["paper_queries"]["W1"], "review agents")
+            if has_candidate:
+                self.assertEqual(result["screening"]["decisions"]["agent benchmarks"][0]["paper_id"], "W2")
         self.assertEqual([item.paper.paper_id for item in groups["keep"]], ["W1"])
         self.assertEqual(len(result["follow_ups"]), 2)
         return client, groups

@@ -497,8 +497,8 @@ def run_end_to_end(
                     )
                     raise
                 else:
-                    for query, decisions in follow_up_screening.decisions.items():
-                        screening_result.decisions.setdefault(query, []).extend(decisions)
+                    for follow_up_query, decisions in follow_up_screening.decisions.items():
+                        screening_result.decisions.setdefault(follow_up_query, []).extend(decisions)
 
             ranked_by_id: dict[str, RankedPaper] = {}
             for sampled in query_candidates.values():
