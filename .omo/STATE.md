@@ -1,5 +1,29 @@
 # 專案狀態（盤點日期：2026-10-01）
 
+## 換對話接續摘要與待評估方向（2026-10-01）
+
+本節為交接與候選方向，不是已核准的完整實作計畫。下一輪先檢查 git status，讀 AGENTS.md、HANDOFF.md 與本檔，再選一個有界里程碑；不可直接全部實作或自動重跑付費 API。
+
+### 已完成與目前限制
+
+- 已修正 FullTextDocument.title 存取、補蒐 query 覆蓋原始問題、短 query／schema 範例不一致、priority enum、零候選 screening 與搜尋計數；已分離 publication_venues／pdf_host，加入 OpenAlex locations 讀取與通用任務錨定 prompt。
+- SS publicationVenue 優先、缺名稱時才讀 legacy venue；目前沒有 venue 衝突判定或額外發表位置補查。PDF 在 arXiv 不代表未發表。provider_reported 不等於官方接收核驗。
+- 最新通用 prompt 調整後重跑 13 個 follow-up tests 通過；此前 planner 23、screening 17 通過。只有 focused／fake-client 驗證，不代表完整 suite 或真實搜尋品質已驗收。
+- 使用者已確認原始輸入是 `LLM-based automated literature review`，可用於後續新 run；舊 JSON 的 query 是覆蓋 bug 結果，不可當作原始問題。錯誤 run 影響 functional scoring／synthesis，需重新評估，不能只改 JSON 字串。
+- 舊輸出 `data/outputs/papers_20261001_213412_789889.json` 與對應 `report_20261001_213412_789889.json` 保留供比較；對應錯誤 checkpoint c18bd3dc81f241ec988828b37cbc05bf 已依授權刪除，其他資料保留。
+
+### 建議優先順序（尚未實作）
+
+1. 正確原始 query 的新 run 與品質診斷：先確認 provider 用量／模型權限、下載目的地與篩選政策；對照候選減少階段、任務偏移、claim 支持程度，不只看報告是否生成。
+2. 證據可追溯性：目前 quote 固定取 chunk 前 240 字元，可能只截到作者資訊；考慮讓 notes 回傳支持 claim 的原文句子並驗證確實屬於來源 chunk。保留 chunk ID，補實際 PDF 頁碼映射，不推造頁碼。quote 與頁碼可各自界定里程碑。
+3. 排除紀錄輸出：記錄年份／venue／screening／重複／OA 缺失／下載或抽取失敗／functional 選取等階段、原因與已有分數；未執行評分者不可填假分數。
+4. 發表位置補查與 track：對缺 venue、arXiv-only、無法辨認來源或需要 track 的候選，考慮以 DOI／arXiv ID／標題作者匹配 OpenAlex 或官方 proceedings／OpenReview。分開 provider metadata 與官方核驗；main、workshop、Student Abstract、Findings 等政策待討論，不自動排除。單一 SS 路徑沒有跨來源衝突判定，PDF host 不作接收證據。
+5. OA 補齊：考慮 DOI-based Unpaywall／其他 OA locations，保留來源與失敗原因；OA 補齊不等於檢索或正式發表核驗。
+6. 檢索擴展：SS／OpenAlex 有界分頁（原始候選數與頁数限制，不湊固定數量的合格論文）、SS bulk search、seed-paper citation／reference 擴展，分別評估成本與適用情況。
+7. 搜尋回饋：區分 provider 零結果、年份／venue 後零結果、screening 全拒絕、OA 不足；再決定改寫、分頁或 metadata 補查。避免對所有零結果盲目加詞；保留研究政策與呼叫上限。2–4 words 對完整術語的限制也可再評估，尚未放寬。
+
+使用者準備下一輪整理敘述檔案；建議 HANDOFF.md 保留穩定架構／操作規則，STATE.md 保留目前狀態與待辦，詳細歷史移到既有 evidence／歷史紀錄，避免多處重複或把候選方向寫成已完成。
+
 ## 2026-10-01：查詢任務錨定與 repair 上下文
 
 - 後續依使用者要求改為通用核心任務／研究對象／領域錨定；移除文獻綜述專用指示，跨領域例子明示非必用關鍵字。測試涵蓋文獻綜述與 MoE 輸入的初始／補蒐 prompt。
@@ -21,7 +45,7 @@
 - 合併補蒐 decisions 的迴圈變數由 `query` 改為 `follow_up_query`，避免覆蓋原始研究問題並影響 functional scoring、synthesis、notes manifest 與 `papers.run.query`。
 - Regression tests 核對全空／混合補蒐完成後，synthesis 仍收到原始 query、papers run 保存原始 query，逐篇搜尋來源分組則保持原本子查詢。12 個 focused tests 通過，未執行完整 suite 或真實 API/run。
 - 使用者授權刪除錯誤輸出對應的 checkpoint `c18bd3dc81f241ec988828b37cbc05bf`；刪除前比對 manifest 的錯誤 query 與 report paper IDs。保留舊 report／papers JSON、PDF 及其他 checkpoint，供診斷比較。
-- 重新評分與生成正確報告需使用者提供原始 research query；錯誤 JSON／manifest 無法還原原始文字。OA 補齊、排除紀錄、頁碼與 quote 改善仍為後續工作。
+- 使用者後續已確認原始 research query 為 `LLM-based automated literature review`；錯誤 JSON／manifest 本身無法還原原始文字。重新評分／生成尚未執行；OA 補齊、排除紀錄、頁碼與 quote 改善仍為後續工作。
 
 ## 2026-10-01：補蒐 query、零候選 screening 與搜尋計數
 
