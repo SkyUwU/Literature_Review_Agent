@@ -1,5 +1,14 @@
 # 專案狀態（盤點日期：2026-10-01）
 
+## 2026-10-01：查詢任務錨定與 repair 上下文
+
+- 後續依使用者要求改為通用核心任務／研究對象／領域錨定；移除文獻綜述專用指示，跨領域例子明示非必用關鍵字。測試涵蓋文獻綜述與 MoE 輸入的初始／補蒐 prompt。
+
+- 使用者授權依討論選取建議實作；本輪限定共用 query prompt 的任務錨定與縮寫／多義詞消解，保留 2–4 words 與既有 repair 呼叫預算。
+- Planner schema repair、screening repair 與 Groq gap repair 保留原始研究問題；不以字面詞彙硬篩語義，不新增零命中自動搜尋、分頁、quote 或正式發表紀錄補查。
+- 本環境無 plan-review skill；未新增計畫檔，未宣稱完成該流程。驗證使用 fake clients，不執行真實外部 API。
+- 驗證：test_search_follow_up 13、test_planning 23、test_screening 17，共 53 tests 通過；git diff --check 通過。未執行完整套件或真實模型檢索，不能由 prompt 測試推定語義品質已達標。
+
 ## 2026-10-01：發表位置與 PDF host 分離（provider metadata 階段）
 
 - `Paper` 新增 `publication_venues` provenance（provider、metadata path、source ID/type/link）；computed `pdf_host` 記錄配置 URL hostname，`venue_verification` 區分 `provider_reported` 與 `unconfirmed`。舊 JSON／手動 Paper 與 legacy venue 保持可讀。

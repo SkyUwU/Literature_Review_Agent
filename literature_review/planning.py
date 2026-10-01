@@ -154,13 +154,14 @@ def _parse_plan(raw_output: str) -> SearchPlan:
         raise PlanningError(f"LLM plan failed validation ({_format_plan_error(error)}).") from error
 
 
-def _build_plan_repair_prompt(raw_output: str, error: BaseException) -> str:
+def _build_plan_repair_prompt(raw_output: str, error: BaseException, query: str | None = None) -> str:
     """Ask the model to repair one malformed or schema-invalid plan output."""
     return (
         "The previous response was not a valid search plan. Return a repaired version as "
         "exactly one JSON object matching the schema, without Markdown or explanation. "
         f"Validation error: {_format_plan_error(error)}\n"
         f"{SHORT_QUERY_GUIDANCE}\n"
+        f"Original research question: {query or '(not provided)'}\n"
         f"Previous response:\n{raw_output}"
     )
 
@@ -235,7 +236,7 @@ def create_llm_plan(
             prompt,
             schema,
             parse=_parse_plan,
-            repair_prompt=_build_plan_repair_prompt,
+            repair_prompt=lambda raw, error: _build_plan_repair_prompt(raw, error, query),
         )
     )
     if (
@@ -253,7 +254,7 @@ def create_llm_plan(
                 _build_overlap_repair_prompt([item.query for item in first.queries], query),
                 schema,
                 parse=_parse_plan,
-                repair_prompt=_build_plan_repair_prompt,
+                repair_prompt=lambda raw, error: _build_plan_repair_prompt(raw, error, query),
             )
         )
     except PlanningError as error:

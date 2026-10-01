@@ -7,6 +7,17 @@ SHORT_QUERY_GUIDANCE = (
     'For example (good): "literature review citation evaluation"; '
     'For example (bad): "LLM scientific literature review citation entailment '
     'completeness provenance hallucinated references benchmark expert evaluation".'
+    " Task anchoring: every query must retain the core task, research object, "
+    "or domain from the original research question, or an unambiguous equivalent. "
+    "Do not replace the requested task with a different task sharing similar words. Generic terms "
+    "such as review, screening, routing, or clustering alone are insufficient. "
+    "Disambiguate acronyms using a full name or task qualifier within the word budget; "
+    "put the remaining explanation in purpose/target_gap/reason. "
+    "Choose anchors from the actual input; the examples are illustrations, not required keywords. "
+    'For example, for mixture-of-experts token assignment: "MoE token routing", '
+    'not the ambiguous "routing optimization". '
+    'For example, for scholarly survey generation: "survey generation citation accuracy", '
+    'not the different task "manuscript peer review".'
 )
 
 

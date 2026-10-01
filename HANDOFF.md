@@ -35,6 +35,8 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 
 ## 目前已知研究與操作政策
 
+- 初始規劃、screening 補蒐與 repair 共用通用任務錨定／歧義消解提示：每個 query 保留原始核心任務、研究對象或領域（允許明確同義詞），不可因詞義相近而換成其他任務。跨領域例子僅供說明，不是必用關鍵字。Repair 保留原始研究問題，既有 2–4 words 驗證與一次 repair 預算維持。語義約束目前為 prompt guidance，未加入硬式語義判定、分頁或零命中自動改寫。
+
 - 發表位置與 PDF host 分開：`Paper.publication_venues` 保存 provider、metadata path、source ID/type/link；`pdf_host` 僅為配置的 PDF URL hostname（不代表 redirect 最終 host）。`venue_verification=provider_reported` 表示 provider metadata，不能解讀為正式論文集／OpenReview 接收查證；找不到發表來源時為 `unconfirmed`。
 - SS 額外讀取 `publicationVenue`（缺漏時相容舊 `venue`）。OpenAlex 檢查 primary、全部 locations 與 best-OA 的非 repository／非 submittedVersion 來源；本地 whitelist 比對所有記錄的發表來源，PDF 在 arXiv 不構成排除條件，只有 arXiv 則不能推定頂會。Legacy `venue` 欄位保留供舊路徑使用。尚未加入官方 proceedings／OpenReview 補查或 Student Abstract track 排除政策。
 - LLM 初始規劃與 screening 補蒐共用短 query 規則：每條 2–4 個空白分隔詞，詳細需求放在 `purpose`／`target_gap`／`reason`。本地驗證不合格時沿用既有一次 repair 預算，不截斷 query、不增加重試。Rule-based dry-run 的原有 query 延伸方式保留。

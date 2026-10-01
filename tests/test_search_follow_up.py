@@ -14,7 +14,7 @@ import literature_review.main as main_module
 from literature_review.llm_evidence import GroqJsonClient
 from literature_review.models import FullTextDocument, PageText, SearchRequest
 from literature_review.pdf_downloader import DownloadResult
-from literature_review.planning import PlanningError, create_llm_plan
+from literature_review.planning import PlanningError, build_llm_plan_prompt, create_llm_plan
 from literature_review.screening import (
     FollowUpQuery, SampledCandidates, _LlmScreeningOutput, build_screening_prompt, screen_candidates,
 )
@@ -29,6 +29,33 @@ def follow_up(query="review agent benchmark"):
 
 
 class FollowUpValidationTests(unittest.TestCase):
+    def test_initial_and_follow_up_prompts_share_task_anchoring(self):
+        for topic in ("LLM-based automated literature review", "mixture-of-experts token assignment"):
+            prompts = [build_llm_plan_prompt(topic), build_screening_prompt(
+                {"initial query": _sampled(_ranked("W1"))}, topic)]
+            for prompt in prompts:
+                with self.subTest(topic=topic, prompt=prompt[:40]):
+                    self.assertIn(topic, prompt)
+                    self.assertIn("Task anchoring", prompt)
+                    self.assertIn("Disambiguate acronyms", prompt)
+                    self.assertIn("Do not replace the requested task", prompt)
+                    self.assertIn("illustrations, not required keywords", prompt)
+                    self.assertNotIn("For a question about automated literature reviews", prompt)
+
+    def test_plan_and_screening_repairs_retain_original_research_question(self):
+        topic = "LLM-based automated literature review"
+        bad_plan = valid_plan()
+        bad_plan["queries"][0]["query"] = "one"
+        planner = FakePlanClient([json.dumps(bad_plan), json.dumps(valid_plan())])
+        create_llm_plan(topic, planner, enable_overlap_repair=False)
+        bad_screen = _screening_payload([("[DOC_1]", "low")])
+        good_screen = _screening_payload([("[DOC_1]", "keep")])
+        screener = FakeClipboardClient([json.dumps(bad_screen), json.dumps(good_screen)])
+        screen_candidates({"initial query": _sampled(_ranked("W1"))}, screener, main_query=topic)
+        for prompt in [planner.prompts[1], screener.prompts[1]]:
+            self.assertIn(f"Original research question: {topic}", prompt)
+            self.assertIn("Task anchoring", prompt)
+
     def test_prompt_example_matches_the_output_schema(self):
         prompt = build_screening_prompt({"initial query": _sampled(_ranked("W1"))})
         example = prompt.split("Form example:\n", 1)[1].split("\n\nNo Markdown", 1)[0]

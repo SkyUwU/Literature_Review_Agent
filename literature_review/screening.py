@@ -409,6 +409,7 @@ def _build_screening_repair_prompt(
     raw_output: str,
     error: BaseException,
     query_candidates: dict[str, SampledCandidates],
+    main_query: str | None = None,
 ) -> str:
     """Ask the model to repair a screening output that cannot be resolved."""
     doc_map = _doc_id_map(query_candidates)
@@ -427,6 +428,7 @@ def _build_screening_repair_prompt(
         "analysis. No Markdown or explanation.\n"
         "Use only keep, maybe, or reject for priority; never high/medium/low.\n"
         f"{SHORT_QUERY_GUIDANCE}\n"
+        f"Original research question: {main_query or '(not provided)'}\n"
         "Follow-up queries must be objects with query, target_gap, and reason.\n"
         f"Previous output:\n{raw_output}"
     )
@@ -530,7 +532,7 @@ def screen_candidates(
     parse_output = parse if parse is not None else default_parse
 
     def _repair(raw_output: str, error: BaseException) -> str:
-        return _build_screening_repair_prompt(raw_output, error, query_candidates)
+        return _build_screening_repair_prompt(raw_output, error, query_candidates, main_query)
 
     return generate_validated(
         client,
@@ -631,6 +633,7 @@ def _screen_candidates_groq_batches(
             "GapAnalysis schema. Preserve the global covered areas, missing pieces, "
             "and follow-up queries. Return JSON only.\n"
             f"{SHORT_QUERY_GUIDANCE}\n"
+            f"Original research question: {main_query or '(not provided)'}\n"
             f"Validation error: {error}\nPrevious response:\n{raw}"
         )
 
@@ -664,7 +667,7 @@ def _screen_batch(
         )
 
     def repair(raw: str, error: BaseException) -> str:
-        return _build_screening_repair_prompt(raw, error, candidates)
+        return _build_screening_repair_prompt(raw, error, candidates, main_query)
 
     return generate_validated(
         client,
