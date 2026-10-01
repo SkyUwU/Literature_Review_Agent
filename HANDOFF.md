@@ -31,7 +31,9 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 - literature_review.main 是正式 end-to-end 入口。--dry-run 使用 rule-based planner，只跑至下載，不呼叫 Gemini，也不保存報告；為搜尋可載入 .env 中唯一的 OPENALEX_API_KEY。
 - 正式證據路徑以 `functional.sample_formal_chunks_per_paper` 逐篇章節分類與 embedding 取樣為準。Scoring 優先選 Method、Results 各 1 個 chunk，缺少時由其餘候選補足至 2；逐篇 notes 選 Abstract/context 1 個，再從 Method、Evaluation Setup、Results、Limitations/Future Work 各至多 2 個，總數上限 9。References／acknowledgments 排除；Appendix 僅在子章節能歸入五類時保留。每篇 chunks 僅做一次 embedding，向量供兩階段選取共用。corpus-wide embedding／lexical retrieval 與 RCS 是 CLI、比較或 legacy 路徑。
 - 報告中的 [claim-N] 連到程式組裝的 claim-to-chunk/paper provenance。生成內容只應依賴供應的 chunks；形式驗證通過不代表學術品質已經人工確認。
+- 逐篇 notes 的 LLM 輸入使用每次 request／batch 內的短代號 `C1`、`C2` 等；claims 與 coverage 的代號通過驗證後，由程式還原完整 chunk ID。未知代號維持一次 repair，仍不合法即該篇失敗。報告與 checkpoint 保存完整 ID，既有成功 notes 可維持原格式；此變更不改善 `--resume-notes` 仍重跑上游階段的限制。
 - metadata／abstract 評估不等於全文評估；chunk-based synthesis 也不代表完整審閱每篇論文。
+- 正式章節分段目前合併各頁 Markdown 後切分，chunk 的 PDF 頁碼為空；legacy 分頁文字切分可保留頁碼，不能據此宣稱正式路徑已完成頁碼映射。Claim evidence 的 quote 固定取來源 chunk 前 240 字元，可協助辨識來源，不保證直接支持 claim；核對主張仍需閱讀對應 chunk。
 
 ## 目前已知研究與操作政策
 
@@ -57,12 +59,12 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 - 啟動任何真實 run 前，請使用者確認本次會用到的每把 key 在 https://ai.dev/rate-limit 的剩餘額度。不得假設額度，也不得自動重跑整輪。
 - .env 僅為本機秘密設定；不要讀出、貼出或提交 key。Gemini 與 Semantic Scholar key 應按 stage 的實際需求準備。
 
-## Groq/Gemini 混合 provider
+## Groq provider 與 notes checkpoint
 
-- 在 `.env` 設定 `GROQ_API_KEY` 後，Groq 負責 planner、分批 screening／全域 gap 彙整、functional scoring、per-paper notes 與 report；由 `uv sync` 安裝 Groq 官方 Python SDK，透過 Chat Completions API 呼叫。模型預設為 `openai/gpt-oss-120b`；`GROQ_MODEL` 可統一覆寫，`GROQ_MODEL_PLAN`、`GROQ_MODEL_SCREENING`、`GROQ_MODEL_SCORING`、`GROQ_MODEL_NOTES`、`GROQ_MODEL_REPORT` 可分別覆寫階段模型，階段值優先於全域值。使用模型前請先確認 Groq Console 中的 model ID、JSON Schema 支援與額度。
+- 明確設定 `LLM_PROVIDER=groq`，或未指定 `LLM_PROVIDER` 且有 `GROQ_API_KEY` 時，Groq 負責 planner、分批 screening／全域 gap 彙整、functional scoring、per-paper notes 與 report；由 `uv sync` 安裝 Groq 官方 Python SDK，透過 Chat Completions API 呼叫。模型預設為 `openai/gpt-oss-120b`；`GROQ_MODEL` 可統一覆寫，`GROQ_MODEL_PLAN`、`GROQ_MODEL_SCREENING`、`GROQ_MODEL_SCORING`、`GROQ_MODEL_NOTES`、`GROQ_MODEL_REPORT` 可分別覆寫階段模型，階段值優先於全域值。使用模型前請先確認 Groq Console 中的 model ID、JSON Schema 支援與額度。
 - 混合模式下，screening 依約 3,000 個估計 prompt tokens 的預算切批；notes 依 section 切批，預設每批約 2,500 個估計 prompt tokens，可用 `GROQ_NOTES_BATCH_TOKENS` 調整。所有 Groq 階段共用 process 內 TPM tracker：依歷史 usage 校準估值、預留輸出額度、追蹤實際 tokens，並採用 provider remaining/reset headers。有 retry-after 的 TPM 429 與 503 都有界重試；日額度錯誤不盲目重送。Notes 批次輸出經 Pydantic 與 chunk ID 驗證，再保留來源 ID 本地合併，不額外呼叫 LLM 整合。任一 paper notes 失敗時先完成其他論文，checkpoint 記錄 pending paper IDs；有未完成項時不產生 report。
-- 每輪真實流程會印出 `[notes] checkpoint_id=<run-id>`，checkpoint 位於 `data/outputs/notes_checkpoints/<run-id>/`。續跑命令：`uv run --env-file .env python -m literature_review.main --resume-notes <run-id>`，並輸入相同 research query；續跑仍會重做搜尋、下載、抽取與 scoring，已完成的 notes 會重用，只補缺漏 notes。Manifest 比對 query、入選 paper、provider、policy 與來源內容，不相符即拒絕續用。沒有 `GROQ_API_KEY` 時 notes 維持 Gemini key `--notes-key`。
-- Groq 503 在同一模型最多重試三次（約 15、30、60 秒加 jitter），耗盡後停止該輪。Groq 使用 JSON Schema best-effort mode，並以既有 Pydantic 驗證及有限 JSON repair 檢查輸出。文件所列免費額度會變動；完整 run 前查看 Groq Limits 與每把 Gemini key 的 AI Studio rate limit。
+- 每輪真實流程會印出 `[notes] checkpoint_id=<run-id>`，checkpoint 位於 `data/outputs/notes_checkpoints/<run-id>/`。續跑命令：`uv run --env-file .env python -m literature_review.main --resume-notes <run-id>`，並輸入相同 research query；續跑仍會重做搜尋、下載、抽取與 scoring，已完成的 notes 會重用，只補缺漏 notes。Manifest 比對 query、入選 paper、provider、policy 與來源內容，不相符即拒絕續用。Gemini provider mode 的 notes 使用 `--notes-key`；OpenAI mode 則使用 OpenAI。
+- Groq 503 在同一模型最多重試三次（約 15、30、60 秒加 jitter），耗盡後停止該輪。Groq 使用 JSON Schema best-effort mode，並以既有 Pydantic 驗證及有限 JSON repair 檢查輸出。文件所列免費額度會變動；完整 run 前確認所選 provider 的用量／權限；只有實際使用 Gemini 時才檢查對應 key 的 AI Studio rate limit。
 - 每次 Gemini／Groq 呼叫會在 `[llm]` log 記錄 `prompt_chars` 與 `prompt_utf8_bytes`，不含 JSON schema 與 API protocol overhead。Groq 呼叫另記錄 `prompt_tokens`、`completion_tokens`、`total_tokens`（provider usage）；送出前的 token 數仍是估值，成功回應及錯誤的 rate-limit headers／retry-after 用於調整下一次等待。
 - `.env` 範例為 `GROQ_API_KEY=<你的 key>`；`GROQ_NOTES_BATCH_TOKENS` 預設 2500。模型覆寫設定見 `.env.example`。不要提交 `.env` 或把 key 貼到聊天、log、文件。
 
@@ -75,9 +77,10 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 ## 執行命令
 
 ```powershell
-# 測試與無 API 的流程檢查
+# 安裝與測試（測試需隔離本機 provider keys／外部請求）
 uv sync
 uv run python -m unittest discover -s tests -v
+# Dry run：會搜尋及下載，涉及外部 API／網路，但不呼叫 LLM
 uv run python -m literature_review.main --dry-run
 
 # 真實端到端流程（執行前先確認 quota、venue policy、輸出資料夾）
@@ -100,11 +103,9 @@ HTTP 503 顯示該次 provider 呼叫失敗／服務過載，不足以單獨證�
 
 - Windows 與 WSL 是獨立 working copies；透過共享 Git remote 同步，避免兩邊同時改同一功能。開始工作先檢查 git status，只 stage 本次有意提交的檔案。
 - .env 與 PDF／執行資料依 .gitignore 規則不會隨 Git 傳送。WSL 的未追蹤 evidence、log、data/run/、data/outputs/ 不會自動出現在 Windows clone；需要時在原 WSL checkout 查閱，或明確匯出非秘密的紀錄。
-- 目前 Windows checkout 在本次盤點中沒有 .omo/evidence/、data/run/ 或 data/outputs/；這只代表此 checkout 看不到它們。使用者表示 evidence 可能留在 WSL OpenCode 環境，應在該環境確認，勿推斷為遺失。
+- 本機資料是否存在是時間相關快照，以 .omo/STATE.md 最近盤點為準。WSL evidence 的可用性仍需在原環境確認，不能由 Windows 缺少檔案推斷為遺失。
 - Summer_Project.pdf 是預期的未追蹤來源檔，不要提交；data/papers/、data/outputs/ 亦不得提交。
 
 ## 當前已知狀態（以 .omo/STATE.md 為準）
 
-最近的文件紀錄稱 2026-09-29 完成 rate limiting/key rotation，並稱 504 個測試通過；此數字是歷史紀錄，並非本次 checkout 已重跑驗證。section-stats/ref-filter 文件及程式曾被標成完成；是否已提交應以目前 Git history/status 為準，不沿用舊 handoff 的「待 commit」敘述。
-
-接手真實 run 前，先確認使用者剛才那次 503 的原始 log、key stage、quota、venue 篩選結果與原 WSL 輸出檔是否可取得。不要僅因缺少本機輸出就重跑 API 流程。
+最新完成項目、歷史測試紀錄、完整 suite 限制與候選方向集中於 .omo/STATE.md。歷史 focused／mock 測試通過不代表目前完整 suite 或真實搜尋品質已驗收；不要僅因缺少本機輸出就重跑 API 流程。`plan-review` 屬另一執行環境，Codex 本輪未使用該 skill。

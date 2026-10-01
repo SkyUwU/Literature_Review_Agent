@@ -247,7 +247,7 @@ def note_payload(paper_id: str) -> dict[str, object]:
         "claims": [
             {
                 "text": f"The study in {paper_id} reports evidence selection results for review agents.",
-                "chunk_ids": [f"{paper_id}-c1"],
+                "chunk_ids": ["C1"],
                 "aspect": "contribution",
             }
         ],

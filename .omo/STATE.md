@@ -1,4 +1,10 @@
-# 專案狀態（盤點日期：2026-10-01）
+# 專案狀態（盤點日期：2026-10-02）
+
+## 2026-10-02：逐篇 notes 短引用代號
+
+- 已依授權實作 request／batch 內 `C1`、`C2` 代號；驗證 claims 與 coverage 引用後映射回完整 chunk ID，保留原來源物件、quote／頁碼與 checkpoint 輸出格式。未知代號維持一次 repair，失敗則保留既有 notes 未完成處理。
+- Synthesis 離線 fake-client tests 80 個通過，涵蓋長 ID 映射、未知 coverage 代號拒絕及 Groq 分批代號作用域；pipeline focused tests 22 個通過（exit 0），涵蓋 checkpoint 重用與不符拒絕。git diff --check 通過，key-pattern scan 無命中。未執行完整 suite 或真實 API，未刪除既有資料。同步 main fake notes fixture，未重跑 test_main suite。
+- 本里程碑不含 PDF 下載驗證與完整 checkpoint 續跑；PDF 檢查為下一個里程碑。Codex 未使用另一環境的 `plan-review`，未新增計畫檔。
 
 ## 換對話接續摘要與待評估方向（2026-10-01）
 
@@ -14,15 +20,21 @@
 
 ### 建議優先順序（尚未實作）
 
-1. 正確原始 query 的新 run 與品質診斷：先確認 provider 用量／模型權限、下載目的地與篩選政策；對照候選減少階段、任務偏移、claim 支持程度，不只看報告是否生成。
-2. 證據可追溯性：目前 quote 固定取 chunk 前 240 字元，可能只截到作者資訊；考慮讓 notes 回傳支持 claim 的原文句子並驗證確實屬於來源 chunk。保留 chunk ID，補實際 PDF 頁碼映射，不推造頁碼。quote 與頁碼可各自界定里程碑。
+1. 使用原始問題重新執行與品質診斷：原始 query 是 `LLM-based automated literature review`。舊 run 的 query 覆蓋 bug 影響 scoring／synthesis，不能只改 JSON 字串；重新執行仍需另行確認 provider 用量／模型權限、下載目的地與篩選政策，並非本輪文件整理的執行範圍。
+2. 證據可追溯性：目前 quote 固定取 chunk 前 240 字元，用於來源辨識即可，不必強制是重點句；它不保證直接支持 claim，核對主張需閱讀完整來源 chunk。若未來需要直接展示 claim 支持證據，可另評估擷取原文支持句並驗證屬於來源 chunk。正式章節切分尚未保留 PDF 頁碼映射；保留 chunk ID，不推造頁碼。支持句與頁碼各為可選獨立里程碑。
 3. 排除紀錄輸出：記錄年份／venue／screening／重複／OA 缺失／下載或抽取失敗／functional 選取等階段、原因與已有分數；未執行評分者不可填假分數。
 4. 發表位置補查與 track：對缺 venue、arXiv-only、無法辨認來源或需要 track 的候選，考慮以 DOI／arXiv ID／標題作者匹配 OpenAlex 或官方 proceedings／OpenReview。分開 provider metadata 與官方核驗；main、workshop、Student Abstract、Findings 等政策待討論，不自動排除。單一 SS 路徑沒有跨來源衝突判定，PDF host 不作接收證據。
 5. OA 補齊：考慮 DOI-based Unpaywall／其他 OA locations，保留來源與失敗原因；OA 補齊不等於檢索或正式發表核驗。
-6. 檢索擴展：SS／OpenAlex 有界分頁（原始候選數與頁数限制，不湊固定數量的合格論文）、SS bulk search、seed-paper citation／reference 擴展，分別評估成本與適用情況。
-7. 搜尋回饋：區分 provider 零結果、年份／venue 後零結果、screening 全拒絕、OA 不足；再決定改寫、分頁或 metadata 補查。避免對所有零結果盲目加詞；保留研究政策與呼叫上限。2–4 words 對完整術語的限制也可再評估，尚未放寬。
+6. 檢索擴展：分頁指向 provider 取得第二頁以後的搜尋結果，例如總命中 216 筆但首頁只收到 100 筆。SS／OpenAlex 有界分頁需限制原始候選數與頁數，不湊固定數量的合格論文；SS bulk search、seed-paper citation／reference 擴展另行評估成本與適用情況，尚未實作。
+7. 搜尋回饋：指依候選不足的階段與原因，評估是否改寫 query、取下一頁或補 metadata；目前已有候選統計與 LLM gap follow-up，尚未加入這類依原因自動選策略的流程。需區分 provider 零結果、年份／venue 後零結果、screening 全拒絕、OA 不足，保留研究政策與呼叫上限。2–4 words 的限制尚未放寬。
 
 使用者準備下一輪整理敘述檔案；建議 HANDOFF.md 保留穩定架構／操作規則，STATE.md 保留目前狀態與待辦，詳細歷史移到既有 evidence／歷史紀錄，避免多處重複或把候選方向寫成已完成。
+
+### 本輪文件整理與驗證界線
+
+- 2026-10-01 唯讀核對程式與文件後整理敘述；未改程式、未跑測試、未執行真實 API。下方測試數皆為各里程碑歷史紀錄，最新完整 suite 尚未重新驗證通過。
+- 本機 `data/run/`、`data/outputs/` 與上述舊 papers JSON 存在；同時間戳 report JSON 本輪未找到，不能把先前「保留」紀錄當成當前檔案存在證據。`.omo/evidence/` 與已授權刪除的錯誤 checkpoint 不存在；不據此推論 WSL 資料狀態。
+- `plan-review` 屬另一執行環境，Codex 本輪未使用該 skill；未新增計畫檔或宣稱完成該流程。
 
 ## 2026-10-01：查詢任務錨定與 repair 上下文
 
@@ -89,14 +101,14 @@
 ## 本次 checkout 可確認的狀態
 
 - 本次文件整理前，Windows working copy 的 Git status 僅有預期中的未追蹤 Summer_Project.pdf；未見 tracked file 變更。
-- 本機沒有 .omo/evidence/、data/run/ 或 data/outputs/。這些可能是 WSL OpenCode checkout 的未追蹤執行資料，Git 不會同步；請在原 WSL 環境查證，不代表紀錄遺失。
+- 較早盤點曾記錄本機沒有 .omo/evidence/、data/run/ 或 data/outputs/；這是歷史快照，已由頂部本輪盤點更新。WSL 未追蹤資料不會由 Git 同步。
 - 使用者回報 Windows dry run 先遇 OpenAlex anonymous-search 503，加入 OpenAlex key 後又遇 query_timeout 504。dry run 不載入 Gemini，但需 OpenAlex key 時應載入 .env；目前 checkout 未取得完整終端 log，504 對應的實際子查詢仍需從 Search plan 確認。
 - HANDOFF 記載 2026-09-29 rate limiting/key rotation 里程碑有 504 tests 通過。這是舊執行紀錄，非本次重新測試；舊版 462 數字已過時。
 
 ## 目前工作基線
 
 - 正式入口為 literature_review.main：規劃 → 多 query 搜尋與排名 → screening → OA PDF 下載 → 全文抽取與分段 → per-paper functional scoring / notes → synthesis → report 與 papers JSON。
-- 正式證據路徑每篇論文內取樣 top-2 chunks；corpus-wide retrieval、RCS 等為 CLI／比較／legacy 路徑。詳見 HANDOFF.md。
+- 正式證據路徑逐篇章節取樣：scoring 最多 2 chunks，notes 最多 9 chunks；corpus-wide retrieval、RCS 等為 CLI／比較／legacy 路徑。詳見 HANDOFF.md。
 - 預設研究政策為最近三年與 top-venue whitelist；後者是硬篩選，已知可能使某些 query 零候選。一次性探索可明確使用 --venues none。
 - Gemini key 分工、503/429 的 stage-specific 行為、額度限制及真實 run 命令見 HANDOFF.md。
 

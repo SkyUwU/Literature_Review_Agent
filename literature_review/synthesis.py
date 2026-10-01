@@ -598,6 +598,7 @@ def build_paper_notes_prompt(
     C2c: chunks are grouped by their top-level section; each claim's ``aspect``
     must be exactly one of these section titles — never a subsection name.
     """
+    chunks = _notes_alias_chunks(chunks)
     groups = _group_chunks_by_section(chunks, paper_title)
     sections = [
         {
@@ -631,6 +632,14 @@ def build_paper_notes_prompt(
         f"Paper ID: {paper_id}\n"
         f"Evidence chunks: {json.dumps(sections, ensure_ascii=False)}"
     )
+
+
+def _notes_alias_chunks(chunks: list[EvidenceChunk]) -> list[EvidenceChunk]:
+    """Use request-local identifiers without changing source evidence objects."""
+    return [
+        chunk.model_copy(update={"chunk_id": f"C{index}"})
+        for index, chunk in enumerate(chunks, start=1)
+    ]
 
 
 def _check_unknown_ids(
@@ -691,25 +700,36 @@ def summarize_paper_notes(
     else:
         batches = [supplied]
     for batch in batches:
+        alias_chunks = _notes_alias_chunks(batch)
+        source_ids = {
+            alias.chunk_id: source.chunk_id
+            for alias, source in zip(alias_chunks, batch)
+        }
         note = _generate_validated(
             client, LlmPaperSummaryNote,
             build_paper_notes_prompt(paper_id, batch, paper_title=paper_title),
             LlmPaperSummaryNote.model_json_schema(),
         )
-        unknown_ids = _check_unknown_ids(note, batch)
+        unknown_ids = _check_unknown_ids(note, alias_chunks)
         if unknown_ids:
             repair = _build_chunk_repair_prompt(
-                json.dumps(note.model_dump()), unknown_ids, sorted({c.chunk_id for c in batch})
+                json.dumps(note.model_dump()), unknown_ids, list(source_ids)
             )
             note = _parse_llm_model(
                 LlmPaperSummaryNote,
                 client.generate_json(repair, LlmPaperSummaryNote.model_json_schema()),
             )
-            unknown_ids = _check_unknown_ids(note, batch)
+            unknown_ids = _check_unknown_ids(note, alias_chunks)
             if unknown_ids:
                 raise SynthesisError(
                     f"LLM note for paper {paper_id} cites unknown chunk ids: {', '.join(unknown_ids)}."
                 )
+        note = note.model_copy(update={
+            "claims": [claim.model_copy(update={
+                "chunk_ids": [source_ids[value] for value in claim.chunk_ids]
+            }) for claim in note.claims],
+            "coverage_chunk_ids": [source_ids[value] for value in note.coverage_chunk_ids],
+        })
         notes.append(note)
     claims = [
         _claim_from_note(claim, chunk_by_id)

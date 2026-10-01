@@ -589,17 +589,17 @@ def valid_note_payload() -> dict[str, object]:
         "claims": [
             {
                 "text": "The paper studies retrieval-augmented evidence selection for review agents.",
-                "chunk_ids": ["p1-p1-1-c1"],
+                "chunk_ids": ["C1"],
                 "aspect": "contribution",
             },
             {
                 "text": "The method splits each PDF into overlapping chunks before ranking them.",
-                "chunk_ids": ["p1-p2-2-c4"],
+                "chunk_ids": ["C4"],
                 "aspect": "method",
             },
             {
                 "text": "The evaluation is restricted to English computer-science papers only.",
-                "chunk_ids": ["p1-p4-4-c8"],
+                "chunk_ids": ["C8"],
                 "aspect": "limitations",
             },
         ],
@@ -624,6 +624,39 @@ def llm_synthesis_fixture() -> tuple[EvidenceAssessmentResponse, dict[str, list[
 
 
 class LlmPaperNotesTests(unittest.TestCase):
+    def test_short_aliases_preserve_full_provenance_without_mutating_chunks(self) -> None:
+        paper_id = "2fcad63cc68ca74acdfafdbc145325ee59952f24"
+        chunks = plain_chunks(paper_id, count=2)
+        original_ids = [chunk.chunk_id for chunk in chunks]
+        client = FakeNoteClient({
+            "claims": [{
+                "text": "The supplied evidence supports this source-grounded claim.",
+                "chunk_ids": ["C2", "C1"], "aspect": "other",
+            }],
+            "coverage_chunk_ids": ["C1", "C2"],
+        })
+        note = summarize_paper_notes(paper_id, chunks, client, CoveragePackPolicy())
+        self.assertEqual([chunk.chunk_id for chunk in chunks], original_ids)
+        self.assertTrue(all(value not in client.prompt for value in original_ids))
+        self.assertEqual([ref.chunk_id for ref in note.claims[0].evidence], original_ids[::-1])
+        self.assertEqual(note.coverage_chunk_ids, sorted(original_ids))
+        self.assertEqual(note.claims[0].evidence[0].quote, chunks[1].text[:240])
+        self.assertEqual(note.claims[0].evidence[0].page_start, chunks[1].page_start)
+
+    def test_unknown_coverage_alias_is_rejected_after_one_repair(self) -> None:
+        payload = {
+            "claims": [{
+                "text": "This claim references a valid supplied evidence chunk.",
+                "chunk_ids": ["C1"], "aspect": "other",
+            }],
+            "coverage_chunk_ids": ["C99"],
+        }
+        client = ChunkRepairNoteClient(payload, payload)
+        with self.assertRaisesRegex(SynthesisError, "C99"):
+            summarize_paper_notes("p1", plain_chunks("p1"), client, CoveragePackPolicy())
+        self.assertEqual(len(client.prompts), 2)
+        self.assertIn('"C1"', client.prompts[1])
+
     def test_openai_notes_keep_all_selected_chunks_in_one_call(self) -> None:
         chunks = plain_chunks("p-openai", count=4)
         client = FakeOpenAINoteClient()
@@ -637,7 +670,7 @@ class LlmPaperNotesTests(unittest.TestCase):
 
         self.assertEqual(len(client.prompts), 1)
         for chunk in chunks:
-            self.assertIn(chunk.chunk_id, client.prompts[0])
+            self.assertIn(chunk.text, client.prompts[0])
 
     def test_llm_notes_happy_path(self) -> None:
         chunks = sectioned_chunks("p1")
@@ -646,7 +679,7 @@ class LlmPaperNotesTests(unittest.TestCase):
         note = summarize_paper_notes("p1", chunks, client, CoveragePackPolicy(max_chunks_per_paper=6))
 
         for chunk in chunks:
-            self.assertIn(chunk.chunk_id, client.prompt)
+            self.assertIn(chunk.text, client.prompt)
         self.assertIn("only", client.prompt)
         self.assertEqual(note.paper_id, "p1")
         self.assertEqual([claim.aspect for claim in note.claims], ["contribution", "method", "limitations"])
@@ -726,6 +759,7 @@ class LlmPaperNotesTests(unittest.TestCase):
             note = summarize_paper_notes("p1", chunks, client, CoveragePackPolicy())
 
         self.assertGreaterEqual(len(client.prompts), 3)
+        self.assertTrue(all('"chunk_id": "C1"' in prompt for prompt in client.prompts))
         self.assertEqual(note.paper_id, "p1")
         self.assertEqual(set(note.coverage_chunk_ids), {"p1-intro", "p1-method"})
         self.assertTrue(
@@ -1375,7 +1409,7 @@ class SectionAwareNotesInputTests(unittest.TestCase):
         self.assertIn("Cover every section", prompt)
         self.assertIn("Never use a subsection name", prompt)
         for chunk in chunks:
-            self.assertIn(chunk.chunk_id, prompt)
+            self.assertIn(chunk.text, prompt)
         self.assertNotIn("page_start", prompt)
         self.assertNotIn("page_end", prompt)
         self.assertNotIn("sections_by_aspect", prompt)
@@ -1400,32 +1434,32 @@ class SectionAwareFakeE2ETests(unittest.TestCase):
             "claims": [
                 {
                     "text": "The abstract studies evidence-cited literature review agents.",
-                    "chunk_ids": ["p1-c1"],
+                    "chunk_ids": ["C1"],
                     "aspect": "Abstract",
                 },
                 {
                     "text": "The introduction motivates page-level claim provenance.",
-                    "chunk_ids": ["p1-c2"],
+                    "chunk_ids": ["C2"],
                     "aspect": "1 Introduction",
                 },
                 {
                     "text": "The method groups chunks by top-level section before scoring.",
-                    "chunk_ids": ["p1-c4"],
+                    "chunk_ids": ["C4"],
                     "aspect": "2 Method",
                 },
                 {
                     "text": "Experiments evaluate coverage across three public benchmarks.",
-                    "chunk_ids": ["p1-c6"],
+                    "chunk_ids": ["C6"],
                     "aspect": "3 Experiments",
                 },
                 {
                     "text": "Results show every chapter stays represented after sampling.",
-                    "chunk_ids": ["p1-c7"],
+                    "chunk_ids": ["C7"],
                     "aspect": "4 Results",
                 },
                 {
                     "text": "Limitations restrict the evaluation to English papers only.",
-                    "chunk_ids": ["p1-c8"],
+                    "chunk_ids": ["C8"],
                     "aspect": "5 Limitations",
                 },
             ],
