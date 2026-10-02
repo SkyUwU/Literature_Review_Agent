@@ -1,5 +1,14 @@
 # 專案狀態（盤點日期：2026-10-02）
 
+## 新對話接續摘要（2026-10-02，優先閱讀）
+
+- 本對話已完成分節報告里程碑，109 個 focused tests 通過；未跑完整 suite 或真實 API。新對話不要重做已完成工作，也不要自行跑 API。
+- 下一步計畫：`.omo/plans/downloaded-paper-dispositions.md`，使用者已要求先寫計畫，尚未開始實作。範圍限成功下載論文的處理紀錄、實際評分／排除原因，以及失敗 run 仍保存 papers 診斷；搜尋階段 selection_events 暫緩。
+- 先 git status，讀 AGENTS.md、HANDOFF.md、本檔與新計畫，再說明並確認實作範圍。route B 不使用子代理；Codex 未使用另一環境 plan-review。
+- 本輪末次 Git 檢查：分節報告 source/tests/docs 已無待提交變更；僅本輪 STATE 更新與新計畫待提交。以新對話實際 Git 狀態為準，保留既有變更、不重置。`Summer_Project.pdf`、`data/` 為未追蹤資料，不提交。
+- 實際案例：`data/outputs/papers_20261002_001952_120309.json` 與 companion report，12 篇下載、7 篇 notes。不能由這些舊 JSON 還原另外 5 篇未保存的具體排除分數或原因；不補造診斷。
+- Notes 短代號已完成；PDF 驗證、完整 checkpoint 續跑與 report checkpoint 尚未實作。原始 research query 為 `LLM-based automated literature review`。
+
 ## 2026-10-02：依大綱分節生成報告
 
 - 已依使用者「接續執行」實作 `.omo/plans/section-scoped-report-generation.md` 第一個里程碑：每次只提供本節 claims／paper attribution、原始 query、全局大綱 title/purpose；節內引用範圍與 schema／缺引用／額外標題共用一次 repair，仍無效即停止，不生成完整 report。
