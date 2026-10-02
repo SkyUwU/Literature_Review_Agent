@@ -542,10 +542,10 @@ class LlmSynthesisOutline(BaseModel):
 
 
 class LlmSynthesisReportBatch(BaseModel):
-    """The JSON object an LLM must return for the two-stage report call (call 2).
+    """The JSON body an LLM returns for one report section (also legacy report calls).
 
     Unlike the legacy ``LlmSynthesisBatch``, the report call carries no
-    ``future_directions``: they are generated independently by a third call.
+    ``future_directions``: they are generated independently after all sections.
     """
 
     report: str = Field(min_length=100)
@@ -580,6 +580,16 @@ class CoveragePackPolicy(BaseModel):
     llm_input_cap: int = Field(default=80, ge=1, le=200)
 
 
+class ReportSection(BaseModel):
+    """Locally assembled metadata for one validated report section."""
+
+    section_index: int = Field(ge=1)
+    title: str
+    report: str = Field(min_length=100)
+    allowed_claim_ids: list[str]
+    cited_claim_ids: list[str]
+
+
 class SynthesisResponse(BaseModel):
     """Evidence-cited synthesis that preserves every upstream provenance layer.
 
@@ -599,6 +609,8 @@ class SynthesisResponse(BaseModel):
     paper_summaries: list[PaperSummary] = Field(min_length=1)
     claim_chunks: dict[str, list[str]] = Field(default_factory=dict)
     report: str = Field(min_length=100)
+    outline: LlmSynthesisOutline | None = None
+    report_sections: list[ReportSection] = Field(default_factory=list)
     future_directions: list[FutureDirection] = Field(min_length=1)
     limitations: list[str]
     generated_by: Literal["deterministic", "llm"]

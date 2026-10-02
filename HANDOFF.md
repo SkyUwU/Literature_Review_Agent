@@ -31,6 +31,7 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 - literature_review.main 是正式 end-to-end 入口。--dry-run 使用 rule-based planner，只跑至下載，不呼叫 Gemini，也不保存報告；為搜尋可載入 .env 中唯一的 OPENALEX_API_KEY。
 - 正式證據路徑以 `functional.sample_formal_chunks_per_paper` 逐篇章節分類與 embedding 取樣為準。Scoring 優先選 Method、Results 各 1 個 chunk，缺少時由其餘候選補足至 2；逐篇 notes 選 Abstract/context 1 個，再從 Method、Evaluation Setup、Results、Limitations/Future Work 各至多 2 個，總數上限 9。References／acknowledgments 排除；Appendix 僅在子章節能歸入五類時保留。每篇 chunks 僅做一次 embedding，向量供兩階段選取共用。corpus-wide embedding／lexical retrieval 與 RCS 是 CLI、比較或 legacy 路徑。
 - 報告中的 [claim-N] 連到程式組裝的 claim-to-chunk/paper provenance。生成內容只應依賴供應的 chunks；形式驗證通過不代表學術品質已經人工確認。
+- LLM report 先生成全局 outline，再依序生成每個小節；每次只提供該節 claims、原始 query 與全局大綱的 title/purpose。每節的 schema／缺引用／超出該節集合／額外 Markdown heading 共用一次內容 repair，仍失敗即停止。程式組裝標題與順序，report JSON 新增 optional `outline`、`report_sections`（舊 JSON 可讀）；future directions 仍獨立使用全局 claims。K 節正常共 K+2 次 synthesis calls，不含 repair／provider retry。未加入報告 checkpoint；ID 驗證不代表每句有引用或支持證據。
 - 逐篇 notes 的 LLM 輸入使用每次 request／batch 內的短代號 `C1`、`C2` 等；claims 與 coverage 的代號通過驗證後，由程式還原完整 chunk ID。未知代號維持一次 repair，仍不合法即該篇失敗。報告與 checkpoint 保存完整 ID，既有成功 notes 可維持原格式；此變更不改善 `--resume-notes` 仍重跑上游階段的限制。
 - metadata／abstract 評估不等於全文評估；chunk-based synthesis 也不代表完整審閱每篇論文。
 - 正式章節分段目前合併各頁 Markdown 後切分，chunk 的 PDF 頁碼為空；legacy 分頁文字切分可保留頁碼，不能據此宣稱正式路徑已完成頁碼映射。Claim evidence 的 quote 固定取來源 chunk 前 240 字元，可協助辨識來源，不保證直接支持 claim；核對主張仍需閱讀對應 chunk。

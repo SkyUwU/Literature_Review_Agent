@@ -286,9 +286,9 @@ class SynthesisFakeClient:
             real_claim_ids = re.findall(r'"claim_id": "(claim-\d+)"', prompt)
             self.cited_claim_ids.extend(real_claim_ids)
             report = (
-                "# Evidence-cited synthesis\n"
+                ""
                 + "".join(
-                    f"The reviewed study supplies retrieved evidence for its claims "
+                    f"The reviewed study supplies retrieved evidence for its claims and describes their applicability within the evaluated research setting "
                     f"in [{claim_id}].\n"
                     for claim_id in real_claim_ids
                 )
@@ -327,9 +327,9 @@ class PaperDropFakeClient(SynthesisFakeClient):
         if prompt.startswith("Write a fluent literature-review"):
             real_claim_ids = re.findall(r'"claim_id": "(claim-\d+)"', prompt)
             report = (
-                "# Evidence-cited synthesis\n"
+                ""
                 + "".join(
-                    f"The reviewed study supplies retrieved evidence for its claims "
+                    f"The reviewed study supplies retrieved evidence for its claims and describes their applicability within the evaluated research setting "
                     f"in [{claim_id}].\n"
                     for claim_id in real_claim_ids
                 )

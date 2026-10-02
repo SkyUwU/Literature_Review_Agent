@@ -1,5 +1,12 @@
 # 專案狀態（盤點日期：2026-10-02）
 
+## 2026-10-02：依大綱分節生成報告
+
+- 已依使用者「接續執行」實作 `.omo/plans/section-scoped-report-generation.md` 第一個里程碑：每次只提供本節 claims／paper attribution、原始 query、全局大綱 title/purpose；節內引用範圍與 schema／缺引用／額外標題共用一次 repair，仍無效即停止，不生成完整 report。
+- 程式依序組裝全文；report JSON 保存 outline 與 report_sections（index/title/body/allowed/cited IDs），舊 JSON 與 deterministic 路徑保持可讀，notes checkpoint 格式不變。Directions 繼續獨立使用全局 claims。K 節正常 synthesis calls 為 K+2，未新增報告 checkpoint。
+- 已完成一般唯讀自審，未使用另一環境的 plan-review。離線驗收：synthesis 80、section report 6、pipeline 22、main 正式入口 fake flow 1，共 109 tests 通過；git diff --check 通過、key-pattern scan 無命中。未跑完整 suite 或真實 API，不改選文政策、不刪資料。首次 pipeline focused run 的 2 個錯誤為舊 fake report 移除標題後低於正文 100 字元下限，修正 fixture 後重跑通過，未放寬正式 schema。
+- 下一個里程碑為已下載論文的 paper_dispositions；搜尋階段 selection_events、PDF 驗證與完整 checkpoint 續跑尚未實作。
+
 ## 2026-10-02：逐篇 notes 短引用代號
 
 - 已依授權實作 request／batch 內 `C1`、`C2` 代號；驗證 claims 與 coverage 引用後映射回完整 chunk ID，保留原來源物件、quote／頁碼與 checkpoint 輸出格式。未知代號維持一次 repair，失敗則保留既有 notes 未完成處理。

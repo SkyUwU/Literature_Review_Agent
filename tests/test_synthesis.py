@@ -560,24 +560,14 @@ class FakeSynthesisClient:
 
 
 def valid_outline_payload() -> dict[str, object]:
-    return {
-        "sections": [
-            {
-                "title": "Background and scope",
-                "purpose": "situates evidence-cited synthesis among review-agent studies.",
-                "supporting_claim_ids": ["claim-1", "claim-2"],
-            },
-            {
-                "title": "Mechanisms and tools",
-                "purpose": "explains how bounded retrieved chunks compose grounded prose.",
-                "supporting_claim_ids": ["claim-3", "claim-4"],
-            },
-        ]
-    }
-
+    return {"sections": [{
+        "title": "Background and scope",
+        "purpose": "situates evidence-cited synthesis among review-agent studies.",
+        "supporting_claim_ids": ["claim-1", "claim-2", "claim-3", "claim-4"],
+    }]}
 
 def valid_report_payload(report: str) -> dict[str, object]:
-    return {"report": report}
+    return {"report": re.sub(r"(?m)^#{1,6} .*\n?", "", report)}
 
 
 def valid_directions_payload() -> dict[str, object]:
@@ -899,6 +889,7 @@ class LlmSynthesisReportTests(unittest.TestCase):
                 FakeSynthesisClient(
                     [
                         valid_outline_payload(),
+                        valid_report_payload(report),
                         valid_report_payload(report),
                     ]
                 ),

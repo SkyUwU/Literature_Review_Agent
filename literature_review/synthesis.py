@@ -39,6 +39,7 @@ from literature_review.models import (
     PaperSource,
     PaperSummary,
     PaperSummaryClaim,
+    ReportSection,
     SynthesisResponse,
 )
 
@@ -1089,6 +1090,74 @@ def _report_call(
     )
 
 
+def build_section_report_prompt(
+    query: str, outline: LlmSynthesisOutline, index: int, notes: list[dict],
+) -> str:
+    section = outline.sections[index]
+    allowed = set(section.supporting_claim_ids)
+    scoped_notes = []
+    for note in notes:
+        claims = [claim for claim in note["claims"] if claim["claim_id"] in allowed]
+        if claims:
+            scoped_notes.append({"paper_id": note["paper_id"], "claims": claims})
+    structure = [{"title": item.title, "purpose": item.purpose} for item in outline.sections]
+    return (
+        "Write a fluent literature-review section using only the supplied claims. "
+        "Return exactly one JSON object with a report string of at least 100 characters. "
+        "Write only this section's body; do not add Markdown headings, other sections, "
+        "a report title, a materials list, or future directions. "
+        "End factual sentences with supplied [claim-N] markers; do not invent claims. "
+        "Maintain consistent terminology and avoid repeating other sections' purposes. "
+        "Distinguish direct research findings from transferable design implications.\n"
+        f"Research query: {query}\n"
+        f"Outline structure: {json.dumps(structure, ensure_ascii=False)}\n"
+        f"Current section: {json.dumps(section.model_dump(), ensure_ascii=False)}\n"
+        f"Per-paper notes: {json.dumps(scoped_notes, ensure_ascii=False)}"
+    )
+
+
+@observe(name="synthesis_report_section")
+def _section_report_call(
+    client: JsonGenerationClient, query: str, outline: LlmSynthesisOutline,
+    index: int, notes: list[dict],
+) -> ReportSection:
+    section = outline.sections[index]
+    allowed = set(section.supporting_claim_ids)
+    prompt = build_section_report_prompt(query, outline, index, notes)
+    for attempt in range(2):
+        try:
+            raw = client.generate_json(prompt, LlmSynthesisReportBatch.model_json_schema())
+        except Exception as error:
+            raise SynthesisError(
+                f"Report section {index + 1} ({section.title}) provider failed: {error}"
+            ) from error
+        try:
+            batch = _parse_llm_model(LlmSynthesisReportBatch, raw)
+            markers = set(_MARKER_REGEX.findall(batch.report))
+            if not markers:
+                raise SynthesisError("Section has no [claim-N] citation markers.")
+            unknown = sorted(markers - allowed)
+            if unknown:
+                raise SynthesisError(f"Section cites disallowed claim ids: {unknown}.")
+            if re.search(r"^\s{0,3}#{1,6}(?:\s|$)|^\s*(?:=+|-+)\s*$", batch.report, re.MULTILINE):
+                raise SynthesisError("Section must contain body prose without Markdown headings.")
+            return ReportSection(
+                section_index=index + 1, title=section.title, report=batch.report,
+                allowed_claim_ids=list(dict.fromkeys(section.supporting_claim_ids)),
+                cited_claim_ids=sorted(markers),
+            )
+        except SynthesisError as error:
+            if attempt:
+                raise SynthesisError(
+                    f"Report section {index + 1} ({section.title}) failed after one repair: {error}"
+                ) from error
+            prompt = (
+                build_section_report_prompt(query, outline, index, notes)
+                + f"\nRepair the previous response. Error: {error}\nPrevious response: {raw}"
+            )
+    raise AssertionError("Unreachable section generation state")
+
+
 @observe(name="synthesis_directions")
 def _directions_call(
     client: JsonGenerationClient,
@@ -1113,11 +1182,11 @@ def synthesize_report(
     paper_assessments: list[PaperAssessment] | None = None,
     query: str | None = None,
 ) -> SynthesisResponse:
-    """Produce the final evidence-cited synthesis through two-stage three LLM calls.
+    """Produce a validated outline, sequential section bodies, and independent directions.
 
     Call 1 plans a thematic outline (2-4 sections, each pre-annotated with the
-    claim ids it will cite); call 2 writes the report prose organized by that
-    outline; call 3 derives future directions independently — it sees only the
+    claim ids it will cite); each section receives only its allocated claims.
+    The final call derives future directions independently — it sees only the
     query and the claims, never the outline, so the report frame cannot narrow
     the directions. The outline and directions carry only claim/paper ids copied
     verbatim from the supplied notes; unknown ids are repaired once (outline) or
@@ -1139,14 +1208,20 @@ def synthesize_report(
     usable_notes = [note for note in paper_summaries if note.paper_id in usable_ids]
     _tag_claim_ids(paper_summaries, usable_ids)
     claim_chunks = build_claim_chunks(usable_notes)
-    allowed_ids = _allowed_marker_ids(paper_summaries, usable_ids)
     notes_dicts, claim_counter_total = _build_notes_payload(paper_summaries, usable_ids)
     claim_paper_map = _claim_paper_map(paper_summaries, usable_ids)
     query_text = query or ""
     outline = _outline_call(client, query_text, notes_dicts, claim_counter_total)
     outline = _repair_outline_markers(outline, client, set(claim_chunks))
-    batch = _report_call(client, outline, notes_dicts)
-    batch = _repair_claim_markers(batch, client, allowed_ids)
+    report_sections = [
+        _section_report_call(client, query_text, outline, index, notes_dicts)
+        for index in range(len(outline.sections))
+    ]
+    report_title = " ".join(query_text.split()) or "Literature review"
+    report = f"# {report_title}\n\n" + "\n\n".join(
+        f"## {' '.join(section.title.split())}\n\n{section.report}"
+        for section in report_sections
+    )
     directions = _directions_call(client, query_text, notes_dicts)
     for direction in directions.future_directions:
         unknown_claims = sorted(set(direction.supporting_claim_ids) - set(claim_chunks))
@@ -1161,7 +1236,7 @@ def synthesize_report(
     )
     limitations = [
         "Section-sampled coverage, not a full-text reading.",
-        "Every factual sentence carries an inline [claim-N] citation; this is not a whole-paper review.",
+        "Claim citation IDs are validated within each section; factual support still requires review.",
     ]
     if excluded_count:
         limitations.append(_EXCLUDED_SUMMARIES_LIMITATION.format(count=excluded_count))
@@ -1174,7 +1249,9 @@ def synthesize_report(
         paper_assessments=assessments,
         paper_summaries=usable_notes,
         claim_chunks=claim_chunks,
-        report=batch.report,
+        report=report,
+        outline=outline,
+        report_sections=report_sections,
         future_directions=[
             FutureDirection(
                 title=direction.title,
