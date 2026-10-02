@@ -8,8 +8,10 @@ trusted chunk ids (same anti-tamper design as ``summarize_and_rerank``).
 """
 
 from langfuse import observe
+from collections.abc import Callable
 
 from literature_review.coverage import drop_noise_sections
+from literature_review.diagnostics import RunDiagnosticsCollector
 from literature_review.embedding_retriever import (
     Encoder,
     _cosine,
@@ -152,6 +154,7 @@ def score_chunks_functionally(
     *,
     batch_size: int = FUNCTIONAL_BATCH_SIZE,
     paper_titles: dict[str, str] | None = None,
+    on_batch: Callable[[list[LlmFunctionalAssessment]], None] | None = None,
 ) -> list[LlmFunctionalAssessment]:
     """Score each chunk's utility to the research idea, one bounded batch at a time.
 
@@ -211,6 +214,8 @@ def score_chunks_functionally(
                     "LLM output must assess every supplied chunk exactly once."
                 )
         all_assessments.extend(resolved)
+        if on_batch is not None:
+            on_batch(list(all_assessments))
 
     all_assessments.sort(key=lambda item: item.chunk_id)
     return all_assessments
@@ -436,6 +441,7 @@ def select_quota_threshold(
     n_first_round: int,
     n_follow_up: int,
     threshold: float,
+    diagnostics: RunDiagnosticsCollector | None = None,
 ) -> list[PaperAssessment]:
     """Turn per-paper functional scores into the final include/exclude list.
 
@@ -475,8 +481,29 @@ def select_quota_threshold(
                     evidence=score.evidence,
                 )
             )
+            if diagnostics is not None:
+                reasons = []
+                if score.utility_score < threshold:
+                    reasons.append("threshold_not_met")
+                if rank > quota:
+                    reasons.append("quota_not_selected")
+                diagnostics.update(
+                    score.paper_id, stage="selection", status="completed" if included else "excluded",
+                    selection_status="included" if included else "excluded", reason_codes=reasons,
+                    reason=assessments[-1].rationale, functional_score=score.utility_score,
+                    assessment=assessments[-1], scored_chunk_ids=[item.chunk_id for item in score.evidence],
+                    threshold=threshold, query_group=query, quota=quota, group_rank=rank,
+                    n_samples=score.n_samples,
+                )
 
     for paper_id in sorted(set(paper_queries) - set(scores)):
+        if diagnostics is not None and paper_id in diagnostics.records:
+            if diagnostics.records[paper_id].status != "failed":
+                diagnostics.update(paper_id, stage="selection", status="no_usable_chunks",
+                                   selection_status="excluded", reason_codes=["no_usable_chunks"],
+                                   reason="No functional score is available.", threshold=threshold,
+                                   query_group=paper_queries[paper_id],
+                                   quota=n_follow_up if paper_queries[paper_id] in follow_up_queries else n_first_round)
         assessments.append(
             PaperAssessment(
                 paper_id=paper_id,

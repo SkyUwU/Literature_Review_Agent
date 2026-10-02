@@ -15,6 +15,7 @@ except Exception:  # langfuse 未安裝或 import 失敗 — 不擋 pipeline
     get_client = None
 
 from literature_review.assessment import aggregate_evidence_assessments
+from literature_review.diagnostics import RunDiagnosticsCollector, record_failures, sanitized_error
 from literature_review.coverage import drop_noise_sections
 from literature_review.evidence import chapter_chunk_document, chunk_document
 from literature_review.embedding_retriever import Encoder, default_encoder, retrieve_evidence_embedding
@@ -144,6 +145,7 @@ def _prepare_documents(
     chunk_policy: ChunkPolicy,
     min_words: int = 4,
     paper_titles: dict[str, str] | None = None,
+    diagnostics: RunDiagnosticsCollector | None = None,
 ) -> list[tuple[FullTextDocument, list[EvidenceChunk]]]:
     """Chunk every document (section-aware), dropping noise regions, rejecting duplicates.
 
@@ -181,12 +183,16 @@ def _prepare_documents(
         if chunks:
             prepared.append((document, chunks))
         else:
+            if diagnostics is not None:
+                diagnostics.update(document.paper_id, stage="sampling", status="no_usable_chunks",
+                                   reason_codes=["no_usable_chunks"], reason="Prepared text has no usable chunks.")
             print(f"Skipping {document.paper_id}: extracted text produced no evidence chunks.", file=sys.stderr)
     if not prepared:
         raise ValueError("None of the supplied documents produced usable evidence chunks.")
     return prepared
 
 
+@record_failures
 def run_synthesis_pipeline(
     documents: list[FullTextDocument],
     query: str,
@@ -208,6 +214,7 @@ def run_synthesis_pipeline(
     follow_up_queries: set[str] | None = None,
     print_section_distribution: bool = True,
     notes_checkpoint_dir: Path | None = None,
+    diagnostics: RunDiagnosticsCollector | None = None,
 ) -> SynthesisResponse:
     """Run section-aware chunking, per-paper functional scoring, notes, and cited synthesis.
 
@@ -237,11 +244,14 @@ def run_synthesis_pipeline(
     contract (nothing is stored in ``PapersOutput.run``).
     """
     effective_functional_policy = functional_policy or FunctionalScoringPolicy()
+    if diagnostics is not None:
+        diagnostics.enter("sampling")
     prepared = _prepare_documents(
         documents,
         chunk_policy,
         min_words=effective_functional_policy.min_words,
         paper_titles=paper_titles,
+        diagnostics=diagnostics,
     )
     all_chunks = [chunk for _, chunks in prepared for chunk in chunks]
     scoring_client = client_scoring or client_rcs or client
@@ -255,20 +265,44 @@ def run_synthesis_pipeline(
         paper_titles=paper_titles,
     )
     sampled_flat = [chunk for chunks in sampled.values() for chunk in chunks]
+    if diagnostics is not None:
+        for document, _ in prepared:
+            if not sampled.get(document.paper_id):
+                diagnostics.update(document.paper_id, stage="sampling", status="no_usable_chunks",
+                                   reason_codes=["no_usable_chunks"], reason="No usable scoring chunks.")
     if print_section_distribution and sampled:
         _print_section_distribution(sampled, paper_titles=paper_titles)
+    if diagnostics is not None:
+        diagnostics.enter("scoring")
+    def record_scoring_batch(completed):
+        if diagnostics is None:
+            return
+        partial_scores = aggregate_functional(
+            completed, sampled, max_weight=effective_functional_policy.max_weight,
+        )
+        for paper_id, score in partial_scores.items():
+            diagnostics.update(
+                paper_id, stage="scoring",
+                status="completed" if score.n_samples == len(sampled[paper_id]) else "pending",
+                functional_score=score.utility_score, n_samples=score.n_samples,
+                scored_chunk_ids=[item.chunk_id for item in score.evidence],
+                reason="Score from validated batches; selection has not yet run.",
+            )
     functional_assessments = score_chunks_functionally(
         query,
         sampled_flat,
         scoring_client,
         batch_size=effective_functional_policy.batch_size,
         paper_titles=paper_titles,
+        on_batch=record_scoring_batch if diagnostics is not None else None,
     )
     functional_scores = aggregate_functional(
         functional_assessments,
         sampled,
         max_weight=effective_functional_policy.max_weight,
     )
+    if diagnostics is not None:
+        diagnostics.enter("selection")
 
     if paper_queries is None:
         # 缺省:全部歸一組、配額 = 組內篇數(僅閾值把關),相容舊測試
@@ -282,6 +316,7 @@ def run_synthesis_pipeline(
             n_first_round=quota,
             n_follow_up=quota,
             threshold=effective_functional_policy.threshold,
+            diagnostics=diagnostics,
         )
     else:
         assessments = select_quota_threshold(
@@ -291,6 +326,7 @@ def run_synthesis_pipeline(
             n_first_round=effective_functional_policy.n_first_round,
             n_follow_up=effective_functional_policy.n_follow_up,
             threshold=effective_functional_policy.threshold,
+            diagnostics=diagnostics,
         )
 
     usable_ids = {
@@ -308,6 +344,13 @@ def run_synthesis_pipeline(
         for document, chunks in prepared
         if document.paper_id in usable_ids and notes_sampled.get(document.paper_id)
     ]
+    if diagnostics is not None:
+        diagnostics.enter("notes")
+        for paper_id in usable_ids:
+            if not notes_sampled.get(paper_id):
+                diagnostics.update(paper_id, stage="notes", status="no_usable_chunks",
+                                   notes_status="no_usable_chunks", reason_codes=["no_usable_chunks"],
+                                   reason="Selected paper has no usable notes chunks.")
     manifest = {
         "query": query,
         "usable_paper_ids": sorted(usable_ids),
@@ -367,6 +410,8 @@ def run_synthesis_pipeline(
                 if paper_summaries[-1].paper_id != document.paper_id:
                     raise ValueError("checkpoint paper_id does not match its manifest entry")
                 pending_note_ids.discard(document.paper_id)
+                if diagnostics is not None:
+                    diagnostics.update(document.paper_id, stage="notes", status="completed", notes_status="reused")
                 if checkpoint_state_path is not None:
                     _save_notes_checkpoint_state(
                         checkpoint_state_path, notes_documents, pending_note_ids
@@ -394,10 +439,16 @@ def run_synthesis_pipeline(
                         claim["claim_id"] = f"checkpoint-{index}"
                 _atomic_json_write(checkpoint_path, checkpoint_payload)
             pending_note_ids.discard(document.paper_id)
+            if diagnostics is not None:
+                diagnostics.update(document.paper_id, stage="notes", status="completed", notes_status="completed")
         except Exception as error:
+            if diagnostics is not None:
+                diagnostics.update(document.paper_id, stage="notes", status="failed", notes_status="failed",
+                                   reason_codes=["notes_failed"], reason="Per-paper notes processing failed.",
+                                   error=sanitized_error(error))
             failed_notes.append(document.paper_id)
             print(
-                f"[notes] paper_id={document.paper_id} failed; continuing other papers: {error}",
+                f"[notes] paper_id={document.paper_id} failed; continuing other papers: {sanitized_error(error)}",
                 file=sys.stderr,
             )
         if checkpoint_state_path is not None:
@@ -416,6 +467,10 @@ def run_synthesis_pipeline(
             f"Per-paper notes remain incomplete for {', '.join(failed_notes)}. "
             f"{recovery}"
         )
+    if diagnostics is not None:
+        diagnostics.enter("synthesis")
+        for summary in paper_summaries:
+            diagnostics.update(summary.paper_id, stage="synthesis", status="completed")
     result = synthesize_report(
         None, coverage_packs, paper_summaries, client_report or client, paper_assessments=assessments, query=query
     )

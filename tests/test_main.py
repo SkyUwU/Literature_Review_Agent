@@ -291,6 +291,11 @@ class MainEntryTests(unittest.TestCase):
         self._tmp = TemporaryDirectory()
         self.dest = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
+        # CLI rebuilds data/run before prompting; isolate relative paths and
+        # dotenv reads so these tests cannot delete a developer's downloads.
+        previous_cwd = os.getcwd()
+        os.chdir(self.dest)
+        self.addCleanup(os.chdir, previous_cwd)
         # The real notes pacing is 13s per paper (the free-tier 5 RPM ceiling);
         # these end-to-end tests must not spend that in wall clock.
         pacing = mock.patch(
@@ -963,6 +968,7 @@ class MainEntryTests(unittest.TestCase):
                 dest_dir=self.dest,
                 client_plan=FakePlanClient(2),
                 client_synth=SynthesisFakeClient(("W1", "W2")),
+                encoder=FakeEncoder(),
                 use_llm_plan=True,
                 dry_run=False,
                 json_fetcher=FakeJsonFetcher(payloads),

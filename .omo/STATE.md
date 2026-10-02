@@ -2,6 +2,13 @@
 
 ## 新對話接續摘要（2026-10-02，優先閱讀）
 
+- 協作引導已改為目前 Codex 可遵循的白話規則：預設主代理自審與驗收，其他代理須明確授權；只使用本輪實際可用工具。歷史段落的 route B／plan-review 不作為目前能力或安裝狀態的證據。
+- bounded-plan-review／bounded-plan-execution 已完成修訂及主代理情境自審，uv 執行格式 validator 與 UI metadata 檢查通過，已安裝至本機 `C:/Users/User/.codex/skills/`，並比對檔案 hash。來源副本在 `.omo/skill-drafts/`；自審證據在 `.omo/evidence/skill-workflow-review.md`。未使用獨立代理行為實測，未跑專案測試或真實 API；全域 skills 不隨專案 Git 自動同步。
+- 已依使用者本輪授權完成 downloaded-paper-dispositions 里程碑：成功下載者的唯一 disposition、結構化 threshold/quota 原因、真實分數與 scoring batch 保存、extraction/notes/synthesis 狀態，以及 CLI 的 atomic papers snapshots。Library 寫檔須明確 opt-in；舊介面與政策維持。
+- 最新離線驗收 223 focused tests 通過（dispositions 16、functional/pipeline 70、main 57、synthesis 80）；main 另有兩個既有 screening 429/503 降級預期衝突，未修正／未計入通過數。驗收封鎖網路、fake encoder、暫存 cwd；未跑完整 suite 或真實 API。一般自審，未使用 plan-review。
+- 本輪測試事故：隔離前既有 main tests 觸發預設 `data/run/` 重建。已修正 MainEntryTests 的 cwd 隔離，且 bad-PDF fixture 注入 fake encoder。從 `data/run_20261002_000823/` 同名副本恢復舊 papers 清單中的 3 份 PDF；另 5 份未找到本機副本，無法確認完整恢復。最新 12 份 PDF、report/papers JSON 與 notes checkpoints 仍在；詳見 `.omo/evidence/downloaded-paper-dispositions.md`。本輪沒有下載補回或刪除其他資料。
+- 實作與文件尚未由代理提交；本輪明列 stage source/tests/docs，勿 stage Summer_Project.pdf 或 data/。下方「尚未開始」為本輪之前的歷史接續資訊。
+
 - 本對話已完成分節報告里程碑，109 個 focused tests 通過；未跑完整 suite 或真實 API。新對話不要重做已完成工作，也不要自行跑 API。
 - 下一步計畫：`.omo/plans/downloaded-paper-dispositions.md`，使用者已要求先寫計畫，尚未開始實作。範圍限成功下載論文的處理紀錄、實際評分／排除原因，以及失敗 run 仍保存 papers 診斷；搜尋階段 selection_events 暫緩。
 - 先 git status，讀 AGENTS.md、HANDOFF.md、本檔與新計畫，再說明並確認實作範圍。route B 不使用子代理；Codex 未使用另一環境 plan-review。

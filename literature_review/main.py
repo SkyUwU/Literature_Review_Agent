@@ -38,6 +38,7 @@ from urllib.parse import quote
 from literature_review import pipeline, search, ss_search
 from literature_review import embedding_retriever
 from literature_review.embedding_retriever import Encoder
+from literature_review.diagnostics import RunDiagnosticsCollector, sanitized_error
 from literature_review.extraction import extract_pdf_text
 from literature_review.llm_evidence import (
     DailyQuotaExhausted,
@@ -329,6 +330,8 @@ def run_end_to_end(
     year_to: int | None = None,
     venues: tuple[str, ...] = (),
     notes_checkpoint_dir: Path | None = None,
+    diagnostics_output_dir: str | Path | None = None,
+    output_timestamp: datetime | None = None,
 ) -> dict[str, object]:
     """Run one full literature-review cycle for a bare query.
 
@@ -601,48 +604,61 @@ def run_end_to_end(
             output["follow_ups"] = follow_ups
         return output
 
-    if client_synth is None:
-        raise ValueError("client_synth is required for a non-dry-run end-to-end run.")
-
-    documents: list[FullTextDocument] = []
-    failed_extractions: list[str] = []
-    for entry in downloads:
-        try:
-            documents.append(
-                extract_pdf_text(Path(entry["path"]), entry["paper_id"])
-            )
-        except Exception:
-            # one bad PDF must not abort the whole run; its id is recorded instead
-            failed_extractions.append(entry["paper_id"])
-            continue
-    if not documents:
-        raise ValueError("All downloaded PDFs failed text extraction; cannot synthesize.")
-
-    report = pipeline.run_synthesis_pipeline(
-        documents,
-        query,
-        client_synth,
-        client_scoring=client_scoring,
-        client_rcs=client_rcs,
-        client_report=client_report,
-        paper_meta=paper_meta,
-        paper_titles=paper_titles,
-        paper_queries=paper_queries,
-        follow_up_queries=follow_up_queries,
-        encoder=effective_encoder,
-        notes_checkpoint_dir=notes_checkpoint_dir,
-    )
     papers_output = _make_papers_output(
-        query,
-        plan,
-        follow_ups,
-        stats_per_query,
-        failed_extractions,
-        downloads,
-        downloaded_papers,
-        paper_queries,
-        paper_priority,
+        query, plan, follow_ups, stats_per_query, [], downloads,
+        downloaded_papers, paper_queries, paper_priority,
     )
+    snapshot_timestamp = output_timestamp or datetime.now()
+    diagnostics = RunDiagnosticsCollector(
+        papers_output, notes_checkpoint_id=notes_checkpoint_dir.name if notes_checkpoint_dir else None,
+        on_update=(lambda output: save_papers_output(
+            output, output_dir=diagnostics_output_dir, timestamp=snapshot_timestamp
+        )) if diagnostics_output_dir is not None else None,
+    )
+    diagnostics.flush()
+    diagnostics.enter("extraction")
+    try:
+        if client_synth is None:
+            raise ValueError("client_synth is required for a non-dry-run end-to-end run.")
+
+        documents: list[FullTextDocument] = []
+        failed_extractions = papers_output.run["failed_extractions"]
+        for entry in downloads:
+            try:
+                documents.append(
+                    extract_pdf_text(Path(entry["path"]), entry["paper_id"])
+                )
+                diagnostics.update(entry["paper_id"], stage="extraction", status="completed")
+            except Exception as error:
+                # one bad PDF must not abort the whole run; its id is recorded instead
+                failed_extractions.append(entry["paper_id"])
+                diagnostics.update(entry["paper_id"], stage="extraction", status="failed",
+                                   reason_codes=["extraction_failed"], reason="PDF text extraction failed.",
+                                   error=sanitized_error(error))
+                continue
+        if not documents:
+            raise ValueError("All downloaded PDFs failed text extraction; cannot synthesize.")
+
+        report = pipeline.run_synthesis_pipeline(
+            documents,
+            query,
+            client_synth,
+            client_scoring=client_scoring,
+            client_rcs=client_rcs,
+            client_report=client_report,
+            paper_meta=paper_meta,
+            paper_titles=paper_titles,
+            paper_queries=paper_queries,
+            follow_up_queries=follow_up_queries,
+            encoder=effective_encoder,
+            notes_checkpoint_dir=notes_checkpoint_dir,
+            diagnostics=diagnostics,
+        )
+    except Exception as error:
+        diagnostics.fail(error)
+        raise
+    diagnostics.run.status = "completed"
+    diagnostics.flush()
     return {
         "plan": plan,
         "downloads": downloads,
@@ -900,11 +916,15 @@ def save_papers_output(
         ts = timestamp if timestamp is not None else datetime.now()
         filename = f"papers_{ts.strftime('%Y%m%d_%H%M%S_%f')}.json"
         path = Path(output_dir) / filename
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
+        temporary = path.with_suffix(".json.tmp")
+        try:
+            temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
         return str(path)
     except OSError as error:
-        print(f"Failed to save papers JSON: {error}", file=sys.stderr)
+        print(f"Failed to save papers JSON: {sanitized_error(error)}", file=sys.stderr)
         return None
 
 
@@ -1023,6 +1043,7 @@ def main() -> None:
         else (os.getenv("SEMANTIC_SCHOLAR_API_KEY") or None)
     )
 
+    output_timestamp = datetime.now()
     try:
         result = run_end_to_end(
             query,
@@ -1040,6 +1061,8 @@ def main() -> None:
             year_to=arguments.year_to,
             venues=_resolve_venues(arguments.venues),
             notes_checkpoint_dir=notes_checkpoint_dir,
+            diagnostics_output_dir=None if arguments.dry_run else "data/outputs",
+            output_timestamp=output_timestamp,
         )
     except (LlmEvidenceError, SynthesisError, ValueError) as error:
         print(f"Pipeline failed: {error}", file=sys.stderr)
@@ -1077,7 +1100,7 @@ def main() -> None:
                 indent=2,
             )
         )
-        ts = datetime.now()
+        ts = output_timestamp
         saved_path = save_report_output(result["report"], timestamp=ts)
         if saved_path:
             print(f"Report saved to: {saved_path}")

@@ -48,7 +48,10 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 - 年份預設為最近三年（2026 年即 2024 起），並使用 FilterPolicy 作為 provider 統一後衛。
 - 預設 venue whitelist 是硬篩選；Semantic Scholar 搜尋會將已辨識 conference 名稱／alias 與 year range 傳給 provider，之後仍由本地 whitelist 核對。OpenAlex fallback 仍以本地篩選為準。`[search]` 統計列 provider 回傳、abstract 可用、年份後、venue 後及最終數量。未命中可能來自 venue 欄位缺漏／變體、期刊或預印本不在 whitelist；探索性執行可明確指定 `--venues none`，不可把它解讀為原政策下的同一實驗。
 - 每個規劃 query 分別搜尋、排名及分配下載目標；跨 query 以 DOI（無 DOI 時 title+year）去重。預設 data/run/ 每次真實執行會清空重建；使用 --dest-dir 指定位置時不清除該位置。
-- 只有成功寫入的 PDF 會列在 papers_*.json；每輪報告與 papers JSON 寫入 data/outputs/ 並共用時間戳。dry run 不寫這兩個 JSON。
+- 只有成功寫入的 PDF 會列在 papers_*.json；正式 CLI 在下載完成後先保存 pending 診斷，抽取、scoring batches、selection 與逐篇 notes 狀態更新時以暫存檔＋atomic replace 覆寫同一檔案。成功 report／papers 共用時間戳；dry run 不寫這兩個 JSON。
+- `paper_dispositions` 按唯一 downloaded paper ID 保存處理 stage/status、selection/notes 狀態、實際 score／chunk IDs，以及 threshold、query group、quota、rank、n_samples。Threshold 與 quota 可同時為排除原因；沒有實際分數時是 null，legacy assessment 的 1.0 不視為評分。未執行階段保持 pending，研究排除與處理失敗分開。
+- `run` 新增 run_id、in_progress/completed/failed、failed_stage、error、notes_checkpoint_id。Notes／report 失敗會保留成功 notes 與已有結果並重新拋出原始例外，不產生完整 report；error 只保存例外類別，省略可能含秘密的 details。診斷寫檔失敗會明示，不能保證 kill／磁碟故障下保存資料。
+- Library `run_end_to_end()` 預設只回傳結果；明確傳 `diagnostics_output_dir` 才寫診斷，`output_timestamp` 可供 caller 配對 report。`run_synthesis_pipeline()` 可選擇提供 caller-owned `RunDiagnosticsCollector`，原 return type 不變；診斷 run_id 不提供完整續跑功能，舊 papers JSON 仍可讀。
 - 章節分布統計（SD）在 synthesis 時印至 stdout，統計 scoring 的選取結果。Notes 輸入最多 9 chunks；以預設 chunk 大小估計，每篇約 3,000–4,500 prompt tokens，常需約兩個 2,500-token notes batches；實際 token 數以 provider log 為準。
 
 ## Gemini 呼叫與失敗處理
@@ -109,4 +112,4 @@ HTTP 503 顯示該次 provider 呼叫失敗／服務過載，不足以單獨證�
 
 ## 當前已知狀態（以 .omo/STATE.md 為準）
 
-最新完成項目、歷史測試紀錄、完整 suite 限制與候選方向集中於 .omo/STATE.md。歷史 focused／mock 測試通過不代表目前完整 suite 或真實搜尋品質已驗收；不要僅因缺少本機輸出就重跑 API 流程。`plan-review` 屬另一執行環境，Codex 本輪未使用該 skill。
+最新完成項目、歷史測試紀錄、完整 suite 限制與候選方向集中於 .omo/STATE.md。歷史 focused／mock 測試通過不代表目前完整 suite 或真實搜尋品質已驗收；不要僅因缺少本機輸出就重跑 API 流程。舊紀錄的 route B 與 plan-review 是當時的協作／流程名稱，不是 Codex 功能開關；目前規則以 AGENTS.md 與本輪實際可用工具為準，審核方式須如實說明。

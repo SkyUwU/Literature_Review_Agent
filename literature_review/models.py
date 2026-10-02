@@ -105,6 +105,7 @@ class PapersOutput(BaseModel):
 
     run: dict[str, object]
     papers: list[DownloadedPaperEntry] = Field(default_factory=list)
+    paper_dispositions: list["PaperDisposition"] = Field(default_factory=list)
 
 
 class SearchRequest(BaseModel):
@@ -380,6 +381,40 @@ class FunctionalPaperScore(BaseModel):
     utility_score: float = Field(ge=0, le=10)
     n_samples: int = Field(ge=1)
     evidence: list[EvidenceCitation] = Field(default_factory=list)
+
+
+ProcessingStage = Literal["download", "extraction", "sampling", "scoring", "selection", "notes", "synthesis"]
+DispositionReason = Literal["extraction_failed", "no_usable_chunks", "threshold_not_met", "quota_not_selected", "notes_failed"]
+
+
+class RunDiagnostics(BaseModel):
+    run_id: str
+    status: Literal["in_progress", "completed", "failed"] = "in_progress"
+    failed_stage: ProcessingStage | None = None
+    error: str | None = None
+    notes_checkpoint_id: str | None = None
+
+
+class PaperDisposition(BaseModel):
+    paper_id: str
+    stage: ProcessingStage = "download"
+    status: Literal["pending", "completed", "failed", "excluded", "no_usable_chunks"] = "pending"
+    selection_status: Literal["pending", "included", "excluded"] = "pending"
+    reason_codes: list[DispositionReason] = Field(default_factory=list)
+    reason: str | None = None
+    functional_score: float | None = Field(default=None, ge=0, le=10)
+    assessment: PaperAssessment | None = None
+    scored_chunk_ids: list[str] = Field(default_factory=list)
+    notes_status: Literal["pending", "failed", "completed", "reused", "no_usable_chunks"] = "pending"
+    error: str | None = None
+    threshold: float | None = None
+    query_group: str | None = None
+    quota: int | None = None
+    group_rank: int | None = None
+    n_samples: int | None = None
+
+
+PapersOutput.model_rebuild()
 
 
 class AssessmentPolicy(BaseModel):
