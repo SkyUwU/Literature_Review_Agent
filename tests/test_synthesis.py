@@ -1397,7 +1397,7 @@ class SectionAwareNotesInputTests(unittest.TestCase):
 
         prompt = build_paper_notes_prompt("p1", chunks, paper_title="Title")
 
-        self.assertIn("Cover every section", prompt)
+        self.assertIn("Cover every substantive research section", prompt)
         self.assertIn("Never use a subsection name", prompt)
         for chunk in chunks:
             self.assertIn(chunk.text, prompt)

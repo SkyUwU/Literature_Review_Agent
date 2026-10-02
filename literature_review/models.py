@@ -24,6 +24,22 @@ class PlannedQuery(BaseModel):
     purpose: str = Field(min_length=10)
 
 
+class TaskInterpretation(BaseModel):
+    """A concise interpretation of the input, never a replacement for it."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+    task: str = Field(min_length=1, max_length=500)
+    research_object: str = Field(min_length=1, max_length=500)
+    expected_output: str = Field(min_length=1, max_length=500)
+    scope_boundaries: list[str] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_boundaries(self) -> "TaskInterpretation":
+        if any(not value.strip() or len(value) > 500 for value in self.scope_boundaries):
+            raise ValueError("Scope boundaries must be non-empty, concise statements.")
+        return self
+
+
 class SearchPlan(BaseModel):
     """A traceable search strategy, authored by rules or later by an LLM.
 
@@ -36,6 +52,7 @@ class SearchPlan(BaseModel):
     """
 
     idea: ResearchIdea | str | None = None
+    task_interpretation: TaskInterpretation | None = None
     queries: list[PlannedQuery] = Field(min_length=3, max_length=4)
     perspectives: list[str] = Field(min_length=1)
     generated_by: Literal["rule_based", "llm"]
@@ -351,7 +368,7 @@ class FunctionalScoringPolicy(BaseModel):
     bounds how many chunks are scored per LLM call; ``top_chunks_per_paper``
     caps the per-paper sample before scoring; ``n_first_round`` /
     ``n_follow_up`` are per-query download quotas; ``threshold`` (env
-    ``FUNCTIONAL_THRESHOLD``) is the minimum mean utility score a paper needs
+    ``FUNCTIONAL_THRESHOLD``) is the minimum aggregated utility score a paper needs
     to satisfy the quota part of selection. ``max_weight`` (S3, 2026-09-12)
     weights the per-paper maximum in ``max_weight * max + (1 - max_weight) *
     mean`` aggregation — a smoothed max adoption so one outstanding chunk is
@@ -371,7 +388,7 @@ class FunctionalScoringPolicy(BaseModel):
 class FunctionalPaperScore(BaseModel):
     """One paper's aggregated functional score before quota/threshold selection.
 
-    Carries the mean utility score of the paper's sampled chunks (sample size
+    Carries the max/mean blended utility score of the paper's sampled chunks (sample size
     recorded because fairness is only guaranteed among equal-size samples) and
     the functional citations backing it. The final include/exclude decision is
     made by the selector (C2b Todo 3), not by this container.
@@ -381,6 +398,9 @@ class FunctionalPaperScore(BaseModel):
     utility_score: float = Field(ge=0, le=10)
     n_samples: int = Field(ge=1)
     evidence: list[EvidenceCitation] = Field(default_factory=list)
+    max_score: float | None = Field(default=None, ge=0, le=10)
+    mean_score: float | None = Field(default=None, ge=0, le=10)
+    max_weight: float | None = Field(default=None, ge=0, le=1)
 
 
 ProcessingStage = Literal["download", "extraction", "sampling", "scoring", "selection", "notes", "synthesis"]

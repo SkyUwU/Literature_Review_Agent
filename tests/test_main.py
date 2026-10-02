@@ -90,6 +90,12 @@ class FakePlanClient:
         return json.dumps(
             {
                 "idea": "literature review agent",
+                "task_interpretation": {
+                    "task": "Generate a literature review",
+                    "research_object": "Scientific papers",
+                    "expected_output": "Grounded synthesis",
+                    "scope_boundaries": ["Not manuscript peer review"],
+                },
                 "queries": [
                     {
                         "query": f"review agent angle {index}",

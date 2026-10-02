@@ -53,6 +53,12 @@ class FakePlanClient:
 
 def valid_plan() -> dict[str, object]:
     return {
+        "task_interpretation": {
+            "task": "Generate a literature synthesis",
+            "research_object": "Scientific papers",
+            "expected_output": "A grounded literature review",
+            "scope_boundaries": ["Not manuscript peer review"],
+        },
         "queries": [
             {
                 "query": "literature review agent",
@@ -96,6 +102,7 @@ class QueryOverlapTests(unittest.TestCase):
 
 def overlapping_plan() -> dict[str, object]:
     return {
+        "task_interpretation": valid_plan()["task_interpretation"],
         "queries": [
             {"query": "literature review agent AI", "purpose": "Find core papers on AI literature review agents."},
             {"query": "AI literature review agent", "purpose": "Find tooling papers for AI literature review agents."},
@@ -186,7 +193,7 @@ class LlmPlanTests(unittest.TestCase):
 
         self.assertIn("Each sub-query must target a distinct facet", prompt)
         self.assertIn("avoid near-duplicate queries", prompt)
-        self.assertIn("do not reuse the same head terms", prompt)
+        self.assertIn("Keep task anchors even when they repeat", prompt)
         self.assertIn("synonyms, hyponyms, and alternative phrasings", prompt)
         self.assertIn("Stay on-topic", prompt)
 
@@ -221,12 +228,13 @@ class LlmPlanTests(unittest.TestCase):
 
     def test_t_llm_2_schema_sent_as_second_argument(self) -> None:
         client = FakePlanClient([json.dumps(valid_plan())])
-        schema = SearchPlan.model_json_schema()
 
         create_llm_plan("agent survey", client)
 
         self.assertEqual(len(client.prompts), 1)
-        self.assertEqual(client.schemas[0], schema)
+        schema = client.schemas[0]
+        self.assertIn("task_interpretation", schema["required"])
+        self.assertEqual(schema["properties"]["queries"], SearchPlan.model_json_schema()["properties"]["queries"])
 
     def test_t_llm_3_malformed_json_repairs_exactly_once(self) -> None:
         client = FakePlanClient(['{"queries": [', json.dumps(valid_plan())])

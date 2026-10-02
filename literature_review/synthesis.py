@@ -41,7 +41,13 @@ from literature_review.models import (
     PaperSummaryClaim,
     ReportSection,
     SynthesisResponse,
+    TaskInterpretation,
 )
+from literature_review.query_policy import (
+    NOTES_TASK_GUIDANCE, TASK_DISAMBIGUATION_GUIDANCE, TASK_TRANSFER_GUIDANCE, task_context,
+)
+
+NOTES_PROMPT_POLICY_VERSION = "task-faithful-notes-v2"
 
 from langfuse import observe
 
@@ -425,7 +431,7 @@ def _generate_validated(client: JsonGenerationClient, model: type[_MODEL_T], pro
         prompt,
         schema,
         parse=lambda raw_output: _parse_llm_model(model, raw_output),
-        repair_prompt=_build_schema_repair_prompt,
+        repair_prompt=lambda raw, error: prompt + "\n" + _build_schema_repair_prompt(raw, error),
     )
 
 
@@ -620,8 +626,9 @@ def build_paper_notes_prompt(
     return (
         "Summarize this single paper using only the supplied evidence chunks. "
         "Do not use outside knowledge and do not invent claims. "
+        f"{NOTES_TASK_GUIDANCE}"
         "Choose each claim's 'aspect' as exactly one of these section titles: "
-        f"{json.dumps(section_titles)}. Cover every section with at least one claim. "
+        f"{json.dumps(section_titles)}. Cover every substantive research section with at least one claim. "
         "Never use a subsection name as the aspect, such as '1.1 Background'. "
         "If a chunk states limitations or future work, give its claims the matching section aspect. "
         f"Detected limitation cues: {json.dumps(limitation_ids)}. "
@@ -706,14 +713,15 @@ def summarize_paper_notes(
             alias.chunk_id: source.chunk_id
             for alias, source in zip(alias_chunks, batch)
         }
+        notes_prompt = build_paper_notes_prompt(paper_id, batch, paper_title=paper_title)
         note = _generate_validated(
             client, LlmPaperSummaryNote,
-            build_paper_notes_prompt(paper_id, batch, paper_title=paper_title),
+            notes_prompt,
             LlmPaperSummaryNote.model_json_schema(),
         )
         unknown_ids = _check_unknown_ids(note, alias_chunks)
         if unknown_ids:
-            repair = _build_chunk_repair_prompt(
+            repair = notes_prompt + "\n" + _build_chunk_repair_prompt(
                 json.dumps(note.model_dump()), unknown_ids, list(source_ids)
             )
             note = _parse_llm_model(
@@ -867,7 +875,10 @@ def _tag_claim_ids(
             )
 
 
-def build_outline_prompt(query: str, notes: list[dict], claim_counter_total: int) -> str:
+def build_outline_prompt(
+    query: str, notes: list[dict], claim_counter_total: int,
+    task_interpretation: TaskInterpretation | None = None,
+) -> str:
     """Ask the model for a thematic outline of the synthesis report (two-stage call 1).
 
     The outline call sees the query and every usable claim; it groups the claims
@@ -880,6 +891,8 @@ def build_outline_prompt(query: str, notes: list[dict], claim_counter_total: int
     return (
         "Plan a thematic outline for a literature-review synthesis report using only the "
         "supplied material. Do not use outside knowledge. "
+        f"{TASK_DISAMBIGUATION_GUIDANCE}{TASK_TRANSFER_GUIDANCE}"
+        f"{task_context(query, task_interpretation)}"
         "Group the supplied claims into 2-4 thematic sections (for example: background and "
         "scope, mechanisms and tools, bottlenecks and challenges); do not recite the papers "
         "one by one. "
@@ -893,7 +906,10 @@ def build_outline_prompt(query: str, notes: list[dict], claim_counter_total: int
     )
 
 
-def build_report_prompt(outline: LlmSynthesisOutline, notes: list[dict]) -> str:
+def build_report_prompt(
+    outline: LlmSynthesisOutline, notes: list[dict], *, query: str | None = None,
+    task_interpretation: TaskInterpretation | None = None,
+) -> str:
     """Ask the model for the report prose organized by the outline (two-stage call 2).
 
     The marker instructions mirror the legacy single-call prompt (C2c design B):
@@ -916,6 +932,8 @@ def build_report_prompt(outline: LlmSynthesisOutline, notes: list[dict]) -> str:
     return (
         "Write a fluent literature-review synthesis report using only the supplied material. "
         "Do not use outside knowledge and do not invent claims. "
+        f"{TASK_DISAMBIGUATION_GUIDANCE}{TASK_TRANSFER_GUIDANCE}"
+        f"{task_context(query, task_interpretation)}"
         "End every factual sentence with an inline [claim-N] marker copied exactly from the "
         "supplied claim identifiers. Never invent, guess, or modify claim ids. The material "
         "source list is assembled from local files programmatically, so do not include a "
@@ -928,7 +946,9 @@ def build_report_prompt(outline: LlmSynthesisOutline, notes: list[dict]) -> str:
     )
 
 
-def build_directions_prompt(query: str, notes: list[dict]) -> str:
+def build_directions_prompt(
+    query: str, notes: list[dict], task_interpretation: TaskInterpretation | None = None,
+) -> str:
     """Ask the model for future directions independently of the outline (two-stage call 3).
 
     The directions call receives only the query and the claims — never the outline
@@ -940,6 +960,8 @@ def build_directions_prompt(query: str, notes: list[dict]) -> str:
     return (
         "Propose future research directions using only the supplied material. Do not use "
         "outside knowledge and do not invent claims. "
+        f"{TASK_DISAMBIGUATION_GUIDANCE}{TASK_TRANSFER_GUIDANCE}"
+        f"{task_context(query, task_interpretation)}"
         "Derive 1-N future directions from the claims across all supplied papers: look for "
         "cross-paper convergence, unresolved gaps, and extensible avenues; do not limit "
         "yourself to the papers' stated limitations. Each direction is a forward-looking "
@@ -1021,6 +1043,7 @@ def _repair_outline_markers(
     outline: LlmSynthesisOutline,
     client: JsonGenerationClient,
     allowed_ids: set[str],
+    original_prompt: str = "",
 ) -> LlmSynthesisOutline:
     """Validate the outline's ``supporting_claim_ids``, repairing unknown ids once.
 
@@ -1041,7 +1064,7 @@ def _repair_outline_markers(
     repaired = _generate_validated(
         client,
         LlmSynthesisOutline,
-        _build_outline_repair_prompt(
+        original_prompt + "\n" + _build_outline_repair_prompt(
             json.dumps(outline.model_dump()), unknown_claims, sorted(allowed_ids)
         ),
         LlmSynthesisOutline.model_json_schema(),
@@ -1067,11 +1090,12 @@ def _outline_call(
     query: str,
     notes_dicts: list[dict[str, object]],
     claim_counter_total: int,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> LlmSynthesisOutline:
     return _generate_validated(
         client,
         LlmSynthesisOutline,
-        build_outline_prompt(query, notes_dicts, claim_counter_total),
+        build_outline_prompt(query, notes_dicts, claim_counter_total, task_interpretation),
         LlmSynthesisOutline.model_json_schema(),
     )
 
@@ -1081,17 +1105,20 @@ def _report_call(
     client: JsonGenerationClient,
     outline: LlmSynthesisOutline,
     notes_dicts: list[dict[str, object]],
+    query: str | None = None,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> LlmSynthesisReportBatch:
     return _generate_validated(
         client,
         LlmSynthesisReportBatch,
-        build_report_prompt(outline, notes_dicts),
+        build_report_prompt(outline, notes_dicts, query=query, task_interpretation=task_interpretation),
         LlmSynthesisReportBatch.model_json_schema(),
     )
 
 
 def build_section_report_prompt(
     query: str, outline: LlmSynthesisOutline, index: int, notes: list[dict],
+    task_interpretation: TaskInterpretation | None = None,
 ) -> str:
     section = outline.sections[index]
     allowed = set(section.supporting_claim_ids)
@@ -1103,6 +1130,8 @@ def build_section_report_prompt(
     structure = [{"title": item.title, "purpose": item.purpose} for item in outline.sections]
     return (
         "Write a fluent literature-review section using only the supplied claims. "
+        f"{TASK_DISAMBIGUATION_GUIDANCE}{TASK_TRANSFER_GUIDANCE}"
+        f"{task_context(query, task_interpretation)}"
         "Return exactly one JSON object with a report string of at least 100 characters. "
         "Write only this section's body; do not add Markdown headings, other sections, "
         "a report title, a materials list, or future directions. "
@@ -1120,10 +1149,11 @@ def build_section_report_prompt(
 def _section_report_call(
     client: JsonGenerationClient, query: str, outline: LlmSynthesisOutline,
     index: int, notes: list[dict],
+    task_interpretation: TaskInterpretation | None = None,
 ) -> ReportSection:
     section = outline.sections[index]
     allowed = set(section.supporting_claim_ids)
-    prompt = build_section_report_prompt(query, outline, index, notes)
+    prompt = build_section_report_prompt(query, outline, index, notes, task_interpretation)
     for attempt in range(2):
         try:
             raw = client.generate_json(prompt, LlmSynthesisReportBatch.model_json_schema())
@@ -1152,7 +1182,7 @@ def _section_report_call(
                     f"Report section {index + 1} ({section.title}) failed after one repair: {error}"
                 ) from error
             prompt = (
-                build_section_report_prompt(query, outline, index, notes)
+                build_section_report_prompt(query, outline, index, notes, task_interpretation)
                 + f"\nRepair the previous response. Error: {error}\nPrevious response: {raw}"
             )
     raise AssertionError("Unreachable section generation state")
@@ -1163,11 +1193,12 @@ def _directions_call(
     client: JsonGenerationClient,
     query: str,
     notes_dicts: list[dict[str, object]],
+    task_interpretation: TaskInterpretation | None = None,
 ) -> LlmSynthesisDirectionsBatch:
     return _generate_validated(
         client,
         LlmSynthesisDirectionsBatch,
-        build_directions_prompt(query, notes_dicts),
+        build_directions_prompt(query, notes_dicts, task_interpretation),
         LlmSynthesisDirectionsBatch.model_json_schema(),
     )
 
@@ -1181,6 +1212,7 @@ def synthesize_report(
     *,
     paper_assessments: list[PaperAssessment] | None = None,
     query: str | None = None,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> SynthesisResponse:
     """Produce a validated outline, sequential section bodies, and independent directions.
 
@@ -1211,10 +1243,13 @@ def synthesize_report(
     notes_dicts, claim_counter_total = _build_notes_payload(paper_summaries, usable_ids)
     claim_paper_map = _claim_paper_map(paper_summaries, usable_ids)
     query_text = query or ""
-    outline = _outline_call(client, query_text, notes_dicts, claim_counter_total)
-    outline = _repair_outline_markers(outline, client, set(claim_chunks))
+    outline = _outline_call(client, query_text, notes_dicts, claim_counter_total, task_interpretation)
+    outline = _repair_outline_markers(
+        outline, client, set(claim_chunks),
+        original_prompt=build_outline_prompt(query_text, notes_dicts, claim_counter_total, task_interpretation),
+    )
     report_sections = [
-        _section_report_call(client, query_text, outline, index, notes_dicts)
+        _section_report_call(client, query_text, outline, index, notes_dicts, task_interpretation)
         for index in range(len(outline.sections))
     ]
     report_title = " ".join(query_text.split()) or "Literature review"
@@ -1222,7 +1257,7 @@ def synthesize_report(
         f"## {' '.join(section.title.split())}\n\n{section.report}"
         for section in report_sections
     )
-    directions = _directions_call(client, query_text, notes_dicts)
+    directions = _directions_call(client, query_text, notes_dicts, task_interpretation)
     for direction in directions.future_directions:
         unknown_claims = sorted(set(direction.supporting_claim_ids) - set(claim_chunks))
         if unknown_claims:

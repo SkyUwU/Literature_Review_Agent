@@ -26,7 +26,11 @@ from literature_review.llm_evidence import (
     strip_code_fence,
 )
 from literature_review.models import RankedPaper
-from literature_review.query_policy import SHORT_QUERY_GUIDANCE, validate_short_query
+from literature_review.query_policy import (
+    SHORT_QUERY_GUIDANCE, TASK_DISAMBIGUATION_GUIDANCE, TASK_TRANSFER_GUIDANCE, task_context,
+    validate_short_query,
+)
+from literature_review.models import TaskInterpretation
 
 __all__ = [
     "FollowUpQuery",
@@ -357,6 +361,7 @@ def _format_candidate(doc_index: int, item: RankedPaper) -> str:
 def build_screening_prompt(
     query_candidates: dict[str, SampledCandidates],
     main_query: str | None = None,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> str:
     """Build the single-call screening prompt over every query's sampled candidates.
 
@@ -373,7 +378,12 @@ def build_screening_prompt(
     blocks: list[str] = [_ROLE_TEXT]
     if main_query:
         blocks.extend(["## Research topic", " ".join(main_query.split())])
-    blocks.extend(["## Rating guidance and principles", _GUIDANCE_TEXT])
+    blocks.extend([task_context(main_query, task_interpretation),
+                   "## Rating guidance and principles",
+                   TASK_DISAMBIGUATION_GUIDANCE + TASK_TRANSFER_GUIDANCE +
+                   "For each decision, compare the candidate task with the original idea. "
+                   "Explain direct support, concrete transfer with limits, or lexical-only overlap "
+                   "in reason. Lexical-only overlap is not a core-paper justification.\n" + _GUIDANCE_TEXT])
     blocks.extend(["## Candidate papers", _CANDIDATES_INTRO])
 
     counter = 0
@@ -410,6 +420,7 @@ def _build_screening_repair_prompt(
     error: BaseException,
     query_candidates: dict[str, SampledCandidates],
     main_query: str | None = None,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> str:
     """Ask the model to repair a screening output that cannot be resolved."""
     doc_map = _doc_id_map(query_candidates)
@@ -429,6 +440,8 @@ def _build_screening_repair_prompt(
         "Use only keep, maybe, or reject for priority; never high/medium/low.\n"
         f"{SHORT_QUERY_GUIDANCE}\n"
         f"Original research question: {main_query or '(not provided)'}\n"
+        f"{task_context(main_query, task_interpretation)}"
+        f"{TASK_TRANSFER_GUIDANCE}"
         "Follow-up queries must be objects with query, target_gap, and reason.\n"
         f"Previous output:\n{raw_output}"
     )
@@ -498,6 +511,7 @@ def screen_candidates(
     client: JsonGenerationClient,
     *,
     main_query: str | None = None,
+    task_interpretation: TaskInterpretation | None = None,
     parse: Callable[[str], ScreeningResult] | None = None,
 ) -> ScreeningResult:
     """Run one LLM screening + gap call over every query's sampled candidates.
@@ -520,9 +534,9 @@ def screen_candidates(
             screened_at=datetime.now(timezone.utc),
         )
     if isinstance(client, GroqJsonClient):
-        return _screen_candidates_groq_batches(query_candidates, client, main_query)
+        return _screen_candidates_groq_batches(query_candidates, client, main_query, task_interpretation)
 
-    prompt = build_screening_prompt(query_candidates, main_query)
+    prompt = build_screening_prompt(query_candidates, main_query, task_interpretation)
     schema = _LlmScreeningOutput.model_json_schema()
 
     def default_parse(raw_output: str) -> ScreeningResult:
@@ -532,7 +546,7 @@ def screen_candidates(
     parse_output = parse if parse is not None else default_parse
 
     def _repair(raw_output: str, error: BaseException) -> str:
-        return _build_screening_repair_prompt(raw_output, error, query_candidates, main_query)
+        return _build_screening_repair_prompt(raw_output, error, query_candidates, main_query, task_interpretation)
 
     return generate_validated(
         client,
@@ -548,6 +562,7 @@ def _screen_candidates_groq_batches(
     query_candidates: dict[str, SampledCandidates],
     client: JsonGenerationClient,
     main_query: str | None,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> ScreeningResult:
     """Screen bounded candidate batches, then globally combine their gap summaries."""
     batches: list[dict[str, SampledCandidates]] = []
@@ -566,7 +581,7 @@ def _screen_candidates_groq_batches(
             candidate = {key: SampledCandidates(papers=list(value.papers), buckets=dict(value.buckets))
                          for key, value in current.items()}
             add_candidate(candidate, query, item, bucket)
-            prompt = build_screening_prompt(candidate, main_query)
+            prompt = build_screening_prompt(candidate, main_query, task_interpretation)
             if (len(prompt) + 3) // 4 > GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS:
                 if not current:
                     raise ScreeningError(
@@ -575,7 +590,7 @@ def _screen_candidates_groq_batches(
                 batches.append(current)
                 current = {}
                 add_candidate(current, query, item, bucket)
-                if (len(build_screening_prompt(current, main_query)) + 3) // 4 > GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS:
+                if (len(build_screening_prompt(current, main_query, task_interpretation)) + 3) // 4 > GROQ_SCREENING_MAX_ESTIMATED_PROMPT_TOKENS:
                     raise ScreeningError(
                         f"Candidate {item.paper.paper_id} alone exceeds the Groq screening prompt budget."
                     )
@@ -594,7 +609,7 @@ def _screen_candidates_groq_batches(
             f"[screening] Groq batch={index}/{len(batches)} candidates={candidate_count}",
             file=sys.stderr,
         )
-        result = _screen_batch(batch, client, main_query)
+        result = _screen_batch(batch, client, main_query, task_interpretation)
         for query, decisions in result.decisions.items():
             merged_decisions.setdefault(query, []).extend(decisions)
         batch_summaries.append({
@@ -620,6 +635,8 @@ def _screen_candidates_groq_batches(
         f"{SHORT_QUERY_GUIDANCE}\n"
         "Each follow-up is an object with query, target_gap, and reason strings.\n"
         f"Research topic: {main_query or '(not provided)'}\n"
+        f"{task_context(main_query, task_interpretation)}"
+        f"{TASK_TRANSFER_GUIDANCE}"
         f"Initial search queries: {list(query_candidates)}\n"
         f"Queries with no candidates: {[q for q, s in query_candidates.items() if not s.papers]}\n"
         f"Batch summaries: {batch_summaries}"
@@ -634,6 +651,8 @@ def _screen_candidates_groq_batches(
             "and follow-up queries. Return JSON only.\n"
             f"{SHORT_QUERY_GUIDANCE}\n"
             f"Original research question: {main_query or '(not provided)'}\n"
+            f"{task_context(main_query, task_interpretation)}"
+            f"{TASK_TRANSFER_GUIDANCE}"
             f"Validation error: {error}\nPrevious response:\n{raw}"
         )
 
@@ -656,9 +675,10 @@ def _screen_batch(
     candidates: dict[str, SampledCandidates],
     client: JsonGenerationClient,
     main_query: str | None,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> ScreeningResult:
     """Resolve one batch with the standard schema and repair policy."""
-    prompt = build_screening_prompt(candidates, main_query)
+    prompt = build_screening_prompt(candidates, main_query, task_interpretation)
     schema = _LlmScreeningOutput.model_json_schema()
 
     def parse(raw: str) -> ScreeningResult:
@@ -667,7 +687,7 @@ def _screen_batch(
         )
 
     def repair(raw: str, error: BaseException) -> str:
-        return _build_screening_repair_prompt(raw, error, candidates, main_query)
+        return _build_screening_repair_prompt(raw, error, candidates, main_query, task_interpretation)
 
     return generate_validated(
         client,

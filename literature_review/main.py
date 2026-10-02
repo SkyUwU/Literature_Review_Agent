@@ -449,7 +449,10 @@ def run_end_to_end(
                 file=sys.stderr,
             )
         try:
-            screening_result = screen_candidates(query_candidates, client_screen, main_query=query)
+            screening_result = screen_candidates(
+                query_candidates, client_screen, main_query=query,
+                task_interpretation=plan.task_interpretation,
+            )
         except (DailyQuotaExhausted, LlmServiceError) as error:
             print(
                 f"Screening failed ({type(error).__name__}: {error}); stopping the run "
@@ -490,7 +493,8 @@ def run_end_to_end(
                     )
                 try:
                     follow_up_screening = screen_candidates(
-                        follow_up_candidates, client_screen, main_query=query
+                        follow_up_candidates, client_screen, main_query=query,
+                        task_interpretation=plan.task_interpretation,
                     )
                 except (DailyQuotaExhausted, LlmServiceError) as error:
                     print(
@@ -653,6 +657,7 @@ def run_end_to_end(
             encoder=effective_encoder,
             notes_checkpoint_dir=notes_checkpoint_dir,
             diagnostics=diagnostics,
+            task_interpretation=plan.task_interpretation,
         )
     except Exception as error:
         diagnostics.fail(error)
@@ -716,6 +721,11 @@ def _make_papers_output(
         run={
             "query": query,
             "planned_queries": [planned.query for planned in plan.queries],
+            "search_plan": plan.model_dump(mode="json"),
+            "task_interpretation": (
+                plan.task_interpretation.model_dump(mode="json")
+                if plan.task_interpretation is not None else None
+            ),
             "follow_ups": follow_ups,
             "stats_per_query": stats_per_query,
             "failed_extractions": failed_extractions,

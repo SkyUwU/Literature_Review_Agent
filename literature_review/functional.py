@@ -40,6 +40,10 @@ from literature_review.section_stats import (
     is_abstract_chunk,
     is_appendix_chunk,
 )
+from literature_review.models import TaskInterpretation
+from literature_review.query_policy import (
+    TASK_DISAMBIGUATION_GUIDANCE, TASK_TRANSFER_GUIDANCE, task_context,
+)
 
 FUNCTIONAL_BATCH_SIZE = 4
 
@@ -56,6 +60,7 @@ def build_functional_prompt(
     query: str,
     chunks: list[EvidenceChunk],
     paper_titles: dict[str, str] | None = None,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> str:
     """Ask the model for per-chunk utility scores without exposing provenance.
 
@@ -77,6 +82,12 @@ def build_functional_prompt(
         )
     return (
         "Score each supplied evidence chunk only by its utility for the research idea described by the query. "
+        f"{TASK_DISAMBIGUATION_GUIDANCE}{TASK_TRANSFER_GUIDANCE}"
+        f"{task_context(query, task_interpretation)}"
+        "The original research idea is the primary scoring criterion. First compare the "
+        "evidence task, object, and output with that idea. Shared vocabulary alone is not "
+        "direct support. A high score for transfer requires a concrete mechanism, its "
+        "applicable stage, and limitations in the rationale, not an assumed task equivalence. "
         "Do not use outside knowledge and do not invent claims. Return exactly one JSON object, "
         "without Markdown code fences or any surrounding explanation. "
         "The object must contain an 'assessments' array. Each item must include chunk_id "
@@ -155,6 +166,7 @@ def score_chunks_functionally(
     batch_size: int = FUNCTIONAL_BATCH_SIZE,
     paper_titles: dict[str, str] | None = None,
     on_batch: Callable[[list[LlmFunctionalAssessment]], None] | None = None,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> list[LlmFunctionalAssessment]:
     """Score each chunk's utility to the research idea, one bounded batch at a time.
 
@@ -172,8 +184,11 @@ def score_chunks_functionally(
         index_map = {
             str(index): chunk_id for index, chunk_id in enumerate(batch_ids, start=1)
         }
+        original_prompt = build_functional_prompt(
+            query, batch_chunks, paper_titles=paper_titles, task_interpretation=task_interpretation
+        )
         raw_output = client.generate_json(
-            build_functional_prompt(query, batch_chunks, paper_titles=paper_titles),
+            original_prompt,
             schema,
         )
         try:
@@ -185,7 +200,7 @@ def score_chunks_functionally(
             # the model can complete the batch (M5b index-drift lesson).
             generated = validate_functional_assessments(
                 client.generate_json(
-                    build_json_repair_prompt(
+                    original_prompt + "\n" + build_json_repair_prompt(
                         raw_output, expected_chunk_ids=list(index_map)
                     ),
                     schema,
@@ -199,7 +214,7 @@ def score_chunks_functionally(
         if not complete:
             generated = validate_functional_assessments(
                 client.generate_json(
-                    build_json_repair_prompt(
+                    original_prompt + "\n" + build_json_repair_prompt(
                         raw_output, expected_chunk_ids=list(index_map)
                     ),
                     schema,
@@ -429,6 +444,9 @@ def aggregate_functional(
             utility_score=combined,
             n_samples=len(paper_assessments),
             evidence=evidence,
+            max_score=max_score,
+            mean_score=mean_score,
+            max_weight=max_weight,
         )
     return scores
 
@@ -447,7 +465,7 @@ def select_quota_threshold(
 
     Papers are grouped by the query that downloaded them. Inside each group the
     top ``n_first_round`` (or ``n_follow_up`` for follow-up queries) papers by
-    utility score are the quota; among them only papers with a mean
+    utility score are the quota; among them only papers with an aggregated
     utility_score >= *threshold* are included. Papers that were never scored —
     blacklisted to zero chunks — are recorded here as excluded with their
     reason, so the returned list covers every downloaded paper exactly once.
@@ -468,7 +486,8 @@ def select_quota_threshold(
         for rank, score in enumerate(group, start=1):
             included = rank <= quota and score.utility_score >= threshold
             rationale = (
-                f"Mean functional utility {score.utility_score:.1f} over "
+                f"Aggregated functional utility {score.utility_score:.1f} "
+                f"(max={score.max_score}, mean={score.mean_score}, max_weight={score.max_weight}) over "
                 f"{score.n_samples} sampled chunk(s) from query {query!r} "
                 + ("meets the threshold within quota." if included else "misses the quota/threshold bar.")
             )

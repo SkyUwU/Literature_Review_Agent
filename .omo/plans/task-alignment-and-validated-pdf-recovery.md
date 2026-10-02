@@ -1,6 +1,8 @@
 # 任務一致性與有效 PDF 取得：里程碑計畫
 
-日期：2026-10-02。狀態：規劃與主代理自審完成；未實作、未執行真實 API。
+日期：2026-10-02。2026-10-03 更新：使用者授權的 M1 已完成實作與離線自審；M2／M3 尚未實作，未執行真實 API。
+
+M1 驗收：335 focused tests 中 332 通過，3 個既有契約衝突保留；最後 schema 順序調整後 169 個受影響 tests 全通過。新增 M1 12 tests 覆蓋單次生成／一次 repair、舊 JSON、跨領域 context、Groq batching/gap repair、notes 原任務、scoring/report repairs、公式、正式入口傳遞與 checkpoint 政策。細節及自審見 `.omo/evidence/m1-task-alignment.md`。本計畫只把已授權 M1 記為完成，並未授權下一里程碑。
 
 ## 目標與依據
 

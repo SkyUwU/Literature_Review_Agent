@@ -1,4 +1,11 @@
-# 專案狀態（盤點日期：2026-10-02）
+# 專案狀態（盤點日期：2026-10-03）
+
+## 2026-10-03：M1 任務理解與跨階段歧義處理（最新）
+
+- 使用者授權只實作 `.omo/plans/task-alignment-and-validated-pdf-recovery.md` 的 M1，已完成並由主代理自審。新增同次 planning 的 TaskInterpretation、跨領域歧義對照例、允許任務錨點重複，以及 screening/scoring/report/directions 與 repair 的原文／摘要傳遞。papers.run 保存完整 validated plan；舊資料及 library optional 介面可讀。
+- Notes 不接收 idea，只忠實保留原論文任務與排除 boilerplate；notes prompt policy version 更新，舊 manifest 不再沿用（保留原檔）。聚合公式、quota、threshold 不變，輸出改為 Aggregated 並列分項。M2 embedding、M3 PDF/HTML/Unpaywall、quote/頁碼未實作。
+- 離線回歸 335 tests：332 通過、3 個既有失敗（screening 429/503 tests 期待降級、model defaults 期待 batch size 8 而 HEAD 為 4）。前兩者另以 HEAD 原始 main.py 重現；defaults 以 HEAD source 核對。最後 schema 順序及格式整理後，受影響的 169 tests 全通過，含新增 M1 12 tests。未執行完整 suite 或真實 API，不能據此宣稱 review 歧義已經真實模型驗證解決。
+- 證據：`.omo/evidence/m1-task-alignment.md`、`m1-offline-tests-final.log`、`m1-final-affected-tests.log`、`m1-baseline-failures.log`。測試封鎖 network/child processes/專案 .env，使用暫存 cwd、fake clients/encoders；既有 data/ 與 Summer_Project.pdf 未修改。git diff --check 與 tracked key-pattern scan 通過。未由代理提交。
 
 ## 新對話接續摘要（2026-10-02，優先閱讀）
 

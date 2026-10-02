@@ -8,8 +8,16 @@ from literature_review.llm_evidence import (
     generate_validated,
     strip_code_fence,
 )
-from literature_review.models import PlannedQuery, SearchPlan
-from literature_review.query_policy import SHORT_QUERY_GUIDANCE, validate_short_query
+from literature_review.models import PlannedQuery, SearchPlan, TaskInterpretation
+from literature_review.query_policy import (
+    SHORT_QUERY_GUIDANCE, TASK_INTERPRETATION_GUIDANCE, validate_short_query,
+)
+
+
+class _LlmSearchPlan(SearchPlan):
+    """New generations require interpretation; saved legacy plans remain readable."""
+
+    task_interpretation: TaskInterpretation
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +107,7 @@ def build_llm_plan_prompt(query: str) -> str:
         "You are a scholarly search planner. Given one researcher query, produce a "
         "structured search plan as exactly one JSON object matching the provided schema.\n\n"
         f"Researcher query: {query}\n\n"
+        f"{TASK_INTERPRETATION_GUIDANCE}\n"
         "Query design rules:\n"
         f"- {SHORT_QUERY_GUIDANCE}\n"
         "- First decompose the idea into 3 complementary research dimensions: "
@@ -115,12 +124,13 @@ def build_llm_plan_prompt(query: str) -> str:
         "cover distinct angles of the idea rather than recombining the same words.\n"
         "- Each sub-query must target a distinct facet of the researcher query; avoid "
         "near-duplicate queries that only rephrase the same angle.\n"
-        "- Vary the wording across sub-queries from the same dimension: do not reuse "
-        "the same head terms; prefer synonyms, hyponyms, and alternative phrasings so "
+        "- Keep task anchors even when they repeat. Vary method and evaluation terms; "
+        "prefer unambiguous synonyms, hyponyms, and alternative phrasings so "
         "a literal search engine retrieves different papers for each facet.\n"
         "- Stay on-topic: every sub-query must remain a reasonable sub-facet of the "
         "original researcher query, not a tangential topic.\n\n"
         "Return a JSON object with these fields only:\n"
+        '- "task_interpretation": task, research_object, expected_output, and scope_boundaries;\n'
         '- "queries": exactly 3 to 4 items, each with a "query" string (at least 3 '
         'characters) and a "purpose" string (at least 10 characters explaining the '
         "information need that query covers);\n"
@@ -146,7 +156,7 @@ def _format_plan_error(error: BaseException) -> str:
 def _parse_plan(raw_output: str) -> SearchPlan:
     """Validate one candidate plan object, raising PlanningError on failure."""
     try:
-        plan = SearchPlan.model_validate_json(strip_code_fence(raw_output))
+        plan = _LlmSearchPlan.model_validate_json(strip_code_fence(raw_output))
         for planned in plan.queries:
             planned.query = validate_short_query(planned.query)
         return plan
@@ -161,6 +171,7 @@ def _build_plan_repair_prompt(raw_output: str, error: BaseException, query: str 
         "exactly one JSON object matching the schema, without Markdown or explanation. "
         f"Validation error: {_format_plan_error(error)}\n"
         f"{SHORT_QUERY_GUIDANCE}\n"
+        f"{TASK_INTERPRETATION_GUIDANCE}\n"
         f"Original research question: {query or '(not provided)'}\n"
         f"Previous response:\n{raw_output}"
     )
@@ -175,6 +186,7 @@ def _build_overlap_repair_prompt(queries: list[str], query: str) -> str:
         "query and uses different keywords, synonyms, or alternative phrasings, "
         "while staying on topic.\n"
         f"{SHORT_QUERY_GUIDANCE}\n"
+        f"{TASK_INTERPRETATION_GUIDANCE}\n"
         f"Researcher query: {query}\n"
         f"Previous queries:\n{query_list}\n"
         "Return exactly one JSON object matching the schema, without Markdown or "
@@ -223,16 +235,24 @@ def create_llm_plan(
     degrades to the rule-based fallback for this reason.
     """
     prompt = build_llm_plan_prompt(query)
-    schema = SearchPlan.model_json_schema()
+    schema = _LlmSearchPlan.model_json_schema()
+    # Provider schema follows the requested generation order; the trusted input
+    # is assigned locally rather than asking the model to reproduce an idea field.
+    properties = schema["properties"]
+    schema["properties"] = {
+        name: properties[name]
+        for name in ("task_interpretation", "queries", "perspectives", "rationale", "generated_by")
+    }
+    schema.get("$defs", {}).pop("ResearchIdea", None)
     budgeted = _BudgetedClient(client, 2)
 
     def _normalized_plan(plan: SearchPlan) -> SearchPlan:
-        return plan.model_copy(update={"generated_by": "llm", "idea": query})
+        return SearchPlan.model_validate({**plan.model_dump(), "generated_by": "llm", "idea": query})
 
     first = _normalized_plan(
         generate_validated(
             budgeted,
-            SearchPlan,
+            _LlmSearchPlan,
             prompt,
             schema,
             parse=_parse_plan,
@@ -250,7 +270,7 @@ def create_llm_plan(
         repaired = _normalized_plan(
             generate_validated(
                 budgeted,
-                SearchPlan,
+                _LlmSearchPlan,
                 _build_overlap_repair_prompt([item.query for item in first.queries], query),
                 schema,
                 parse=_parse_plan,

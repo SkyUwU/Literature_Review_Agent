@@ -38,7 +38,10 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 
 ## 目前已知研究與操作政策
 
-- 初始規劃、screening 補蒐與 repair 共用通用任務錨定／歧義消解提示：每個 query 保留原始核心任務、研究對象或領域（允許明確同義詞），不可因詞義相近而換成其他任務。跨領域例子僅供說明，不是必用關鍵字。Repair 保留原始研究問題，既有 2–4 words 驗證與一次 repair 預算維持。語義約束目前為 prompt guidance，未加入硬式語義判定、分頁或零命中自動改寫。
+- LLM planner 在同一次回應先輸出 `task_interpretation`（task、research_object、expected_output、scope_boundaries），再輸出 queries；新生成缺摘要沿用既有一次 repair，舊 SearchPlan JSON 仍可讀。原始 query 由程式保存且為最高判準，摘要不取代原文；未指定資訊使用 unspecified／空邊界。Rule-based dry run 不產生模型解讀。
+- Planning／screening 初始及補蒐／functional scoring／outline、report、directions 共用通用歧義例子（idea → 模糊 query → 明確 query → 原因），明示非固定領域或黑名單。允許任務錨點重複，方法與評估維持多樣性；screening/scoring 需辨認直接支持、具體可轉用機制與詞彙相似，report/directions 區分原任務發現與仍需驗證的轉用建議。摘要以 optional context 傳遞，repair 保留原始要求；papers.run 保存完整 search_plan 及 task_interpretation。2–4 words、呼叫 repair 預算與品質門檻維持；語義約束仍是 prompt guidance，不代表真實語義品質已驗證。
+- Notes 不接收原始 idea 或摘要，保留論文本身的任務、研究對象、條件與限制，忽略網站／書目 boilerplate。Checkpoint manifest 新增 `notes_prompt_policy=task-faithful-notes-v2`；舊 manifest 缺此欄位會拒絕沿用，保留原檔並以新 run 重新生成。只有 planning/report context 改變不另使 notes 失效。
+- Functional 聚合仍為 `0.7 * max + 0.3 * mean`，輸出改稱 Aggregated functional utility，理由列 max、mean、max_weight、sample count；threshold/quota 不變。Scoring LLM 使用原始 idea，不提供來源子查詢；正式 chunk embedding 取樣目前優先使用來源 sub-query，缺少才 fallback 原始 query。雙 query embedding 與 PDF／HTML 補救是後續 M2／M3，尚未實作。
 
 - 發表位置與 PDF host 分開：`Paper.publication_venues` 保存 provider、metadata path、source ID/type/link；`pdf_host` 僅為配置的 PDF URL hostname（不代表 redirect 最終 host）。`venue_verification=provider_reported` 表示 provider metadata，不能解讀為正式論文集／OpenReview 接收查證；找不到發表來源時為 `unconfirmed`。
 - SS 額外讀取 `publicationVenue`（缺漏時相容舊 `venue`）。OpenAlex 檢查 primary、全部 locations 與 best-OA 的非 repository／非 submittedVersion 來源；本地 whitelist 比對所有記錄的發表來源，PDF 在 arXiv 不構成排除條件，只有 arXiv 則不能推定頂會。Legacy `venue` 欄位保留供舊路徑使用。尚未加入官方 proceedings／OpenReview 補查或 Student Abstract track 排除政策。

@@ -39,6 +39,7 @@ from literature_review.models import (
     FunctionalScoringPolicy,
     PaperSummary,
     SynthesisResponse,
+    TaskInterpretation,
 )
 from literature_review.section_stats import (
     _CANONICAL_CATEGORIES,
@@ -51,6 +52,7 @@ from literature_review.synthesis import (
     build_coverage_packs,
     summarize_paper_notes,
     synthesize_report,
+    NOTES_PROMPT_POLICY_VERSION,
 )
 
 
@@ -215,6 +217,7 @@ def run_synthesis_pipeline(
     print_section_distribution: bool = True,
     notes_checkpoint_dir: Path | None = None,
     diagnostics: RunDiagnosticsCollector | None = None,
+    task_interpretation: TaskInterpretation | None = None,
 ) -> SynthesisResponse:
     """Run section-aware chunking, per-paper functional scoring, notes, and cited synthesis.
 
@@ -295,6 +298,7 @@ def run_synthesis_pipeline(
         batch_size=effective_functional_policy.batch_size,
         paper_titles=paper_titles,
         on_batch=record_scoring_batch if diagnostics is not None else None,
+        task_interpretation=task_interpretation,
     )
     functional_scores = aggregate_functional(
         functional_assessments,
@@ -352,6 +356,7 @@ def run_synthesis_pipeline(
                                    notes_status="no_usable_chunks", reason_codes=["no_usable_chunks"],
                                    reason="Selected paper has no usable notes chunks.")
     manifest = {
+        "notes_prompt_policy": NOTES_PROMPT_POLICY_VERSION,
         "query": query,
         "usable_paper_ids": sorted(usable_ids),
         "client": type(client).__name__,
@@ -381,7 +386,7 @@ def run_synthesis_pipeline(
             if saved_manifest != manifest:
                 raise NotesCheckpointError(
                     "Notes checkpoint does not match this query, selected papers, source text, "
-                    "provider, or coverage policy."
+                    "provider, coverage policy, or notes prompt policy."
                 )
         else:
             _atomic_json_write(manifest_path, manifest)
@@ -472,7 +477,8 @@ def run_synthesis_pipeline(
         for summary in paper_summaries:
             diagnostics.update(summary.paper_id, stage="synthesis", status="completed")
     result = synthesize_report(
-        None, coverage_packs, paper_summaries, client_report or client, paper_assessments=assessments, query=query
+        None, coverage_packs, paper_summaries, client_report or client,
+        paper_assessments=assessments, query=query, task_interpretation=task_interpretation,
     )
     source_paths = {document.paper_id: document.source_path for document, _ in prepared}
     paper_id_to_claims: dict[str, list[str]] = {}
