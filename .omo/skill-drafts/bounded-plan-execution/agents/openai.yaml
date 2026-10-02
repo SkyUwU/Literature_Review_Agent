@@ -1,0 +1,4 @@
+interface:
+  display_name: "依計畫執行與驗收"
+  short_description: "依已授權計畫完成修改、隔離必要測試，並交付明確驗收結果"
+  default_prompt: "使用 $bounded-plan-execution 依已授權的計畫完成修改與必要驗收。"

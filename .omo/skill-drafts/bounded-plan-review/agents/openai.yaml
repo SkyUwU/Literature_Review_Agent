@@ -1,0 +1,4 @@
+interface:
+  display_name: "計畫撰寫與審核"
+  short_description: "撰寫符合需求的實作計畫，核對範圍、設計、風險與驗收方式"
+  default_prompt: "使用 $bounded-plan-review 撰寫並自審本次需求的實作計畫，列出仍需釐清的問題。"
