@@ -1,6 +1,12 @@
 # 專案狀態（盤點日期：2026-10-03）
 
-## 2026-10-03：舊測試契約更新與操作文件整理（最新）
+## 2026-10-03：後續概要澄清與規劃 skill 修訂（最新）
+
+- 修訂 `.omo/plans/source-recovery-query-and-report-roadmap.md` 的 R3：依研究問題／主題整合多篇證據，不指定單篇主軸；單篇證據不等於領域共識，角色需辨識同篇混合用途及抽樣限制。R1/R2/R3 仍是概要，尚未授權實作。
+- 修訂 `.omo/skill-drafts/bounded-plan-review/SKILL.md`，加入按風險檢查代理指標、組織單位、角色／證據邊界、補救位置、下游傳遞與對照情境；保持通用，不固定套用文獻領域規則。
+- 本輪只修改規劃文件與 skill；不改正式程式、既有輸出或執行真實 API。已同步全域 skill、SHA256 與來源副本一致；官方 quick_validate 以 Python UTF-8 模式通過（Windows 預設 cp950 首次讀檔失敗，未改 validator）。git diff --check 通過；自審對照單篇資料量主導、同篇混合用途、換来源不等於新候選，未做獨立代理行為測試。
+
+## 2026-10-03：舊測試契約更新與操作文件整理
 
 - 已依本輪授權更新四個舊測試，不改正式程式／品質政策：screening 429/503 中止且不下載未篩選候選；Gemini 503 首次加三次重試（15/30/60 秒，fake clock）；functional batch_size 預設 4。
 - 新增 Git 可追蹤的 `tests/run_offline.py`：清除 provider 設定、封鎖 network／child process／workspace .env、暫存 cwd 與既有 data/ 寫入保護。Pairwise CLI 只注入短假 key；Windows cleanup 先還原 cwd。
