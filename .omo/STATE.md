@@ -2,7 +2,7 @@
 
 ## 2026-10-03：後續概要澄清與規劃 skill 修訂（最新）
 
-- 修訂 `.omo/plans/source-recovery-query-and-report-roadmap.md` 的 R3：依研究問題／主題整合多篇證據，不指定單篇主軸；單篇證據不等於領域共識，角色需辨識同篇混合用途及抽樣限制。R1/R2/R3 仍是概要，尚未授權實作。
+- 修訂 `.omo/plans/source-recovery-query-and-report-roadmap.md` 的 R3：依研究問題／主題整合多篇證據，不指定單篇主軸；單篇證據不等於領域共識，角色需辨識同篇混合用途及抽樣限制。最新偏好：涵蓋狀況主要供 LLM 生成背景及結構化診斷，正文盡量完整有用，不固定宣告證據不足；結論範圍及重要限制仍忠實證據。已補新對話接續方式；R1/R2/R3 仍是概要，尚未授權實作。
 - 修訂 `.omo/skill-drafts/bounded-plan-review/SKILL.md`，加入按風險檢查代理指標、組織單位、角色／證據邊界、補救位置、下游傳遞與對照情境；保持通用，不固定套用文獻領域規則。
 - 本輪只修改規劃文件與 skill；不改正式程式、既有輸出或執行真實 API。已同步全域 skill、SHA256 與來源副本一致；官方 quick_validate 以 Python UTF-8 模式通過（Windows 預設 cp950 首次讀檔失敗，未改 validator）。git diff --check 通過；自審對照單篇資料量主導、同篇混合用途、換来源不等於新候選，未做獨立代理行為測試。
 
