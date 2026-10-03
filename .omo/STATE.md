@@ -1,5 +1,13 @@
 # 專案狀態（盤點日期：2026-10-03）
 
+
+## 2026-10-03：M3 有效 PDF 與 OA 補救（最新）
+
+- 依本輪授權只完成 M3，主代理自審；M1/M2 不重做。新增結構化 fetch metadata、25 MiB raw/gzip 上限、30 秒／五 redirects、有界 HTML/ACL/AAAI PDF link 與 DOI/Unpaywall recovery；僅 screening keep/maybe 啟用。UNPAYWALL_EMAIL 本機設定，缺 DOI/email 明示 skipped；DOI cache 每 run lookup 一次，每篇三個額外文獻 URL，不遞迴。
+- 所有下載需 %PDF-／PyMuPDF 可開啟且至少一頁／身分 confirmed 才 atomic write 及進全文；mismatch/unconfirmed 都拒絕。保留 OA location version/host/license/source，provider OA URL 與實際 final URL 分列，URL 移除 secrets，venue 政策不變。
+- PapersOutput 新增 optional download_attempts，獨立保存失敗候選與逐次下載 snapshot；library 仍 opt-in persistence，dry run 無新補救請求。成功／recovered／HTTP attempts／shortfall 分列；失敗不再算成功 duplicate，run 內失敗去重避免跨 query 重試 URL budget。
+- 新增 36 M3 tests。完整隔離 suite 621 tests：617 通過、四個既有契約失敗（screening 429/503 兩項、Gemini 503 fake script、batch_size=8 預期而 HEAD=4）；未排除 tests。最後細節修正後 70 直接受影響 tests 全通過。git diff --check／key-pattern scan 通過。測試封鎖 network／child processes／workspace .env，暫存 cwd，最後 runner 禁止既有 data/ 寫入；未執行真實 API、未修改既有輸出、未提交。
+- 證據：`.omo/evidence/m3-validated-pdf-recovery.md`、`m3-full-suite-final.log`、`m3-final-affected.log`、`run_m3_offline.py`。真實取得率／Unpaywall smoke／LLM 品質未驗證；完整 suite 未全通過。下方「M3 未實作」為歷史快照。
 ## 2026-10-03：M2 原始任務與子查詢共同 embedding（最新）
 
 - 依使用者授權只完成 M2，由主代理自審；M1 不重做，M3 未實作。候選 ranking 與正式 scoring/notes chunk sampling 使用 idea/source query 雙相似度，預設 idea_weight=0.5，可由 library 設定 0–1。Run 內快取 query/title+abstract vectors；既有章節政策、2/9 上限、citation/recency、functional 聚合、threshold/quota 不變。

@@ -12,34 +12,12 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
-from literature_review.models import Paper, RankedPaper
+from literature_review.models import Paper, RankedPaper, DownloadAttempt
 
-USER_AGENT = "LiteratureReviewAgent/0.1 (academic; contact: local)"
-
-Fetcher = Callable[[str], bytes]
-
-
-class PdfDownloadError(RuntimeError):
-    """Raised when a PDF cannot be downloaded (network/HTTP failure)."""
-
-
-class NoOpenAccessError(RuntimeError):
-    """Raised when a paper has no open-access PDF URL to download."""
-
-
-def default_fetcher(url: str) -> bytes:
-    """Fetch the PDF bytes over HTTPS with a timeout and a user agent."""
-    try:
-        request = Request(url, headers={"User-Agent": USER_AGENT})
-        with urlopen(request, timeout=30) as response:
-            return response.read()
-    except HTTPError as error:
-        raise PdfDownloadError(f"HTTP {error.code} while downloading {url}") from error
-    except URLError as error:
-        raise PdfDownloadError(f"Network error downloading {url}: {error.reason}") from error
+from literature_review.pdf_fetch import (
+    FetchResult, Fetcher, NoOpenAccessError, PdfDownloadError, default_fetcher, recover_pdf,
+)
 
 
 def _safe_filename(paper: Paper) -> str:
@@ -77,16 +55,7 @@ def download_pdf(
     Raises ``NoOpenAccessError`` when the paper carries no OA URL and
     ``PdfDownloadError`` on network/HTTP failure. The caller decides ``dest_dir``.
     """
-    if paper.open_access_pdf_url is None:
-        raise NoOpenAccessError(f"Paper {paper.paper_id} has no open-access PDF URL.")
-    dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    destination = dest_dir / _safe_filename(paper)
-    content = fetcher(str(paper.open_access_pdf_url))
-    if not content:
-        raise PdfDownloadError(f"Empty content for {paper.open_access_pdf_url}")
-    destination.write_bytes(content)
-    return destination
+    return recover_pdf(paper, Path(dest_dir) / _safe_filename(paper), fetcher=fetcher)
 
 
 @dataclass
@@ -103,6 +72,8 @@ class DownloadStats:
     failed_other: int = 0
     duplicate_reused: int = 0
     shortfall: int = 0
+    http_attempts: int = 0
+    recovered: int = 0
 
     @property
     def oa_ratio_candidates(self) -> float:
@@ -120,6 +91,8 @@ class DownloadStats:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "http_attempts": self.http_attempts,
+            "recovered": self.recovered,
             "requested": self.requested,
             "candidates_available": self.candidates_available,
             "with_oa_link": self.with_oa_link,
@@ -143,6 +116,7 @@ class DownloadResult:
     downloaded_paper_ids: list[str] = field(default_factory=list)
     failed_paper_ids: list[str] = field(default_factory=list)
     stats: DownloadStats = field(default_factory=DownloadStats)
+    download_attempts: list[DownloadAttempt] = field(default_factory=list)
 
 
 def download_and_backfill(
@@ -154,13 +128,21 @@ def download_and_backfill(
     stats_path: Path | None = None,
     already_downloaded: set[str] | None = None,
     priority_groups: dict[str, list[RankedPaper]] | None = None,
+    allow_recovery: bool = False,
+    unpaywall_email: str | None = None,
+    doi_cache: dict | None = None,
+    on_attempt: Callable[[DownloadAttempt], None] | None = None,
+    on_progress: Callable[[DownloadResult], None] | None = None,
+    already_attempted: set[str] | None = None,
 ) -> DownloadResult:
     """Try to download the top ``target_n`` ranked papers, backfilling failures.
 
     Failed papers (no OA link or network error) are replaced by the next ranked
     candidates until ``target_n`` is reached or the candidate list is exhausted.
-    ``attempted`` counts only papers that actually carry an OA link and were tried;
-    papers without an OA link are counted separately as ``failed_no_oa``.
+    ``attempted`` counts candidate papers tried (on the legacy path, only those
+    with an OA link); ``http_attempts`` counts actual transport calls including
+    Unpaywall lookups, excluding cached lookups. Redirects are within a fetch.
+    ``downloaded`` counts only parser-valid, identity-confirmed PDFs.
     When ``already_downloaded`` is given, papers whose id is already in that set
     count as satisfied (``duplicate_reused``) without writing a new file and
     without triggering a backfill; successfully downloaded ids are added back.
@@ -173,34 +155,64 @@ def download_and_backfill(
     ``target_n`` (rank order within the small filler group). The plain
     ``ranked_papers`` path keeps the original top-N backfill behaviour untouched.
     """
+    doi_cache = doi_cache if doi_cache is not None else {}
+    already_attempted = already_attempted if already_attempted is not None else set()
     result = DownloadResult()
     stats = result.stats
     stats.requested = target_n
+
+    def record(attempt: DownloadAttempt) -> None:
+        result.download_attempts.append(attempt)
+        if attempt.http_requested:
+            stats.http_attempts += 1
+        if on_attempt:
+            on_attempt(attempt)
 
     def _attempt(ranked: RankedPaper) -> None:
         key = dedup_key(ranked.paper)
         if already_downloaded is not None and key in already_downloaded:
             stats.duplicate_reused += 1
+            already_attempted.add(key)
+            record(DownloadAttempt(paper_id=ranked.paper.paper_id, source="dedup",
+                                   stage="complete", reason_code="duplicate_reused"))
             return
-        if ranked.paper.open_access_pdf_url is None:
+        if key in already_attempted:
+            record(DownloadAttempt(paper_id=ranked.paper.paper_id, source="dedup",
+                                   stage="complete", reason_code="previous_attempt"))
+            return
+        already_attempted.add(key)
+        if ranked.paper.open_access_pdf_url is not None or allow_recovery:
+            stats.attempted += 1
+
+        start = len(result.download_attempts)
+        try:
+            path = recover_pdf(
+                ranked.paper, Path(dest_dir) / _safe_filename(ranked.paper), fetcher=fetcher,
+                allow_recovery=allow_recovery, unpaywall_email=unpaywall_email,
+                doi_cache=doi_cache, on_attempt=record,
+            )
+        except NoOpenAccessError:
             result.failed_paper_ids.append(ranked.paper.paper_id)
             stats.failed_no_oa += 1
-        else:
-            stats.attempted += 1
-            try:
-                path = download_pdf(ranked.paper, dest_dir, fetcher=fetcher)
-            except PdfDownloadError:
-                result.failed_paper_ids.append(ranked.paper.paper_id)
+        except PdfDownloadError:
+            result.failed_paper_ids.append(ranked.paper.paper_id)
+            reasons = {a.reason_code for a in result.download_attempts[start:]}
+            if "no_oa_url" in reasons:
+                stats.failed_no_oa += 1
+            elif reasons & {"network_error", "timeout", "http_error"}:
                 stats.failed_network += 1
-            except Exception:
-                result.failed_paper_ids.append(ranked.paper.paper_id)
-                stats.failed_other += 1
             else:
-                result.downloaded_paths.append(path)
-                result.downloaded_paper_ids.append(ranked.paper.paper_id)
-                stats.downloaded += 1
-        if already_downloaded is not None:
-            already_downloaded.add(key)
+                stats.failed_other += 1
+        else:
+            result.downloaded_paths.append(path)
+            result.downloaded_paper_ids.append(ranked.paper.paper_id)
+            stats.downloaded += 1
+            stats.recovered += int(result.download_attempts[-1].recovered)
+            if already_downloaded is not None:
+                already_downloaded.add(key)
+        stats.shortfall = max(0, target_n - stats.downloaded - stats.duplicate_reused)
+        if on_progress:
+            on_progress(result)
 
     if priority_groups is None:
         stats.candidates_available = len(ranked_papers)
@@ -225,6 +237,11 @@ def download_and_backfill(
             if stats.downloaded + stats.duplicate_reused >= target_n:
                 break
             _attempt(ranked)
+        for ranked in maybe_papers:
+            if dedup_key(ranked.paper) not in already_attempted:
+                attempt = DownloadAttempt(paper_id=ranked.paper.paper_id, source="selection",
+                                          stage="complete", reason_code="target_satisfied")
+                record(attempt)
 
     stats.shortfall = max(0, target_n - stats.downloaded - stats.duplicate_reused)
     if stats_path is not None:

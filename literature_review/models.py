@@ -117,12 +117,36 @@ class DownloadedPaperEntry(BaseModel):
     """Screening decision that admitted the paper for download; None on the legacy path."""
 
 
+class DownloadAttempt(BaseModel):
+    """Sanitized evidence for a fetch, lookup, or terminal download decision."""
+
+    paper_id: str
+    source: str
+    stage: Literal["fetch", "unpaywall", "complete"]
+    original_url: str | None = None
+    final_url: str | None = None
+    http_status: int | None = None
+    http_requested: bool = False
+    content_type: str | None = None
+    content_encoding: str | None = None
+    format: str | None = None
+    reason_code: str
+    identity: Literal["confirmed", "mismatch", "unconfirmed"] | None = None
+    recovered: bool = False
+    version: str | None = None
+    host_type: str | None = None
+    license: str | None = None
+    local_path: str | None = None
+    oa_locations: list[dict[str, str | None]] = Field(default_factory=list)
+
+
 class PapersOutput(BaseModel):
     """Persisted overview of a run's downloaded papers and their provenance."""
 
     run: dict[str, object]
     papers: list[DownloadedPaperEntry] = Field(default_factory=list)
     paper_dispositions: list["PaperDisposition"] = Field(default_factory=list)
+    download_attempts: list[DownloadAttempt] = Field(default_factory=list)
 
 
 class SearchRequest(BaseModel):

@@ -289,7 +289,10 @@ class FakeEncoder:
 
 
 def pdf_bytes(url: str) -> bytes:
-    return b"%PDF-1.4 fake download"
+    from urllib.parse import urlsplit
+    from tests.pdf_fixtures import pdf_fixture
+    paper_id = Path(urlsplit(url).path).stem
+    return pdf_fixture(f"Towards {paper_id}: automated literature review agents")
 
 
 class MainEntryTests(unittest.TestCase):
@@ -354,7 +357,7 @@ class MainEntryTests(unittest.TestCase):
         def flaky_fetcher(url: str) -> bytes:
             if url.endswith("/W1.pdf"):
                 raise PdfDownloadError("timeout while downloading the first paper")
-            return b"%PDF-1.4 fake"
+            return pdf_bytes(url)
 
         result = run_end_to_end(
             "literature review agent",

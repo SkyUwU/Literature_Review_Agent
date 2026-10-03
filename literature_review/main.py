@@ -63,6 +63,7 @@ from literature_review.models import (
     SynthesisResponse,
 )
 from literature_review.pdf_downloader import Fetcher, default_fetcher, download_and_backfill
+from literature_review.pdf_fetch import sanitize_url
 from literature_review.planning import create_llm_plan, create_rule_based_plan
 from literature_review.screening import (
     SampledCandidates,
@@ -401,6 +402,23 @@ def run_end_to_end(
     follow_up_queries: set[str] = set()
     downloaded_papers: dict[str, Paper] = {}
     paper_priority: dict[str, str] = {}
+    download_attempts = []
+    doi_cache: dict = {}
+    attempted_download_keys: set[str] = set()
+    snapshot_timestamp = output_timestamp or datetime.now()
+
+    def record_download_attempt(attempt):
+        download_attempts.append(attempt)
+        if diagnostics_output_dir is not None and not dry_run:
+            # Independent of dispositions: failed candidates have no downloaded entry.
+            snapshot = _make_papers_output(
+                query, plan, follow_ups, stats_per_query, [], downloads,
+                downloaded_papers, paper_queries, paper_priority,
+                ranking_records=ranking_records, download_attempts=list(download_attempts),
+            )
+            snapshot.run.update(status="running", stage="download")
+            save_papers_output(snapshot, output_dir=diagnostics_output_dir,
+                               timestamp=snapshot_timestamp)
 
     def _download_per_query(
         produce: Callable[[], Iterator[tuple[str, list[RankedPaper]]]],
@@ -419,6 +437,8 @@ def run_end_to_end(
                 target_n,
                 fetcher=fetcher,
                 already_downloaded=already_downloaded,
+                on_attempt=record_download_attempt,
+                already_attempted=attempted_download_keys,
             )
             stats_per_query.append(result.stats.to_dict())
             for paper_id in result.downloaded_paper_ids:
@@ -563,6 +583,11 @@ def run_end_to_end(
                 fetcher=fetcher,
                 already_downloaded=already_downloaded,
                 priority_groups={"keep": keep_ranked, "maybe": maybe_ranked},
+                allow_recovery=True,
+                unpaywall_email=os.environ.get("UNPAYWALL_EMAIL"),
+                doi_cache=doi_cache,
+                on_attempt=record_download_attempt,
+                already_attempted=attempted_download_keys,
             )
             stats_per_query.append(result.stats.to_dict())
             downloaded_ids = set(result.downloaded_paper_ids)
@@ -612,6 +637,7 @@ def run_end_to_end(
             paper_queries,
             paper_priority,
             ranking_records=ranking_records,
+            download_attempts=download_attempts,
         )
         output: dict[str, object] = {
             "plan": plan,
@@ -629,8 +655,8 @@ def run_end_to_end(
         query, plan, follow_ups, stats_per_query, [], downloads,
         downloaded_papers, paper_queries, paper_priority,
         ranking_records=ranking_records,
+        download_attempts=download_attempts,
     )
-    snapshot_timestamp = output_timestamp or datetime.now()
     diagnostics = RunDiagnosticsCollector(
         papers_output, notes_checkpoint_id=notes_checkpoint_dir.name if notes_checkpoint_dir else None,
         on_update=(lambda output: save_papers_output(
@@ -711,6 +737,7 @@ def _make_papers_output(
     paper_queries: dict[str, str],
     paper_priority: dict[str, str],
     ranking_records: list[dict] | None = None,
+    download_attempts: list | None = None,
 ) -> PapersOutput:
     """Assemble the recorded papers for one run.
 
@@ -731,7 +758,15 @@ def _make_papers_output(
             continue
         entries.append(
             DownloadedPaperEntry(
-                paper=paper,
+                paper=Paper.model_validate({
+                    **paper.model_dump(mode="json"),
+                    "url": sanitize_url(str(paper.url)),
+                    "open_access_pdf_url": sanitize_url(str(paper.open_access_pdf_url)) if paper.open_access_pdf_url else None,
+                    "publication_venues": [
+                        {**venue.model_dump(), "source_url": sanitize_url(venue.source_url)}
+                        for venue in paper.publication_venues
+                    ],
+                }),
                 query=query_text,
                 local_path=entry["path"],
                 priority=paper_priority.get(paper_id),
@@ -753,6 +788,7 @@ def _make_papers_output(
             "warnings": warnings,
         },
         papers=entries,
+        download_attempts=download_attempts or [],
     )
 
 

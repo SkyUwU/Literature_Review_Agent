@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from literature_review.models import Paper, RankedPaper
+from tests.pdf_fixtures import downloader_pdf_fixture
 from literature_review.pdf_downloader import (
     NoOpenAccessError,
     PdfDownloadError,
@@ -43,17 +44,17 @@ class DownloadPdfTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             dest = Path(tmp)
             paper = make_paper("W123", "https://example.org/W123.pdf")
-            path = download_pdf(paper, dest, fetcher=lambda url: b"%PDF-1.4 fake")
+            path = download_pdf(paper, dest, fetcher=lambda url: downloader_pdf_fixture())
 
             self.assertTrue(path.exists())
-            self.assertEqual(path.read_bytes(), b"%PDF-1.4 fake")
+            self.assertTrue(path.read_bytes().startswith(b"%PDF-"))
             self.assertEqual(path.name, "W123.pdf")
 
     def test_missing_oa_url_reports_no_open_access(self) -> None:
         with TemporaryDirectory() as tmp:
             paper = make_paper("W456")
             with self.assertRaises(NoOpenAccessError):
-                download_pdf(paper, Path(tmp), fetcher=lambda url: b"%PDF-1.4 fake")
+                download_pdf(paper, Path(tmp), fetcher=lambda url: downloader_pdf_fixture())
 
     def test_network_failure_reports_error_without_crashing(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -82,7 +83,7 @@ class BackfillTests(unittest.TestCase):
             ]
             ranked = [rank(paper, index) for index, paper in enumerate(papers, start=1)]
 
-            result = download_and_backfill(ranked, dest, target_n=4, fetcher=lambda url: b"%PDF-1.4 fake")
+            result = download_and_backfill(ranked, dest, target_n=4, fetcher=lambda url: downloader_pdf_fixture())
 
             self.assertEqual(len(result.downloaded_paths), 4)
             self.assertEqual(result.stats.downloaded, 4)
@@ -100,7 +101,7 @@ class BackfillTests(unittest.TestCase):
             papers = [make_paper("W1"), make_paper("W2")]
             ranked = [rank(paper, index) for index, paper in enumerate(papers, start=1)]
 
-            result = download_and_backfill(ranked, dest, target_n=4, fetcher=lambda url: b"%PDF-1.4 fake")
+            result = download_and_backfill(ranked, dest, target_n=4, fetcher=lambda url: downloader_pdf_fixture())
 
             self.assertEqual(result.stats.downloaded, 0)
             self.assertEqual(result.stats.failed_no_oa, 2)
@@ -120,7 +121,7 @@ class BackfillTests(unittest.TestCase):
             def flaky_fetcher(url: str) -> bytes:
                 if url.endswith("/2.pdf"):
                     raise PdfDownloadError("timeout")
-                return b"%PDF-1.4 fake"
+                return downloader_pdf_fixture()
 
             result = download_and_backfill(ranked, dest, target_n=3, fetcher=flaky_fetcher)
 
@@ -140,7 +141,7 @@ class BackfillTests(unittest.TestCase):
             ranked = [rank(paper, 1) for paper in papers]
 
             download_and_backfill(
-                ranked, dest, target_n=1, fetcher=lambda url: b"%PDF-1.4 fake", stats_path=stats_path
+                ranked, dest, target_n=1, fetcher=lambda url: downloader_pdf_fixture(), stats_path=stats_path
             )
 
             self.assertTrue(stats_path.exists())
@@ -162,7 +163,7 @@ class BackfillTests(unittest.TestCase):
                 ranked,
                 dest,
                 target_n=2,
-                fetcher=lambda url: b"%PDF-1.4 fake",
+                fetcher=lambda url: downloader_pdf_fixture(),
                 already_downloaded=already_downloaded,
             )
 
@@ -190,7 +191,7 @@ class BackfillTests(unittest.TestCase):
                 ranked,
                 dest,
                 target_n=2,
-                fetcher=lambda url: b"%PDF-1.4 fake",
+                fetcher=lambda url: downloader_pdf_fixture(),
                 already_downloaded=already_downloaded,
             )
 
@@ -209,7 +210,7 @@ class BackfillTests(unittest.TestCase):
             ]
             ranked = [rank(paper, index) for index, paper in enumerate(papers, start=1)]
 
-            result = download_and_backfill(ranked, dest, target_n=1, fetcher=lambda url: b"%PDF-1.4 fake")
+            result = download_and_backfill(ranked, dest, target_n=1, fetcher=lambda url: downloader_pdf_fixture())
 
             self.assertEqual(result.stats.failed_no_oa, 1)
             self.assertEqual(result.stats.downloaded, 1)
@@ -280,7 +281,7 @@ class DedupKeyTests(unittest.TestCase):
                 ranked,
                 dest,
                 target_n=2,
-                fetcher=lambda url: b"%PDF-1.4 fake",
+                fetcher=lambda url: downloader_pdf_fixture(),
                 already_downloaded=already_downloaded,
             )
 
@@ -288,7 +289,7 @@ class DedupKeyTests(unittest.TestCase):
             self.assertEqual(result.stats.duplicate_reused, 1)
             self.assertEqual(already_downloaded, {"doi:10.1145/abc"})
 
-    def test_failure_registers_dedup_key_to_avoid_retry(self) -> None:
+    def test_failure_does_not_count_as_successful_duplicate(self) -> None:
         with TemporaryDirectory() as tmp:
             dest = Path(tmp)
             failing = self._paper(
@@ -307,7 +308,7 @@ class DedupKeyTests(unittest.TestCase):
                 already_downloaded=already_downloaded,
             )
 
-            self.assertIn("doi:10.1145/fail", already_downloaded)
+            self.assertNotIn("doi:10.1145/fail", already_downloaded)
 
 
 if __name__ == "__main__":
