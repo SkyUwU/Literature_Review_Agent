@@ -164,6 +164,19 @@ class FilterPolicy(BaseModel):
     """
 
 
+class EmbeddingScoreComponents(BaseModel):
+    similarity_to_idea: float
+    similarity_to_subquery: float
+    semantic_score: float
+    citation_score: float
+    recency_score: float
+    idea_weight: float = Field(ge=0, le=1)
+    subquery_weight: float = Field(ge=0, le=1)
+    semantic_weight: float = 1.0
+    citation_weight: float = 1.0
+    recency_weight: float = 1.0
+
+
 class RankedPaper(BaseModel):
     """A candidate paper with a reproducible baseline-ranking explanation."""
 
@@ -172,6 +185,9 @@ class RankedPaper(BaseModel):
     score: float = Field(ge=0)
     matched_terms: list[str]
     rationale: str
+    score_components: EmbeddingScoreComponents | None = None
+    main_idea: str | None = None
+    source_query: str | None = None
 
 
 class RankedSearchResponse(BaseModel):

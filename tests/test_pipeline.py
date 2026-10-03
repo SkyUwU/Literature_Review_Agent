@@ -518,13 +518,31 @@ class SynthesisPipelineTests(unittest.TestCase):
                     notes_pacing_seconds=0,
                     **self.policy_arguments(),
                 )
+        manifest_path = checkpoint_dir / "manifest.json"
+        original_manifest = manifest_path.read_bytes()
+        for overrides in [
+            {"query": "a different research question"},
+            {"idea_weight": 0.0},
+            {"paper_queries": {"paper-1": "different source query"}},
+        ]:
+            with self.subTest(overrides=overrides), self.assertRaises(NotesCheckpointError):
+                run_synthesis_pipeline(
+                    documents,
+                    overrides.get("query", "literature review agent"),
+                    SynthesisFakeClient(),
+                    notes_checkpoint_dir=checkpoint_dir,
+                    notes_pacing_seconds=0,
+                    **{k: v for k, v in overrides.items() if k != "query"},
+                    **self.policy_arguments(),
+                )
+            self.assertEqual(manifest_path.read_bytes(), original_manifest)
+        manifest = json.loads(original_manifest)
+        manifest.pop("sampling_policy")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaises(NotesCheckpointError):
             run_synthesis_pipeline(
-                documents,
-                "a different research question",
-                SynthesisFakeClient(),
-                notes_checkpoint_dir=checkpoint_dir,
-                notes_pacing_seconds=0,
+                documents, "literature review agent", SynthesisFakeClient(),
+                notes_checkpoint_dir=checkpoint_dir, notes_pacing_seconds=0,
                 **self.policy_arguments(),
             )
 

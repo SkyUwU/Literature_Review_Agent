@@ -1,6 +1,14 @@
 # 專案狀態（盤點日期：2026-10-03）
 
-## 2026-10-03：M1 任務理解與跨階段歧義處理（最新）
+## 2026-10-03：M2 原始任務與子查詢共同 embedding（最新）
+
+- 依使用者授權只完成 M2，由主代理自審；M1 不重做，M3 未實作。候選 ranking 與正式 scoring/notes chunk sampling 使用 idea/source query 雙相似度，預設 idea_weight=0.5，可由 library 設定 0–1。Run 內快取 query/title+abstract vectors；既有章節政策、2/9 上限、citation/recency、functional 聚合、threshold/quota 不變。
+- RankedPaper 新增 optional Pydantic 分項及兩種 query provenance，papers.run.embedding_ranking 保存新 run 的候選排名。Notes checkpoint fingerprint 增加取樣政策、權重及來源 query；舊政策／不同權重／來源不符拒絕重用，原檔保留。
+- 最後離線回歸 120 focused tests 全通過（含新增 5 tests 與 checkpoint/provenance 回歸）；封鎖網路、dotenv，使用 fake clients/encoders 與 temporary directories。git diff --check 通過，tracked key-pattern scan 無命中。未跑完整 suite、未呼叫真實 API、未修改既有 data/輸出，未提交。
+- 本地 cached BGE 比較完成：7 篇舊已下載論文及 MoE／醫學影像 fixtures，α=0/0.5/1。醫學 fixture 的核心文獻順位改善，但舊 peer-review 論文仍前二，citation/recency 能主導總分；不能宣稱歧義已解決或 0.5 最佳。完整原搜尋池未保存，此比較不等於重播原 run。
+- 證據：`.omo/evidence/m2-dual-query-embedding.md`、`m2-tests-final.log`、`m2-alpha-comparison.json`；離線 runner 與 encoder 比較腳本也在該 evidence 目錄。M3 PDF/HTML/Unpaywall、完整 suite 與真實模型品質驗證仍未完成。
+
+## 2026-10-03：M1 任務理解與跨階段歧義處理（歷史）
 
 - 使用者授權只實作 `.omo/plans/task-alignment-and-validated-pdf-recovery.md` 的 M1，已完成並由主代理自審。新增同次 planning 的 TaskInterpretation、跨領域歧義對照例、允許任務錨點重複，以及 screening/scoring/report/directions 與 repair 的原文／摘要傳遞。papers.run 保存完整 validated plan；舊資料及 library optional 介面可讀。
 - Notes 不接收 idea，只忠實保留原論文任務與排除 boilerplate；notes prompt policy version 更新，舊 manifest 不再沿用（保留原檔）。聚合公式、quota、threshold 不變，輸出改為 Aggregated 並列分項。M2 embedding、M3 PDF/HTML/Unpaywall、quote/頁碼未實作。

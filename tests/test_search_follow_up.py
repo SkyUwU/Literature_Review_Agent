@@ -141,7 +141,7 @@ class EmptyFollowUpTests(unittest.TestCase):
         searches = [[initial], [], [], [], [], [extra] if has_candidate else []]
         with TemporaryDirectory() as folder, mock.patch.object(
             main_module, "_search_and_rank", side_effect=searches
-        ), mock.patch.object(
+        ) as searches_mock, mock.patch.object(
             main_module, "download_and_backfill", return_value=DownloadResult(
                 downloaded_paths=[Path(folder) / "W1.pdf"], downloaded_paper_ids=["W1"]
             )
@@ -160,6 +160,11 @@ class EmptyFollowUpTests(unittest.TestCase):
             self.assertEqual(synth.call_args.args[1], "review agents")
             self.assertEqual(result["papers"].run["query"], "review agents")
             self.assertEqual(synth.call_args.kwargs["paper_queries"]["W1"], "review agents")
+            context = synth.call_args.kwargs["embedding_context"]
+            self.assertEqual(synth.call_args.kwargs["idea_weight"], 0.5)
+            for call in searches_mock.call_args_list:
+                self.assertEqual(call.kwargs["main_idea"], "review agents")
+                self.assertIs(call.kwargs["embedding_context"], context)
             if has_candidate:
                 self.assertEqual(result["screening"]["decisions"]["agent benchmarks"][0]["paper_id"], "W2")
         self.assertEqual([item.paper.paper_id for item in groups["keep"]], ["W1"])

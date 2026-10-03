@@ -23,6 +23,33 @@ DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 Encoder = Callable[[Sequence[str]], list[list[float]]]
 
 
+class EmbeddingContext:
+    """Run-local cache shared by candidate ranking and formal sampling."""
+    def __init__(self, encoder: Encoder):
+        self.encoder = encoder
+        self.queries = {}
+        self.documents = {}
+
+    def query(self, text: str) -> list[float]:
+        if text not in self.queries:
+            self.queries[text] = encode_query(text, self.encoder)
+        return self.queries[text]
+
+    def texts(self, texts: list[str]) -> list[list[float]]:
+        missing = list(dict.fromkeys(t for t in texts if t not in self.documents))
+        if missing:
+            vectors = self.encoder(missing)
+            if len(vectors) != len(missing):
+                raise ValueError(f"encoder returned {len(vectors)} vectors; expected {len(missing)}")
+            self.documents.update(zip(missing, vectors, strict=True))
+        return [self.documents[t] for t in texts]
+
+
+def validate_idea_weight(weight: float) -> None:
+    if not 0 <= weight <= 1:
+        raise ValueError("idea_weight must be between 0 and 1")
+
+
 def default_encoder() -> Encoder:
     """Build the real sentence-transformers encoder for ``DEFAULT_MODEL_NAME``.
 

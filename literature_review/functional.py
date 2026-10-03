@@ -17,6 +17,8 @@ from literature_review.embedding_retriever import (
     _cosine,
     encode_chunks,
     encode_query,
+    EmbeddingContext,
+    validate_idea_weight,
 )
 from literature_review.synthesis import top_level_section
 from literature_review.llm_evidence import (
@@ -287,6 +289,8 @@ def sample_formal_chunks_per_paper(
     encoder: Encoder,
     query_map: dict[str, str] | None = None,
     paper_titles: dict[str, str] | None = None,
+    idea_weight: float = 0.5,
+    embedding_context: EmbeddingContext | None = None,
 ) -> tuple[dict[str, list[EvidenceChunk]], dict[str, list[EvidenceChunk]]]:
     """Select scoring and notes evidence using one per-paper embedding pass.
 
@@ -297,7 +301,12 @@ def sample_formal_chunks_per_paper(
     body chunks only backfill unused notes slots, with a hard total cap of nine.
     Known-noise sections are dropped, and Appendix chunks remain eligible only
     when their headings classify into one of the five evidence categories.
+    Rank within each category using idea_weight * idea similarity plus
+    (1 - idea_weight) * source-query similarity. Missing source queries use the
+    original query for both terms. Query vectors are shared within the run.
     """
+    validate_idea_weight(idea_weight)
+    context = embedding_context or EmbeddingContext(encoder)
     by_paper: dict[str, list[EvidenceChunk]] = {}
     for chunk in paper_chunks:
         by_paper.setdefault(chunk.paper_id, []).append(chunk)
@@ -324,7 +333,8 @@ def sample_formal_chunks_per_paper(
             continue
 
         sampling_query = (query_map or {}).get(paper_id) or query
-        query_vector = encode_query(sampling_query, encoder)
+        query_vector = context.query(sampling_query)
+        idea_vector = context.query(query)
         categories = {
             chunk.chunk_id: classify_chunk_category(
                 chunk, paper_title=titled.get(paper_id)
@@ -339,7 +349,8 @@ def sample_formal_chunks_per_paper(
         chunk_vectors = encode_chunks(filtered, encoder, text_for=_section_wrapped_text)
         ranked = sorted(
             zip(filtered, chunk_vectors, strict=True),
-            key=lambda item: (-_cosine(query_vector, item[1]), item[0].chunk_id),
+            key=lambda item: (-(idea_weight * _cosine(idea_vector, item[1])
+                                  + (1 - idea_weight) * _cosine(query_vector, item[1])), item[0].chunk_id),
         )
 
         scoring: list[EvidenceChunk] = []

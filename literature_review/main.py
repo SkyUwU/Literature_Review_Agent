@@ -37,7 +37,7 @@ from urllib.parse import quote
 
 from literature_review import pipeline, search, ss_search
 from literature_review import embedding_retriever
-from literature_review.embedding_retriever import Encoder
+from literature_review.embedding_retriever import Encoder, EmbeddingContext
 from literature_review.diagnostics import RunDiagnosticsCollector, sanitized_error
 from literature_review.extraction import extract_pdf_text
 from literature_review.llm_evidence import (
@@ -260,6 +260,9 @@ def _search_and_rank(
     year_from: int | None = None,
     year_to: int | None = None,
     venues: tuple[str, ...] = (),
+    main_idea: str | None = None, idea_weight: float = 0.5,
+    embedding_context: EmbeddingContext | None = None,
+    ranking_records: list[dict] | None = None,
 ) -> list[RankedPaper]:
     """Search one query and rank its candidates, recording paper metadata.
 
@@ -289,7 +292,8 @@ def _search_and_rank(
     ranked = filter_and_rank(
         response,
         FilterPolicy(min_year=effective_year_from, max_year=year_to, venues=venues),
-        encoder=encoder,
+        encoder=encoder, main_idea=main_idea, idea_weight=idea_weight,
+        embedding_context=embedding_context,
     )
     print(
         f"[search] query={json.dumps(query_text, ensure_ascii=False)} "
@@ -307,6 +311,8 @@ def _search_and_rank(
             for item in ranked.ranked_papers
         }
     )
+    if ranking_records is not None:
+        ranking_records.extend(item.model_dump(mode="json") for item in ranked.ranked_papers)
     return ranked.ranked_papers
 
 
@@ -325,6 +331,7 @@ def run_end_to_end(
     json_fetcher: search.JsonFetcher = search.fetch_json,
     pdf_fetcher: Fetcher | None = None,
     encoder: Encoder | None = None,
+    idea_weight: float = 0.5,
     ss_api_key: str | None = None,
     year_from: int | None = None,
     year_to: int | None = None,
@@ -382,6 +389,9 @@ def run_end_to_end(
         if dry_run
         else (encoder if encoder is not None else embedding_retriever.default_encoder())
     )
+    embedding_context = EmbeddingContext(effective_encoder) if effective_encoder is not None else None
+    ranking_records: list[dict] = []
+
 
     use_screening = client_screen is not None and not dry_run
     screening_result: ScreeningResult | None = None
@@ -436,7 +446,9 @@ def run_end_to_end(
                 planned.query,
                 json_fetcher=json_fetcher,
                 encoder=effective_encoder,
+                idea_weight=idea_weight, embedding_context=embedding_context,
                 paper_meta=paper_meta,
+                main_idea=query, ranking_records=ranking_records,
                 ss_api_key=ss_api_key,
                 year_from=year_from,
                 year_to=year_to,
@@ -479,7 +491,9 @@ def run_end_to_end(
                         fu.query,
                         json_fetcher=json_fetcher,
                         encoder=effective_encoder,
+                        idea_weight=idea_weight, embedding_context=embedding_context,
                         paper_meta=paper_meta,
+                        main_idea=query, ranking_records=ranking_records,
                         ss_api_key=ss_api_key,
                         year_from=year_from,
                         year_to=year_to,
@@ -575,7 +589,9 @@ def run_end_to_end(
                     planned.query,
                     json_fetcher=json_fetcher,
                     encoder=effective_encoder,
+                    idea_weight=idea_weight, embedding_context=embedding_context,
                     paper_meta=paper_meta,
+                    main_idea=query, ranking_records=ranking_records,
                     ss_api_key=ss_api_key,
                     year_from=year_from,
                     year_to=year_to,
@@ -595,6 +611,7 @@ def run_end_to_end(
             downloaded_papers,
             paper_queries,
             paper_priority,
+            ranking_records=ranking_records,
         )
         output: dict[str, object] = {
             "plan": plan,
@@ -611,6 +628,7 @@ def run_end_to_end(
     papers_output = _make_papers_output(
         query, plan, follow_ups, stats_per_query, [], downloads,
         downloaded_papers, paper_queries, paper_priority,
+        ranking_records=ranking_records,
     )
     snapshot_timestamp = output_timestamp or datetime.now()
     diagnostics = RunDiagnosticsCollector(
@@ -655,6 +673,7 @@ def run_end_to_end(
             paper_queries=paper_queries,
             follow_up_queries=follow_up_queries,
             encoder=effective_encoder,
+            idea_weight=idea_weight, embedding_context=embedding_context,
             notes_checkpoint_dir=notes_checkpoint_dir,
             diagnostics=diagnostics,
             task_interpretation=plan.task_interpretation,
@@ -691,6 +710,7 @@ def _make_papers_output(
     downloaded_papers: dict[str, Paper],
     paper_queries: dict[str, str],
     paper_priority: dict[str, str],
+    ranking_records: list[dict] | None = None,
 ) -> PapersOutput:
     """Assemble the recorded papers for one run.
 
@@ -721,6 +741,7 @@ def _make_papers_output(
         run={
             "query": query,
             "planned_queries": [planned.query for planned in plan.queries],
+            "embedding_ranking": ranking_records or [],
             "search_plan": plan.model_dump(mode="json"),
             "task_interpretation": (
                 plan.task_interpretation.model_dump(mode="json")

@@ -18,7 +18,7 @@ from literature_review.assessment import aggregate_evidence_assessments
 from literature_review.diagnostics import RunDiagnosticsCollector, record_failures, sanitized_error
 from literature_review.coverage import drop_noise_sections
 from literature_review.evidence import chapter_chunk_document, chunk_document
-from literature_review.embedding_retriever import Encoder, default_encoder, retrieve_evidence_embedding
+from literature_review.embedding_retriever import Encoder, EmbeddingContext, default_encoder, retrieve_evidence_embedding
 from literature_review.extraction import PdfExtractionError, extract_pdf_text
 from literature_review.functional import (
     aggregate_functional,
@@ -210,6 +210,8 @@ def run_synthesis_pipeline(
     aggregation_policy: EvidenceAggregationPolicy = EvidenceAggregationPolicy(),
     functional_policy: FunctionalScoringPolicy | None = None,
     encoder: Encoder | None = None,
+    idea_weight: float = 0.5,
+    embedding_context: EmbeddingContext | None = None,
     notes_pacing_seconds: float | None = None,
     paper_titles: dict[str, str] | None = None,
     paper_queries: dict[str, str] | None = None,
@@ -265,6 +267,7 @@ def run_synthesis_pipeline(
         query,
         encoder=effective_encoder,
         query_map=paper_queries,
+        idea_weight=idea_weight, embedding_context=embedding_context,
         paper_titles=paper_titles,
     )
     sampled_flat = [chunk for chunks in sampled.values() for chunk in chunks]
@@ -357,6 +360,8 @@ def run_synthesis_pipeline(
                                    reason="Selected paper has no usable notes chunks.")
     manifest = {
         "notes_prompt_policy": NOTES_PROMPT_POLICY_VERSION,
+        "sampling_policy": {"version": "dual-query-sections-v1", "idea_weight": idea_weight},
+        "paper_queries": paper_queries or {},
         "query": query,
         "usable_paper_ids": sorted(usable_ids),
         "client": type(client).__name__,
