@@ -166,7 +166,7 @@ class ModelTests(unittest.TestCase):
         from literature_review.models import FunctionalScoringPolicy
 
         policy = FunctionalScoringPolicy()
-        self.assertEqual(policy.batch_size, 8)
+        self.assertEqual(policy.batch_size, 4)
         self.assertEqual(policy.top_chunks_per_paper, 2)
         self.assertEqual(policy.n_first_round, 2)
         self.assertEqual(policy.n_follow_up, 1)

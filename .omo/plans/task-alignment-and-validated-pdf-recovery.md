@@ -2,7 +2,7 @@
 
 日期：2026-10-02。2026-10-03 更新：使用者授權的 M1、M2、M3 已完成實作與離線自審；本輪只做 M3，未執行真實 API。M3 證據與完整 suite 限制見 `.omo/evidence/m3-validated-pdf-recovery.md`。
 
-M1 驗收：335 focused tests 中 332 通過，3 個既有契約衝突保留；最後 schema 順序調整後 169 個受影響 tests 全通過。新增 M1 12 tests 覆蓋單次生成／一次 repair、舊 JSON、跨領域 context、Groq batching/gap repair、notes 原任務、scoring/report repairs、公式、正式入口傳遞與 checkpoint 政策。細節及自審見 `.omo/evidence/m1-task-alignment.md`。本計畫只把已授權 M1 記為完成，並未授權下一里程碑。
+M1 當時驗收：335 focused tests 中 332 通過，3 個既有契約衝突保留；最後 schema 順序調整後 169 個受影響 tests 全通過。新增 M1 12 tests 覆蓋單次生成／一次 repair、舊 JSON、跨領域 context、Groq batching/gap repair、notes 原任務、scoring/report repairs、公式、正式入口傳遞與 checkpoint 政策。細節及自審見 `.omo/evidence/m1-task-alignment.md`。此段保留 M1 歷史紀錄；M2/M3 後續完成狀態及最新 suite 見頂部與 STATE.md。
 
 ## 目標與依據
 
@@ -69,7 +69,7 @@ M1 驗收：335 focused tests 中 332 通過，3 個既有契約衝突保留；�
 
 不調聚合權重、quota、threshold、年份或 venue；不實作 quote 支持句/頁碼、搜尋分頁、官方 venue/track 查證、完整 checkpoint continuation。M3 只記錄下載階段，不擴張為所有檢索排除紀錄。API 錯誤不略過 screening，不切换 LLM provider。
 
-## 主代理自審
+## 計畫撰寫時的主代理自審（歷史）
 
 - 修正前輪錯述：chunk sampling 優先來源 query；M2 同時覆盖候選與 chunk。
 - Screening guidance 原在 query-output 區塊；M1 必須新增逐篇判断規則。

@@ -14,7 +14,7 @@
 - 只使用本輪環境實際提供的工具與 skill；舊紀錄中的流程名稱不代表目前可用的功能。計畫完成後需核對需求、介面與驗收，不因缺少另一環境的特定 skill 而省略自審。
 - 只做一個有界里程碑；保留使用者變更。不要提交 `Summer_Project.pdf`、`data/papers/`、`data/outputs/`。
 - 完成本輪變更並需要提交時，回覆附上可直接使用的 PowerShell `git add`／`git commit` 指令；`git add` 明列本輪檔案，不使用 `git add .`。除非使用者明確要求，代理不自行提交。
-- 需要外部服務的真實執行前，提醒使用者在 <https://ai.dev/rate-limit> 確認本次會用到的每把 Gemini key 剩餘額度；不猜額度、不自動重跑。
+- 需要外部服務的真實執行前，確認實際選用的 provider、模型權限與用量；只有使用 Gemini 時，提醒使用者在 <https://ai.dev/rate-limit> 確認本次會用到的每把 key 剩餘額度。OpenAI／Groq 使用各自的用量與限制頁；不猜額度、不自動重跑。
 
 ## 工程約定
 
@@ -28,12 +28,13 @@
 
 `ResearchIdea → SearchPlan → Semantic Scholar（必要時 OpenAlex fallback／摘要補齊）→ 年份與 venue 篩選、embedding 排序 → LLM screening → PDF 下載與抽取 → 逐篇 chunk 取樣及 functional scoring → per-paper claims → 帶 [claim-N] 引用的 synthesis report`。
 
-- 正式 end-to-end 入口：`literature_review.main`。Dry run 使用規則式規劃並停在下載階段，不呼叫 Gemini、不寫報告；只從 `.env` 載入可選的 `OPENALEX_API_KEY` 供搜尋驗證。
+- 正式 end-to-end 入口：`literature_review.main`。Dry run 使用規則式規劃並停在下載階段，不呼叫任何 LLM、不寫報告；程式只從 `.env` 載入可選的 `OPENALEX_API_KEY` 供搜尋驗證。Dry run 仍會搜尋及下載，並非離線測試；不啟用 M3 HTML／Unpaywall 補救。
 - 正式路徑先按章節分類並以 embedding 在每篇論文內挑證據：functional scoring 優先取 Method、Results 各 1 個 chunk（缺類別時補足至 2 個）；逐篇 notes 取 Abstract/context 1 個，再從 Method、Evaluation Setup、Results、Limitations/Future Work 各取至多 2 個，總數上限 9。References／acknowledgments 排除；Appendix 只保留能分類到上述類別的 chunk。corpus-wide retrieval、lexical retrieval、RCS 等是 CLI／比較／legacy 路徑。
 - Gemini provider mode 的 key 選擇為 planner + screening 共用 `--plan-key`；functional scoring 用 `--scoring-key`；per-paper notes 用 `--notes-key`；report 用 `--report-key`。未指定 `--scoring-key` 時，為相容舊命令而沿用 `--notes-key`。
 - Gemini 503 最多 exponential backoff 重試 3 次；重試後仍失敗就停止該輪，不降級略過 screening 或改用其他模型。
 - 預設近三年與 top-venue whitelist 可能使候選為零；必要時可用 `--year-from`、`--year-to`、`--venues none` 做一次性覆寫，勿默默改變政策。
-- 預設下載資料夾 `data/run/` 每次真實執行會重建；報告及 papers JSON 累積在 `data/outputs/`。指定 `--dest-dir` 可選擇其他下載位置。
+- 預設下載資料夾 `data/run/` 每次 CLI 啟動（含 dry run）會重建；報告及 papers JSON 累積在 `data/outputs/`。需要保留舊資料時指定新的 `--dest-dir`，不要使用預設路徑。
+- 所有下載需 PDF signature／parser／身分確認才進全文；screening keep/maybe 才啟用 M3 有界 HTML／Unpaywall 補救。`UNPAYWALL_EMAIL` 為可選本機設定，未設定留 skipped；失敗候選保存在獨立 `download_attempts`，不回填舊輸出。上限與診斷契約見 HANDOFF.md。
 - Semantic Scholar 搜尋會將年份範圍和 top-venue 名稱一併傳給 provider；本地 whitelist 仍為最後把關。`[search]` 統計分列 provider 回傳、abstract 可用、年份後、venue 後與最終篩選數。
 - Gemini key 分工、錯誤降級、額度／速率控制及 run 命令詳見 `HANDOFF.md`；503 是服務錯誤，不能由此推斷生成內容品質。
 - 設定 `GROQ_API_KEY` 後（且未指定其他 `LLM_PROVIDER`），Groq 負責 plan、screening、scoring、逐篇 notes 與 report。模型預設為 `openai/gpt-oss-120b`；`GROQ_MODEL` 統一覆寫所有階段，`GROQ_MODEL_PLAN`、`GROQ_MODEL_SCREENING`、`GROQ_MODEL_SCORING`、`GROQ_MODEL_NOTES`、`GROQ_MODEL_REPORT` 可個別覆寫。Groq notes 按 section 分批，預設每批估計輸入 2,500 tokens（可用 `GROQ_NOTES_BATCH_TOKENS` 調整），共用 process TPM tracker。Notes checkpoint 位於 `data/outputs/notes_checkpoints/<run-id>/`；失敗後照 stderr 的 run ID 使用 `--resume-notes <run-id>` 續跑，所有 notes 完成才產生 report。checkpoint 綁定 query、選用 paper、provider 與來源文件內容，不符時拒絕沿用。
@@ -43,9 +44,10 @@
 
 ```powershell
 uv sync
-uv run python -m unittest discover -s tests -v
-uv run python -m literature_review.main --dry-run
-uv run --env-file .env python -m literature_review.main
+uv run --offline --no-sync python tests/run_offline.py
+# 以下兩項會連網；使用不同的新下載目錄保留舊資料
+uv run python -m literature_review.main --dry-run --dest-dir "data/dry_run_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')"
+uv run --env-file .env python -m literature_review.main --dest-dir "data/run_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')"
 ```
 
 其他 CLI、篩選參數、key 選擇及輸出檔說明見 `HANDOFF.md`。

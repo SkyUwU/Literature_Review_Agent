@@ -221,15 +221,17 @@ class GeminiGenerateJsonTest(unittest.TestCase):
                 self._generate(client)
         self.assertEqual(len(client._client.interactions.calls), 1)
 
-    def test_503_stops_without_retrying(self) -> None:
+    def test_503_stops_after_three_retries(self) -> None:
         clock = FakeClock()
         client = gemini_client(
-            [FakeProviderError("503 The model is overloaded", code=503)] * 3, clock
+            [FakeProviderError("503 The model is overloaded", code=503)] * 4, clock
         )
-        with mock.patch.dict(os.environ, {"GEMINI_429_RETRIES": "3"}, clear=False):
+        with mock.patch("literature_review.llm_evidence.random.uniform", return_value=0):
             with self.assertRaises(LlmServiceError):
                 self._generate(client)
-        self.assertEqual(len(client._client.interactions.calls), 1)
+        self.assertEqual(len(client._client.interactions.calls), 4)
+        self.assertEqual(clock.slept, [15.0, 30.0, 60.0])
+        self.assertEqual({call["model"] for call in client._client.interactions.calls}, {"test-model"})
 
     def test_exhausted_local_budget_blocks_before_calling(self) -> None:
         clock = FakeClock()

@@ -28,7 +28,7 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 
 重要路徑區分：
 
-- literature_review.main 是正式 end-to-end 入口。--dry-run 使用 rule-based planner，只跑至下載，不呼叫 Gemini，也不保存報告；為搜尋可載入 .env 中唯一的 OPENALEX_API_KEY。
+- literature_review.main 是正式 end-to-end 入口。--dry-run 使用 rule-based planner，只跑至下載，不呼叫任何 LLM，也不保存報告；程式為搜尋只載入 .env 中的 OPENALEX_API_KEY。Dry run 仍會連網搜尋及下載，並非離線測試；直接傳 `uv --env-file .env` 會由 uv 載入整份環境，不等於程式的單一 key 載入規則。
 - 正式證據路徑以 `functional.sample_formal_chunks_per_paper` 逐篇章節分類與 embedding 取樣為準。Scoring 優先選 Method、Results 各 1 個 chunk，缺少時由其餘候選補足至 2；逐篇 notes 選 Abstract/context 1 個，再從 Method、Evaluation Setup、Results、Limitations/Future Work 各至多 2 個，總數上限 9。References／acknowledgments 排除；Appendix 僅在子章節能歸入五類時保留。每篇 chunks 僅做一次 embedding，向量供兩階段選取共用。corpus-wide embedding／lexical retrieval 與 RCS 是 CLI、比較或 legacy 路徑。
 - 報告中的 [claim-N] 連到程式組裝的 claim-to-chunk/paper provenance。生成內容只應依賴供應的 chunks；形式驗證通過不代表學術品質已經人工確認。
 - LLM report 先生成全局 outline，再依序生成每個小節；每次只提供該節 claims、原始 query 與全局大綱的 title/purpose。每節的 schema／缺引用／超出該節集合／額外 Markdown heading 共用一次內容 repair，仍失敗即停止。程式組裝標題與順序，report JSON 新增 optional `outline`、`report_sections`（舊 JSON 可讀）；future directions 仍獨立使用全局 claims。K 節正常共 K+2 次 synthesis calls，不含 repair／provider retry。未加入報告 checkpoint；ID 驗證不代表每句有引用或支持證據。
@@ -55,9 +55,10 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 - 補蒐全數零候選時，不呼叫 screening LLM；記錄缺口仍未補足，保留初始已驗證的 decisions 繼續下載。部分 query 為零時仍篩選實際候選；任何有候選的 screening 驗證失敗仍中止。`priority` schema 明列 `keep`／`maybe`／`reject`。
 - `[search] returned_candidates` 是這頁收到的原始 records 數；`total_matches` 是 provider 回報的全部命中數，未提供時為 `unknown`。例如 `returned_candidates=100 total_matches=216 with_abstract=97 skipped=3` 表示只收到 100 筆，97 筆通過 metadata／abstract 處理。`SearchResponse.total_candidates` 統一為實收筆數，新增 optional `total_matches` 保存總命中數；舊 `provider_total` log 名稱已移除。
 - 年份預設為最近三年（2026 年即 2024 起），並使用 FilterPolicy 作為 provider 統一後衛。
-- 預設 venue whitelist 是硬篩選；Semantic Scholar 搜尋會將已辨識 conference 名稱／alias 與 year range 傳給 provider，之後仍由本地 whitelist 核對。OpenAlex fallback 仍以本地篩選為準。`[search]` 統計列 provider 回傳、abstract 可用、年份後、venue 後及最終數量。未命中可能來自 venue 欄位缺漏／變體、期刊或預印本不在 whitelist；探索性執行可明確指定 `--venues none`，不可把它解讀為原政策下的同一實驗。
-- 每個規劃 query 分別搜尋、排名及分配下載目標；跨 query 以 DOI（無 DOI 時 title+year）去重。預設 data/run/ 每次真實執行會清空重建；使用 --dest-dir 指定位置時不清除該位置。
-- 只有成功寫入的 PDF 會列在 papers_*.json；正式 CLI 在下載完成後先保存 pending 診斷，抽取、scoring batches、selection 與逐篇 notes 狀態更新時以暫存檔＋atomic replace 覆寫同一檔案。成功 report／papers 共用時間戳；dry run 不寫這兩個 JSON。
+- 預設 venue whitelist 是硬篩選；Semantic Scholar 搜尋會將已辨識 conference 名稱／alias 與 year range 傳給 provider，之後仍由本地 whitelist 核對。OpenAlex fallback 仍以本地篩選為準。`[search]` 統計列 provider 回傳、abstract 可用、年份後、venue 後及最終數量。未命中可能來自 venue 欄位缺漏／變體、期刊或預印本不在 whitelist；探索性執行可明確指定 `--venues none`，不可把它解讀為原政策下的同一實驗。現有參數解析在全部 venue 名稱皆未識別時，會警告並停用過濾；部分已識別時才保留未知名稱作 raw substring。試跑沿用預設，避免誤拼造成不同政策。
+- 每個規劃 query 分別搜尋與排名；screening 路徑合併 keep/maybe 下載，先取全部 keep，再以 maybe 補足 target 20（keep 可超過 20）。只有 legacy 未篩選路徑才按 query 分配 ceil(20/query_count)；跨 query 以 DOI（無 DOI 時 title+year）去重。
+- 預設 data/run/ 每次 CLI 啟動（含 dry run，且在輸入 query 前）會清空重建；使用 --dest-dir 指定新位置保留舊資料。明確指定的資料夾不清空，但同名 PDF 可由成功下載覆寫，故試跑應使用新目錄。
+- 只有有效且身分 confirmed 的成功 PDF 會列在 papers_*.json；download_attempts 同時保存失敗候選。正式 CLI 從下載期間開始保存診斷，抽取、scoring batches、selection 與逐篇 notes 狀態更新時以暫存檔＋atomic replace 覆寫同一檔案。成功 report／papers 共用時間戳；dry run 不寫這兩個 JSON。
 - `paper_dispositions` 按唯一 downloaded paper ID 保存處理 stage/status、selection/notes 狀態、實際 score／chunk IDs，以及 threshold、query group、quota、rank、n_samples。Threshold 與 quota 可同時為排除原因；沒有實際分數時是 null，legacy assessment 的 1.0 不視為評分。未執行階段保持 pending，研究排除與處理失敗分開。
 - `run` 新增 run_id、in_progress/completed/failed、failed_stage、error、notes_checkpoint_id。Notes／report 失敗會保留成功 notes 與已有結果並重新拋出原始例外，不產生完整 report；error 只保存例外類別，省略可能含秘密的 details。診斷寫檔失敗會明示，不能保證 kill／磁碟故障下保存資料。
 - Library `run_end_to_end()` 預設只回傳結果；明確傳 `diagnostics_output_dir` 才寫診斷，`output_timestamp` 可供 caller 配對 report。`run_synthesis_pipeline()` 可選擇提供 caller-owned `RunDiagnosticsCollector`，原 return type 不變；診斷 run_id 不提供完整續跑功能，舊 papers JSON 仍可讀。
@@ -90,23 +91,25 @@ query → LLM SearchPlan（3–4 個短子查詢；fallback 為 rule-based）
 ## 執行命令
 
 ```powershell
-# 安裝與測試（測試需隔離本機 provider keys／外部請求）
+# 首次安裝依賴需網路；之後使用可重現的離線 runner
 uv sync
-uv run python -m unittest discover -s tests -v
+uv run --offline --no-sync python tests/run_offline.py
+# Focused 範例：同樣隔離 .env／network，輸出在暫存 cwd
+uv run --offline --no-sync python tests/run_offline.py test_pdf_recovery test_main
 # Dry run：會搜尋及下載，涉及外部 API／網路，但不呼叫 LLM
-uv run python -m literature_review.main --dry-run
+uv run python -m literature_review.main --dry-run --dest-dir "data/dry_run_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')"
 
 # 真實端到端流程（執行前先確認 quota、venue policy、輸出資料夾）
-uv run --env-file .env python -m literature_review.main
+uv run --env-file .env python -m literature_review.main --dest-dir "data/run_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')"
 
 # 選擇 OpenAI（需在 .env 設定 LLM_PROVIDER、OPENAI_API_KEY）
-uv run --env-file .env python -m literature_review.main
+uv run --env-file .env python -m literature_review.main --dest-dir "data/run_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')"
 
 # 例：明確停用 venue whitelist；只應作為有意識的一次性設定
-uv run --env-file .env python -m literature_review.main --venues none
+uv run --env-file .env python -m literature_review.main --venues none --dest-dir "data/run_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')"
 ```
 
-完成後檢查 data/outputs/report_*.json、data/outputs/papers_*.json、stdout 的 SD 統計及 Langfuse trace（若已設定且服務可用）。目前程式會重建預設 data/run/；確認可覆寫後再啟動，避免覆蓋需要保留的下載檔。
+完成後檢查 data/outputs/report_*.json、data/outputs/papers_*.json（含 download_attempts）、stdout 的 SD 統計及 Langfuse trace（若已設定且服務可用）。首次真實驗證使用新 --dest-dir；M3 離線測試通過不等於真實取得率與報告品質已驗證。
 
 ## 503 與輸出品質的判讀
 

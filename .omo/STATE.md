@@ -1,14 +1,25 @@
 # 專案狀態（盤點日期：2026-10-03）
 
+## 2026-10-03：舊測試契約更新與操作文件整理（最新）
 
-## 2026-10-03：M3 有效 PDF 與 OA 補救（最新）
+- 已依本輪授權更新四個舊測試，不改正式程式／品質政策：screening 429/503 中止且不下載未篩選候選；Gemini 503 首次加三次重試（15/30/60 秒，fake clock）；functional batch_size 預設 4。
+- 新增 Git 可追蹤的 `tests/run_offline.py`：清除 provider 設定、封鎖 network／child process／workspace .env、暫存 cwd 與既有 data/ 寫入保護。Pairwise CLI 只注入短假 key；Windows cleanup 先還原 cwd。
+- 最新完整離線 suite **621/621 全通過**，process exit 0；沒有排除 tests。四個舊契約失敗已消除。git diff --check／key-pattern scan 通過。未執行真實系統 API、未修改既有 data/ 或提交。證據：`.omo/evidence/maintenance-tests-and-guidance.md`、`maintenance-full-suite.log`。
+- 已核對並更新 AGENTS／HANDOFF／README：原 idea 保存、M2 雙 query、M3 PDF recovery、screening 合併 keep/maybe 目標、dry run 連網且預設路徑同樣重建；改用可重現離線測試與新 dest-dir 的 run 命令。下方標示歷史的完成數字／待辦／失敗不代表當前狀態，舊 run 紀錄保留。
+- 既有 bounded-plan-review/execution 與 `.omo/skill-drafts/` 副本 SHA256 一致，無需改動。新增官方 `jupyter-notebook` skill 到本機 Codex skills，供研究 notebook／比較實驗使用；未安裝 notebook runtime 或改專案依賴。這是 Codex 工作指引，不改 literature review 系統行為。
+- 首次真實 run 可在確認實際 provider 額度／模型權限後使用新的 `--dest-dir`，保留預設年份／venue。M1/M2 語義品質、M3 真實取得率與完整報告品質仍需真實驗證；代理本輪未代跑。
+
+以下內容保留各輪當時的狀態與證據；其中「未完成」「下一步」等以本節最新狀態為準。
+
+
+## 2026-10-03：M3 有效 PDF 與 OA 補救（歷史）
 
 - 依本輪授權只完成 M3，主代理自審；M1/M2 不重做。新增結構化 fetch metadata、25 MiB raw/gzip 上限、30 秒／五 redirects、有界 HTML/ACL/AAAI PDF link 與 DOI/Unpaywall recovery；僅 screening keep/maybe 啟用。UNPAYWALL_EMAIL 本機設定，缺 DOI/email 明示 skipped；DOI cache 每 run lookup 一次，每篇三個額外文獻 URL，不遞迴。
 - 所有下載需 %PDF-／PyMuPDF 可開啟且至少一頁／身分 confirmed 才 atomic write 及進全文；mismatch/unconfirmed 都拒絕。保留 OA location version/host/license/source，provider OA URL 與實際 final URL 分列，URL 移除 secrets，venue 政策不變。
 - PapersOutput 新增 optional download_attempts，獨立保存失敗候選與逐次下載 snapshot；library 仍 opt-in persistence，dry run 無新補救請求。成功／recovered／HTTP attempts／shortfall 分列；失敗不再算成功 duplicate，run 內失敗去重避免跨 query 重試 URL budget。
 - 新增 36 M3 tests。完整隔離 suite 621 tests：617 通過、四個既有契約失敗（screening 429/503 兩項、Gemini 503 fake script、batch_size=8 預期而 HEAD=4）；未排除 tests。最後細節修正後 70 直接受影響 tests 全通過。git diff --check／key-pattern scan 通過。測試封鎖 network／child processes／workspace .env，暫存 cwd，最後 runner 禁止既有 data/ 寫入；未執行真實 API、未修改既有輸出、未提交。
 - 證據：`.omo/evidence/m3-validated-pdf-recovery.md`、`m3-full-suite-final.log`、`m3-final-affected.log`、`run_m3_offline.py`。真實取得率／Unpaywall smoke／LLM 品質未驗證；完整 suite 未全通過。下方「M3 未實作」為歷史快照。
-## 2026-10-03：M2 原始任務與子查詢共同 embedding（最新）
+## 2026-10-03：M2 原始任務與子查詢共同 embedding（歷史）
 
 - 依使用者授權只完成 M2，由主代理自審；M1 不重做，M3 未實作。候選 ranking 與正式 scoring/notes chunk sampling 使用 idea/source query 雙相似度，預設 idea_weight=0.5，可由 library 設定 0–1。Run 內快取 query/title+abstract vectors；既有章節政策、2/9 上限、citation/recency、functional 聚合、threshold/quota 不變。
 - RankedPaper 新增 optional Pydantic 分項及兩種 query provenance，papers.run.embedding_ranking 保存新 run 的候選排名。Notes checkpoint fingerprint 增加取樣政策、權重及來源 query；舊政策／不同權重／來源不符拒絕重用，原檔保留。
@@ -23,7 +34,7 @@
 - 離線回歸 335 tests：332 通過、3 個既有失敗（screening 429/503 tests 期待降級、model defaults 期待 batch size 8 而 HEAD 為 4）。前兩者另以 HEAD 原始 main.py 重現；defaults 以 HEAD source 核對。最後 schema 順序及格式整理後，受影響的 169 tests 全通過，含新增 M1 12 tests。未執行完整 suite 或真實 API，不能據此宣稱 review 歧義已經真實模型驗證解決。
 - 證據：`.omo/evidence/m1-task-alignment.md`、`m1-offline-tests-final.log`、`m1-final-affected-tests.log`、`m1-baseline-failures.log`。測試封鎖 network/child processes/專案 .env，使用暫存 cwd、fake clients/encoders；既有 data/ 與 Summer_Project.pdf 未修改。git diff --check 與 tracked key-pattern scan 通過。未由代理提交。
 
-## 新對話接續摘要（2026-10-02，優先閱讀）
+## 歷史接續摘要（2026-10-02，不作為目前待辦）
 
 - 協作引導已改為目前 Codex 可遵循的白話規則：預設主代理自審與驗收，其他代理須明確授權；只使用本輪實際可用工具。歷史段落的 route B／plan-review 不作為目前能力或安裝狀態的證據。
 - bounded-plan-review／bounded-plan-execution 已完成修訂及主代理情境自審，uv 執行格式 validator 與 UI metadata 檢查通過，已安裝至本機 `C:/Users/User/.codex/skills/`，並比對檔案 hash。來源副本在 `.omo/skill-drafts/`；自審證據在 `.omo/evidence/skill-workflow-review.md`。未使用獨立代理行為實測，未跑專案測試或真實 API；全域 skills 不隨專案 Git 自動同步。
@@ -158,7 +169,7 @@
 - 預設研究政策為最近三年與 top-venue whitelist；後者是硬篩選，已知可能使某些 query 零候選。一次性探索可明確使用 --venues none。
 - Gemini key 分工、503/429 的 stage-specific 行為、額度限制及真實 run 命令見 HANDOFF.md。
 
-## 下一步
+## 歷史下一步（當時 run 診斷建議）
 
 1. 若要評估剛才那輪，先從 WSL/OpenCode 找回原始終端 log、Langfuse trace（若有）、data/outputs/report_*.json 與 papers_*.json；不要只憑 503 重跑。
 2. 由 log 的 [llm] label/status 找出 503 發生的階段。若流程中止，檢查候選數、venue 篩選、下載／抽取狀態及每把 key 的實際額度紀錄。

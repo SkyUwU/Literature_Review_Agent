@@ -776,7 +776,7 @@ class MainEntryTests(unittest.TestCase):
         self.assertIsNotNone(result["screening"])
         self.assertEqual(len(result["report"].paper_sources), 4)
 
-    # -- degradation: a screening key that is out of quota must not kill the run
+    # -- screening failure: stop before downloading unscreened candidates
 
     def _degraded_run(
         self,
@@ -803,47 +803,39 @@ class MainEntryTests(unittest.TestCase):
                 )
         return result, fetcher
 
-    def test_screening_daily_quota_downloads_the_retrieved_candidates(self) -> None:
+    def test_screening_daily_quota_stops_before_download(self) -> None:
         payloads = [
             results_payload(record_for("W1"), record_for("W2")),
             results_payload(record_for("W3")),
             results_payload(),
         ]
-        result, fetcher = self._degraded_run(
-            QuotaScreenClient(DailyQuotaExhausted("429 Limit: 20 requests per day")),
-            payloads,
-            SynthesisFakeClient(("W1", "W2", "W3")),
-        )
-        self.assertIsNone(result["screening"])
-        self.assertEqual(result["follow_ups"], [])
-        # three planned queries, three searches: the degraded path reuses the
-        # candidates it already retrieved instead of searching them again
-        self.assertEqual(len(fetcher.calls), 3)
-        self.assertEqual(
-            {entry["paper_id"] for entry in result["downloads"]},
-            {"W1", "W2", "W3"},
-        )
-        self.assertEqual(len(result["report"].paper_sources), 3)
-        self.assertEqual(
-            [entry.priority for entry in result["papers"].papers], [None, None, None]
-        )
+        synth_client = mock.Mock()
+        with mock.patch("literature_review.main.download_and_backfill") as download:
+            with self.assertRaises(DailyQuotaExhausted):
+                self._degraded_run(
+                    QuotaScreenClient(DailyQuotaExhausted("429 Limit: 20 requests per day")),
+                    payloads, synth_client,
+                )
+        download.assert_not_called()
+        synth_client.generate_json.assert_not_called()
+        self.assertEqual(list(self.dest.glob("*.pdf")), [])
 
-    def test_screening_service_error_also_degrades(self) -> None:
+    def test_screening_service_error_stops_before_download(self) -> None:
         payloads = [
             results_payload(record_for("W1"), record_for("W2")),
             results_payload(record_for("W3")),
             results_payload(),
         ]
-        result, _ = self._degraded_run(
-            QuotaScreenClient(LlmServiceError("503 The model is overloaded")),
-            payloads,
-            SynthesisFakeClient(("W1", "W2", "W3")),
-        )
-        self.assertIsNone(result["screening"])
-        self.assertEqual(
-            {entry["paper_id"] for entry in result["downloads"]},
-            {"W1", "W2", "W3"},
-        )
+        synth_client = mock.Mock()
+        with mock.patch("literature_review.main.download_and_backfill") as download:
+            with self.assertRaises(LlmServiceError):
+                self._degraded_run(
+                    QuotaScreenClient(LlmServiceError("503 The model is overloaded")),
+                    payloads, synth_client,
+                )
+        download.assert_not_called()
+        synth_client.generate_json.assert_not_called()
+        self.assertEqual(list(self.dest.glob("*.pdf")), [])
 
     def test_failed_gap_round_keeps_the_main_screening_decisions(self) -> None:
         screen_client = QuotaScreenClient(
