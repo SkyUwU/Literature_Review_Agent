@@ -1594,8 +1594,8 @@ class SemanticScholarSearchTests(unittest.TestCase):
         self.assertEqual(
             fetcher.calls,
             [
-                "https://api.openalex.org/works/doi:10.1145%2Fabc.def"
-                "?select=abstract_inverted_index"
+                "https://api.openalex.org/works/https://doi.org/10.1145%2Fabc.def"
+                "?select=id,doi,title,authorships,abstract_inverted_index,primary_location,locations,best_oa_location"
             ],
         )
 

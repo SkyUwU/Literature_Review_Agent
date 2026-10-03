@@ -18,6 +18,7 @@ from literature_review.models import Paper, RankedPaper, DownloadAttempt
 from literature_review.pdf_fetch import (
     FetchResult, Fetcher, NoOpenAccessError, PdfDownloadError, default_fetcher, recover_pdf,
 )
+from literature_review.source_resolution import SourceLookupContext, source_locations
 
 
 def _safe_filename(paper: Paper) -> str:
@@ -74,6 +75,15 @@ class DownloadStats:
     shortfall: int = 0
     http_attempts: int = 0
     recovered: int = 0
+    provider_oa_metadata_coverage: float | None = None
+    resolved_pdf_location_coverage: float | None = None
+    validated_pdf_success_rate: float | None = None
+    unique_candidates: int = 0
+    unique_attempted: int = 0
+    lookup_not_found: int = 0
+    fetch_failed: int = 0
+    identity_rejected: int = 0
+    budget_skipped: int = 0
 
     @property
     def oa_ratio_candidates(self) -> float:
@@ -91,6 +101,9 @@ class DownloadStats:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            **{key: getattr(self, key) for key in ('provider_oa_metadata_coverage', 'resolved_pdf_location_coverage',
+                'validated_pdf_success_rate', 'unique_candidates', 'unique_attempted', 'lookup_not_found',
+                'fetch_failed', 'identity_rejected', 'budget_skipped')},
             "http_attempts": self.http_attempts,
             "recovered": self.recovered,
             "requested": self.requested,
@@ -117,6 +130,7 @@ class DownloadResult:
     failed_paper_ids: list[str] = field(default_factory=list)
     stats: DownloadStats = field(default_factory=DownloadStats)
     download_attempts: list[DownloadAttempt] = field(default_factory=list)
+    fulltext_sources: dict = field(default_factory=dict)
 
 
 def download_and_backfill(
@@ -134,6 +148,7 @@ def download_and_backfill(
     on_attempt: Callable[[DownloadAttempt], None] | None = None,
     on_progress: Callable[[DownloadResult], None] | None = None,
     already_attempted: set[str] | None = None,
+    source_context: SourceLookupContext | None = None,
 ) -> DownloadResult:
     """Try to download the top ``target_n`` ranked papers, backfilling failures.
 
@@ -158,6 +173,7 @@ def download_and_backfill(
     doi_cache = doi_cache if doi_cache is not None else {}
     already_attempted = already_attempted if already_attempted is not None else set()
     result = DownloadResult()
+    source_context = source_context or SourceLookupContext()
     stats = result.stats
     stats.requested = target_n
 
@@ -165,6 +181,10 @@ def download_and_backfill(
         result.download_attempts.append(attempt)
         if attempt.http_requested:
             stats.http_attempts += 1
+        stats.lookup_not_found += int(attempt.reason_code == 'lookup_not_found')
+        stats.fetch_failed += int(attempt.failure_step == 'fetch' and attempt.http_requested)
+        stats.identity_rejected += int(attempt.identity in {'mismatch', 'unconfirmed'} and attempt.format == 'valid_pdf')
+        stats.budget_skipped += int(attempt.reason_code == 'budget_exhausted')
         if on_attempt:
             on_attempt(attempt)
 
@@ -183,6 +203,7 @@ def download_and_backfill(
         already_attempted.add(key)
         if ranked.paper.open_access_pdf_url is not None or allow_recovery:
             stats.attempted += 1
+            stats.unique_attempted += 1
 
         start = len(result.download_attempts)
         try:
@@ -190,6 +211,8 @@ def download_and_backfill(
                 ranked.paper, Path(dest_dir) / _safe_filename(ranked.paper), fetcher=fetcher,
                 allow_recovery=allow_recovery, unpaywall_email=unpaywall_email,
                 doi_cache=doi_cache, on_attempt=record,
+                source_context=source_context,
+                on_fulltext=lambda fulltext: result.fulltext_sources.__setitem__(ranked.paper.paper_id, fulltext),
             )
         except NoOpenAccessError:
             result.failed_paper_ids.append(ranked.paper.paper_id)
@@ -197,10 +220,12 @@ def download_and_backfill(
         except PdfDownloadError:
             result.failed_paper_ids.append(ranked.paper.paper_id)
             reasons = {a.reason_code for a in result.download_attempts[start:]}
-            if "no_oa_url" in reasons:
-                stats.failed_no_oa += 1
-            elif reasons & {"network_error", "timeout", "http_error"}:
+            if reasons & {"network_error", "timeout", "http_error", "lookup_not_found"}:
                 stats.failed_network += 1
+            elif any(a.stage == 'fetch' and a.http_requested for a in result.download_attempts[start:]):
+                stats.failed_other += 1
+            elif "no_oa_url" in reasons:
+                stats.failed_no_oa += 1
             else:
                 stats.failed_other += 1
         else:
@@ -211,6 +236,7 @@ def download_and_backfill(
             if already_downloaded is not None:
                 already_downloaded.add(key)
         stats.shortfall = max(0, target_n - stats.downloaded - stats.duplicate_reused)
+        stats.validated_pdf_success_rate = stats.downloaded / stats.unique_attempted if stats.unique_attempted else None
         if on_progress:
             on_progress(result)
 
@@ -244,6 +270,11 @@ def download_and_backfill(
                 record(attempt)
 
     stats.shortfall = max(0, target_n - stats.downloaded - stats.duplicate_reused)
+    candidates = ranked_papers if priority_groups is None else priority_groups.get('keep', []) + priority_groups.get('maybe', [])
+    unique = {dedup_key(item.paper): item.paper for item in candidates}
+    stats.unique_candidates = len(unique)
+    stats.provider_oa_metadata_coverage = sum(p.open_access_pdf_url is not None for p in unique.values()) / len(unique) if unique else None
+    stats.resolved_pdf_location_coverage = sum(bool(p.open_access_pdf_url) or any(loc.pdf_url for loc in source_locations(p)) for p in unique.values()) / len(unique) if unique else None
     if stats_path is not None:
         stats_path = Path(stats_path)
         stats_path.parent.mkdir(parents=True, exist_ok=True)

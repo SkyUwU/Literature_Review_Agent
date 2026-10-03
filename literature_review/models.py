@@ -75,6 +75,129 @@ class PublicationVenue(BaseModel):
     verification: Literal["provider_reported"] = "provider_reported"
 
 
+class PaperIdentifier(BaseModel):
+    scheme: Literal["doi", "arxiv", "acl", "openreview", "openalex", "semantic_scholar"]
+    value: str
+    revision: str | None = None
+    provider: str
+    metadata_path: str
+    record_id: str | None = None
+
+
+class FullTextLocation(BaseModel):
+    location_id: str
+    source: str
+    pdf_url: str | None = None
+    landing_url: str | None = None
+    metadata_path: str
+    source_record_id: str | None = None
+    identifiers: list[PaperIdentifier] = Field(default_factory=list)
+    version: str | None = None
+    host_type: str | None = None
+    license: str | None = None
+    provenance: list[dict[str, str]] = Field(default_factory=list)
+    version_conflicting: bool = False
+
+
+class VersionRelation(BaseModel):
+    identifiers: list[PaperIdentifier]
+    relation: Literal["same_work_version"] = "same_work_version"
+    status: Literal["confirmed", "unconfirmed", "conflicting"]
+    source: str
+    metadata_path: str
+    record_id: str | None = None
+    title_match: bool = False
+    author_match: bool = False
+
+
+class VersionTarget(BaseModel):
+    identifiers: list[PaperIdentifier] = Field(default_factory=list)
+    revision: str | None = None
+    version: str | None = None
+    evidence: str = "unknown"
+
+
+class RetrievedFullText(BaseModel):
+    location_id: str | None = None
+    location: FullTextLocation | None = None
+    source: str
+    original_url: str | None = None
+    final_url: str | None = None
+    actual_identifiers: list[PaperIdentifier] = Field(default_factory=list)
+    revision: str | None = None
+    version: str | None = None
+    version_match: Literal["exact", "alternative", "unknown"] = "unknown"
+    version_evidence: Literal["official", "pdf_observed", "provider_reported", "unknown"] = "unknown"
+    identity_evidence: str
+    relation_evidence: list[VersionRelation] = Field(default_factory=list)
+    target: VersionTarget = Field(default_factory=VersionTarget)
+    local_path: str
+    sha256: str
+    downloaded_at: str
+
+    @computed_field
+    @property
+    def version_label(self) -> str:
+        if self.version_match == "exact":
+            return "指定版本已確認"
+        if self.version_match == "alternative":
+            return f"使用替代版本：{self.revision or self.version or 'unknown'}"
+        return "版本未確認"
+
+
+class CandidateEvent(BaseModel):
+    event_id: str
+    query_id: str
+    query: str
+    round: Literal["initial", "follow_up"]
+    provider: str
+    record_key: str
+    paper_id: str | None = None
+    stage: str
+    action: str
+    reason_codes: list[str] = Field(default_factory=list)
+    related_record_key: str | None = None
+    score: float | None = None
+    bucket: str | None = None
+    priority: str | None = None
+    sequence: int
+
+
+class StageSummary(BaseModel):
+    query_id: str
+    query: str
+    round: Literal["initial", "follow_up"]
+    provider: str
+    total_matches: int | None = None
+    counts: dict[str, int | None] = Field(default_factory=dict)
+
+
+class SourceLookupAttempt(BaseModel):
+    lookup_id: str
+    paper_id: str
+    provider: str
+    identifier: str
+    phase: str
+    reason_code: str
+    cache_hit: bool = False
+    http_requested: bool = False
+    http_status: int | None = None
+    attempt_index: int = 0
+    elapsed_ms: float = 0
+    error_kind: str | None = None
+    error_code: str | None = None
+    retry_wait: float | None = None
+    budget_scope: str | None = None
+
+
+class SourceRecoveryPolicy(BaseModel):
+    new_source_lookups_per_paper: int = Field(default=1, ge=0, le=1)
+    new_source_lookups_per_run: int = Field(default=40, ge=0)
+    extra_document_urls_per_paper: int = Field(default=3, ge=0)
+    recovery_transports_per_run: int = Field(default=160, ge=0)
+    max_retries: int = Field(default=2, ge=0, le=2)
+
+
 class Paper(BaseModel):
     """Metadata and available evidence for one candidate paper."""
 
@@ -90,6 +213,10 @@ class Paper(BaseModel):
     url: HttpUrl
     venue: str | None = None
     publication_venues: list[PublicationVenue] = Field(default_factory=list)
+    identifiers: list[PaperIdentifier] = Field(default_factory=list)
+    fulltext_locations: list[FullTextLocation] = Field(default_factory=list)
+    version_relations: list[VersionRelation] = Field(default_factory=list)
+    version_target: VersionTarget = Field(default_factory=VersionTarget)
     citation_count: int | None = Field(default=None, ge=0)
     open_access_pdf_url: HttpUrl | None = Field(
         default=None, description="Provider-reported OA PDF URL, independent of publication venue."
@@ -113,6 +240,7 @@ class DownloadedPaperEntry(BaseModel):
     paper: Paper
     query: str = Field(min_length=1)
     local_path: str
+    fulltext: RetrievedFullText | None = None
     priority: Literal["keep", "maybe"] | None = None
     """Screening decision that admitted the paper for download; None on the legacy path."""
 
@@ -138,6 +266,17 @@ class DownloadAttempt(BaseModel):
     license: str | None = None
     local_path: str | None = None
     oa_locations: list[dict[str, str | None]] = Field(default_factory=list)
+    attempt_id: str | None = None
+    location_id: str | None = None
+    attempt_index: int = 0
+    failure_step: str | None = None
+    error_kind: str | None = None
+    error_code: str | None = None
+    elapsed_ms: float = 0
+    cache_hit: bool = False
+    retry_wait: float | None = None
+    budget_scope: str | None = None
+    fulltext: RetrievedFullText | None = None
 
 
 class PapersOutput(BaseModel):
@@ -147,6 +286,10 @@ class PapersOutput(BaseModel):
     papers: list[DownloadedPaperEntry] = Field(default_factory=list)
     paper_dispositions: list["PaperDisposition"] = Field(default_factory=list)
     download_attempts: list[DownloadAttempt] = Field(default_factory=list)
+    candidate_events: list[CandidateEvent] = Field(default_factory=list)
+    stage_summaries: list[StageSummary] = Field(default_factory=list)
+    source_lookup_attempts: list[SourceLookupAttempt] = Field(default_factory=list)
+    candidate_records: dict[str, dict[str, object]] = Field(default_factory=dict)
 
 
 class SearchRequest(BaseModel):
@@ -443,7 +586,7 @@ class FunctionalPaperScore(BaseModel):
     max_weight: float | None = Field(default=None, ge=0, le=1)
 
 
-ProcessingStage = Literal["download", "extraction", "sampling", "scoring", "selection", "notes", "synthesis"]
+ProcessingStage = Literal["search", "abstract_backfill", "source_resolution", "ranking", "sampling_candidates", "screening", "download", "extraction", "sampling", "scoring", "selection", "notes", "synthesis"]
 DispositionReason = Literal["extraction_failed", "no_usable_chunks", "threshold_not_met", "quota_not_selected", "notes_failed"]
 
 
@@ -657,6 +800,7 @@ class PaperSource(BaseModel):
 
     paper_id: str
     source_path: str = Field(min_length=1)
+    fulltext: RetrievedFullText | None = None
     claim_ids: list[str] = Field(default_factory=list)  # the global claim tags (claim-N) owned by this paper
 
 

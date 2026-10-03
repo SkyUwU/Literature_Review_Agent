@@ -220,6 +220,7 @@ def run_synthesis_pipeline(
     notes_checkpoint_dir: Path | None = None,
     diagnostics: RunDiagnosticsCollector | None = None,
     task_interpretation: TaskInterpretation | None = None,
+    fulltext_sources: dict | None = None,
 ) -> SynthesisResponse:
     """Run section-aware chunking, per-paper functional scoring, notes, and cited synthesis.
 
@@ -490,10 +491,11 @@ def run_synthesis_pipeline(
     for summary in result.paper_summaries:
         paper_id_to_claims[summary.paper_id] = [claim.claim_id for claim in summary.claims]
     resolved_sources = [
-        source.model_copy(
-            update={
+        type(source).model_validate(
+            {**source.model_dump(),
                 "source_path": source_paths[source.paper_id],
                 "claim_ids": paper_id_to_claims.get(source.paper_id, []),
+                "fulltext": (fulltext_sources or {}).get(source.paper_id),
             }
         )
         for source in result.paper_sources

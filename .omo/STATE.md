@@ -1,6 +1,13 @@
-# 專案狀態（盤點日期：2026-10-03）
+# 專案狀態（盤點日期：2026-10-04）
 
-## 2026-10-03：後續概要澄清與規劃 skill 修訂（最新）
+## 2026-10-04：R1 全文來源與版本診斷完成（最新）
+
+- 依使用者「那可以執行」授權完成 R1，主代理自審。保存 identifiers／全部已知全文位置，共用精確 DOI lookup/cache，目標 revision 優先；下載仍須 signature/parser/identity 驗證，實際全文標示 exact/alternative/unknown 並保存 provenance 至 report sources。
+- 新增 run-owned 有界 source/retry budgets、前段 candidate events/records/stage summaries 與失敗 snapshot；不改年份／venue、排名、screening、scoring、notes 品質政策。OpenReview 已知 PDF 可用，未新增其 Note/revision API；任意 publisher revision 無證據則 unknown。
+- 最終隔離離線 suite：679 tests 全通過（新增 R1 tests 58 項），73.274 秒、exit 0。git diff --check 與 key-pattern scan 通過。證據：`.omo/evidence/r1-source-recovery.md`、`r1-verified-full-suite.log`；計畫：`.omo/plans/r1-fulltext-source-recovery.md`。
+- 未執行真實 API／模型、未修改既有 data/輸出或 .env、未提交；保留 Summer_Project.pdf。R2/R3 留待後續；真實取得率與端到端品質尚未驗證。
+
+## 2026-10-03：後續概要澄清與規劃 skill 修訂（歷史）
 
 - 修訂 `.omo/plans/source-recovery-query-and-report-roadmap.md` 的 R3：依研究問題／主題整合多篇證據，不指定單篇主軸；單篇證據不等於領域共識，角色需辨識同篇混合用途及抽樣限制。最新偏好：涵蓋狀況主要供 LLM 生成背景及結構化診斷，正文盡量完整有用，不固定宣告證據不足；結論範圍及重要限制仍忠實證據。已補新對話接續方式；R1/R2/R3 仍是概要，尚未授權實作。
 - 修訂 `.omo/skill-drafts/bounded-plan-review/SKILL.md`，加入按風險檢查代理指標、組織單位、角色／證據邊界、補救位置、下游傳遞與對照情境；保持通用，不固定套用文獻領域規則。

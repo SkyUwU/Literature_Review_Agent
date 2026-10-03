@@ -167,28 +167,47 @@ def query_terms(query: str) -> set[str]:
     }
 
 
-def filter_papers(papers: list[Paper], policy: FilterPolicy) -> list[Paper]:
+def filter_papers(papers: list[Paper], policy: FilterPolicy, *, observer=None, stage='filter', deduplicate=True) -> list[Paper]:
     """Remove unsuitable papers and retain the best-metadata same-title record."""
     by_title: dict[str, Paper] = {}
+    selected = []
     for paper in papers:
         normalized_title = " ".join(paper.title.lower().split())
         citation_count = paper.citation_count or 0
         if policy.min_year is not None and paper.year < policy.min_year:
+            if observer:
+                observer(paper.paper_id, stage, 'excluded', ['year_before_min'])
             continue
         if policy.max_year is not None and paper.year > policy.max_year:
+            if observer:
+                observer(paper.paper_id, stage, 'excluded', ['year_after_max'])
             continue
         if citation_count < policy.min_citation_count:
+            if observer:
+                observer(paper.paper_id, stage, 'excluded', ['citation_below_min'])
             continue
         reported_venues = (
             [venue.name for venue in paper.publication_venues]
             if paper.publication_venues else [paper.venue]
         )
         if policy.venues and not any(_matches_venues(venue, policy.venues) for venue in reported_venues):
+            if observer:
+                observer(paper.paper_id, stage, 'excluded', ['venue_not_allowed'])
+            continue
+        if not deduplicate:
+            selected.append(paper)
             continue
         current = by_title.get(normalized_title)
         if current is None or duplicate_preference_key(paper) > duplicate_preference_key(current):
+            if observer and current is not None:
+                observer(current.paper_id, stage, 'excluded', ['duplicate_title_policy'], related_record_key=paper.paper_id)
             by_title[normalized_title] = paper
-    return list(by_title.values())
+        elif observer:
+            observer(paper.paper_id, stage, 'excluded', ['duplicate_title_policy'], related_record_key=current.paper_id)
+    if observer:
+        for paper in by_title.values() if deduplicate else selected:
+            observer(paper.paper_id, stage, 'retained')
+    return list(by_title.values()) if deduplicate else selected
 
 
 def _matches_venues(venue: str | None, whitelist: tuple[str, ...]) -> bool:

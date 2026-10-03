@@ -30,6 +30,7 @@ import shutil
 import sys
 import time
 import uuid
+from functools import wraps
 from collections.abc import Callable, Iterator
 from datetime import date, datetime
 from pathlib import Path
@@ -38,7 +39,9 @@ from urllib.parse import quote
 from literature_review import pipeline, search, ss_search
 from literature_review import embedding_retriever
 from literature_review.embedding_retriever import Encoder, EmbeddingContext
-from literature_review.diagnostics import RunDiagnosticsCollector, sanitized_error
+from literature_review.diagnostics import RunDiagnosticsCollector, sanitized_error, CandidateDiagnostics, safe_paper
+from literature_review.source_resolution import SourceLookupContext, attach_lookup, source_locations, default_lookup_fetcher
+from literature_review.models import SourceRecoveryPolicy
 from literature_review.extraction import extract_pdf_text
 from literature_review.llm_evidence import (
     DailyQuotaExhausted,
@@ -168,6 +171,8 @@ def backfill_abstracts(
     papers: list[Paper],
     *,
     json_fetcher: search.JsonFetcher = search.fetch_json,
+    source_context: SourceLookupContext | None = None,
+    diagnostics: CandidateDiagnostics | None = None,
 ) -> list[Paper]:
     """Replace placeholder abstracts by looking each paper up in OpenAlex by DOI.
 
@@ -175,6 +180,8 @@ def backfill_abstracts(
     OpenAlex DOI endpoint usually still has one. Papers without a DOI, or whose
     lookup fails, keep the placeholder so the caller can filter them out.
     """
+    context = source_context or SourceLookupContext()
+    lookup_fetcher = default_lookup_fetcher if json_fetcher is search.fetch_json else json_fetcher
     last_request_at = 0.0
     for paper in papers:
         if paper.doi is None or not _needs_abstract(paper):
@@ -183,16 +190,17 @@ def backfill_abstracts(
         if elapsed < BACKFILL_PACE_SECONDS:
             time.sleep(BACKFILL_PACE_SECONDS - elapsed)
         last_request_at = time.monotonic()
-        url = (
-            f"{OPENALEX_DOI_LOOKUP_URL}{quote(paper.doi, safe='')}"
-            "?select=abstract_inverted_index"
-        )
-        try:
-            payload = json_fetcher(url)
-        except Exception as error:
-            print(f"Abstract backfill failed for {paper.doi}: {error}", file=sys.stderr)
+        if diagnostics:
+            diagnostics.stage = 'abstract_backfill'
+        payload = context.lookup_openalex(paper, lookup_fetcher, phase='abstract_backfill')
+        if payload is None:
+            print(f"Abstract backfill failed for {paper.doi}", file=sys.stderr)
             continue
-        abstract = search.reconstruct_abstract(payload.get("abstract_inverted_index"))
+        attach_lookup(paper, payload)
+        try:
+            abstract = search.reconstruct_abstract(payload.get("abstract_inverted_index"))
+        except (ValueError, TypeError, AttributeError, KeyError):
+            abstract = None
         if abstract is not None and len(abstract.strip()) >= 20:
             paper.abstract = abstract
         else:
@@ -208,6 +216,8 @@ def _search_candidates(
     year_from: int,
     year_to: int | None = None,
     venues: tuple[str, ...] = (),
+    source_context: SourceLookupContext | None = None,
+    diagnostics: CandidateDiagnostics | None = None,
 ) -> SearchResponse:
     """Search one query through Semantic Scholar, falling back to OpenAlex.
 
@@ -225,23 +235,38 @@ def _search_candidates(
         year_to=year_to,
         venues=venue_search_names(venues),
     )
+    if diagnostics:
+        diagnostics.current.provider = 'semantic_scholar' if ss_api_key else 'openalex'
     if not ss_api_key:
-        return search.search_papers(request, json_fetcher=json_fetcher)
+        return search.search_papers(request, json_fetcher=json_fetcher, observer=diagnostics.observe if diagnostics else None)
     try:
-        response = ss_search.search_ss(request, api_key=ss_api_key)
+        response = ss_search.search_ss(request, api_key=ss_api_key, observer=diagnostics.observe if diagnostics else None)
     except ss_search.SsSearchError as error:
+        if diagnostics:
+            diagnostics.event(None, 'search', 'fallback', ['provider_request_failed'])
+            diagnostics.begin(query_text, diagnostics.current.round)
+            diagnostics.current.provider = 'openalex'
         print(
             f"Semantic Scholar search failed; falling back to OpenAlex: {error}",
             file=sys.stderr,
         )
-        return search.search_papers(request, json_fetcher=json_fetcher)
+        return search.search_papers(request, json_fetcher=json_fetcher, observer=diagnostics.observe if diagnostics else None)
     if not response.papers:
+        if diagnostics:
+            diagnostics.counts(received=response.total_candidates, normalized=0, abstract_usable=0)
+            diagnostics.event(None, 'search', 'fallback', ['provider_zero_normalized'])
+            diagnostics.begin(query_text, diagnostics.current.round)
+            diagnostics.current.provider = 'openalex'
         print(
             "Semantic Scholar returned no candidates; falling back to OpenAlex.",
             file=sys.stderr,
         )
-        return search.search_papers(request, json_fetcher=json_fetcher)
-    papers = backfill_abstracts(response.papers, json_fetcher=json_fetcher)
+        return search.search_papers(request, json_fetcher=json_fetcher, observer=diagnostics.observe if diagnostics else None)
+    papers = backfill_abstracts(response.papers, json_fetcher=json_fetcher, source_context=source_context, diagnostics=diagnostics)
+    if diagnostics:
+        for paper in papers:
+            diagnostics.event(paper.paper_id, 'abstract_backfill', 'excluded' if _needs_abstract(paper) else 'retained',
+                              ['missing_abstract'] if _needs_abstract(paper) else [])
     papers = [paper for paper in papers if not _needs_abstract(paper)]
     return response.model_copy(
         update={
@@ -264,6 +289,10 @@ def _search_and_rank(
     main_idea: str | None = None, idea_weight: float = 0.5,
     embedding_context: EmbeddingContext | None = None,
     ranking_records: list[dict] | None = None,
+    source_context: SourceLookupContext | None = None,
+    diagnostics: CandidateDiagnostics | None = None,
+    allow_source_lookup: bool = False,
+    round: str = 'initial',
 ) -> list[RankedPaper]:
     """Search one query and rank its candidates, recording paper metadata.
 
@@ -274,6 +303,8 @@ def _search_and_rank(
     request and as the local year backstop. A non-empty ``venues`` whitelist is
     sent to Semantic Scholar and remains a hard local post-filter for every source.
     """
+    if diagnostics:
+        diagnostics.begin(query_text, round)
     effective_year_from = year_from if year_from is not None else default_min_year()
     response = _search_candidates(
         query_text,
@@ -282,14 +313,39 @@ def _search_and_rank(
         year_from=effective_year_from,
         year_to=year_to,
         venues=venues,
+        source_context=source_context, diagnostics=diagnostics,
     )
     after_year = filter_papers(
         response.papers,
         FilterPolicy(min_year=effective_year_from, max_year=year_to),
+        observer=diagnostics.event if diagnostics else None, stage='year', deduplicate=False,
     )
     after_year_venue = filter_papers(
-        after_year, FilterPolicy(venues=venues)
+        after_year, FilterPolicy(venues=venues), observer=diagnostics.event if diagnostics else None, stage='venue', deduplicate=False
     ) if venues else after_year
+    eligible = filter_papers(after_year_venue, FilterPolicy(), observer=diagnostics.event if diagnostics else None, stage='dedup')
+    if diagnostics:
+        diagnostics.current.provider = response.provider
+        diagnostics.current.total_matches = response.total_matches
+        normalized = sum(e.action == 'retained' and e.stage == 'normalization' and e.query_id == diagnostics.current.query_id and e.provider == response.provider for e in diagnostics.output.candidate_events)
+        diagnostics.counts(received=response.total_candidates, normalized=normalized, abstract_usable=len(response.papers),
+                           after_year=len(after_year), after_venue=len(after_year_venue), after_dedup=len(eligible))
+    if allow_source_lookup and source_context:
+        if diagnostics:
+            diagnostics.stage = 'source_resolution'
+        lookup_fetcher = default_lookup_fetcher if json_fetcher is search.fetch_json else json_fetcher
+        for paper in eligible:
+            if not paper.open_access_pdf_url and not any(loc.pdf_url for loc in source_locations(paper)) and paper.doi:
+                payload = source_context.lookup_openalex(paper, lookup_fetcher)
+                attached = attach_lookup(paper, payload) if payload else False
+                if diagnostics:
+                    diagnostics.event(paper.paper_id, 'source_resolution', 'resolved' if attached else 'unresolved',
+                                      [] if attached else ['lookup_identity_unconfirmed'] if payload else ['source_lookup_unavailable'])
+            if diagnostics:
+                diagnostics.output.candidate_records[f'{response.provider}:{paper.paper_id}'] = {
+                    k: v for k, v in safe_paper(paper).items() if k not in {'abstract', 'url'}}
+    if diagnostics:
+        diagnostics.stage = 'ranking'
     ranked = filter_and_rank(
         response,
         FilterPolicy(min_year=effective_year_from, max_year=year_to, venues=venues),
@@ -313,10 +369,36 @@ def _search_and_rank(
         }
     )
     if ranking_records is not None:
-        ranking_records.extend(item.model_dump(mode="json") for item in ranked.ranked_papers)
+        ranking_records.extend({**item.model_dump(mode='json'), 'paper': safe_paper(item.paper)} for item in ranked.ranked_papers)
+    if diagnostics:
+        for item in ranked.ranked_papers:
+            diagnostics.event(item.paper.paper_id, 'ranking', 'retained', score=item.score)
+        diagnostics.counts(ranked=len(ranked.ranked_papers))
     return ranked.ranked_papers
 
 
+def _candidate_run(function):
+    @wraps(function)
+    def wrapped(query, **kwargs):
+        timestamp = kwargs.get('output_timestamp') or datetime.now()
+        directory = kwargs.get('diagnostics_output_dir')
+        callback = (lambda output: save_papers_output(output, output_dir=directory, timestamp=timestamp)) if directory is not None and not kwargs.get('dry_run') else None
+        collector = CandidateDiagnostics(query, on_update=callback)
+        collector.flush()
+        kwargs['output_timestamp'] = timestamp
+        kwargs['_candidate_diagnostics'] = collector
+        try:
+            return function(query, **kwargs)
+        except Exception as error:
+            # Downstream collector may already have preserved a more precise failed stage.
+            if collector.output.run.get('status') != 'failed':
+                collector.output.run.update(status='failed', failed_stage=collector.stage, error=sanitized_error(error))
+                collector.flush()
+            raise
+    return wrapped
+
+
+@_candidate_run
 def run_end_to_end(
     query: str,
     *,
@@ -340,6 +422,8 @@ def run_end_to_end(
     notes_checkpoint_dir: Path | None = None,
     diagnostics_output_dir: str | Path | None = None,
     output_timestamp: datetime | None = None,
+    source_recovery_policy: SourceRecoveryPolicy | None = None,
+    _candidate_diagnostics: CandidateDiagnostics | None = None,
 ) -> dict[str, object]:
     """Run one full literature-review cycle for a bare query.
 
@@ -378,7 +462,12 @@ def run_end_to_end(
     downloading unscreened candidates; a failed gap follow-up call also aborts
     rather than keeping incomplete screening decisions.
     """
+    candidate_diagnostics = _candidate_diagnostics or CandidateDiagnostics(query)
+    source_context = SourceLookupContext(source_recovery_policy)
+    candidate_diagnostics.source_context = source_context
+    source_context.on_update = candidate_diagnostics.flush
     plan = _make_plan(query, use_llm_plan=use_llm_plan, client_plan=client_plan)
+    candidate_diagnostics.output.run['search_plan'] = plan.model_dump(mode='json')
     _print_plan(plan)
     already_downloaded: set[str] = set()
     paper_meta: dict[str, tuple[int | None, str | None]] = {}
@@ -403,22 +492,54 @@ def run_end_to_end(
     downloaded_papers: dict[str, Paper] = {}
     paper_priority: dict[str, str] = {}
     download_attempts = []
+    fulltext_sources = {}
     doi_cache: dict = {}
     attempted_download_keys: set[str] = set()
     snapshot_timestamp = output_timestamp or datetime.now()
 
     def record_download_attempt(attempt):
         download_attempts.append(attempt)
-        if diagnostics_output_dir is not None and not dry_run:
-            # Independent of dispositions: failed candidates have no downloaded entry.
-            snapshot = _make_papers_output(
-                query, plan, follow_ups, stats_per_query, [], downloads,
-                downloaded_papers, paper_queries, paper_priority,
-                ranking_records=ranking_records, download_attempts=list(download_attempts),
-            )
-            snapshot.run.update(status="running", stage="download")
-            save_papers_output(snapshot, output_dir=diagnostics_output_dir,
-                               timestamp=snapshot_timestamp)
+        candidate_diagnostics.stage = 'download'
+        candidate_diagnostics.output.download_attempts = list(download_attempts)
+        if attempt.fulltext:
+            fulltext_sources[attempt.paper_id] = attempt.fulltext
+        for summary in candidate_diagnostics.output.stage_summaries:
+            if any(e.paper_id == attempt.paper_id and e.query_id == summary.query_id for e in candidate_diagnostics.output.candidate_events):
+                candidate_diagnostics.current = summary
+                candidate_diagnostics.event(attempt.paper_id, 'download', 'retained' if attempt.reason_code == 'downloaded' else 'observed', [attempt.reason_code])
+                summary.counts['download_attempted'] = len({a.paper_id for a in download_attempts if a.source not in {'selection', 'dedup'} and any(e.paper_id == a.paper_id and e.query_id == summary.query_id for e in candidate_diagnostics.output.candidate_events)})
+                summary.counts['download_valid'] = len({a.paper_id for a in download_attempts if a.reason_code == 'downloaded' and any(e.paper_id == a.paper_id and e.query_id == summary.query_id for e in candidate_diagnostics.output.candidate_events)})
+        candidate_diagnostics.flush()
+
+    def record_progress(result):
+        for paper_id, path in zip(result.downloaded_paper_ids, result.downloaded_paths):
+            if not any(entry.paper.paper_id == paper_id for entry in candidate_diagnostics.output.papers):
+                original = candidate_papers.get(paper_id)
+                if original:
+                    candidate_diagnostics.output.papers.append(DownloadedPaperEntry(paper=Paper.model_validate(safe_paper(original)),
+                        query=paper_queries.get(paper_id) or query, local_path=str(path), priority=paper_priority.get(paper_id), fulltext=fulltext_sources.get(paper_id)))
+        candidate_diagnostics.flush()
+
+    candidate_papers = {}
+
+    def sample_record(ranked, query_text):
+        candidate_diagnostics.stage = 'sampling_candidates'
+        sampled = sample_candidates(ranked)
+        ids = {i.paper.paper_id for i in sampled.papers}
+        for item in ranked:
+            candidate_papers[item.paper.paper_id] = item.paper
+            candidate_diagnostics.event(item.paper.paper_id, 'sampling_candidates', 'retained' if item.paper.paper_id in ids else 'excluded',
+                [] if item.paper.paper_id in ids else ['not_sampled'], bucket=sampled.buckets.get(item.paper.paper_id))
+        candidate_diagnostics.counts(sampled=len(sampled.papers))
+        return sampled
+
+    def record_screening(result, round):
+        for query_text, decisions in result.decisions.items():
+            candidate_diagnostics.activate(query_text, round)
+            for decision in decisions:
+                candidate_diagnostics.event(decision.paper_id, 'screening', 'excluded' if decision.priority == 'reject' else 'retained',
+                    ['screening_reject'] if decision.priority == 'reject' else [], priority=decision.priority)
+            candidate_diagnostics.counts(**{f'screened_{p}': sum(d.priority == p for d in decisions) for p in ('keep', 'maybe', 'reject')})
 
     def _download_per_query(
         produce: Callable[[], Iterator[tuple[str, list[RankedPaper]]]],
@@ -431,6 +552,8 @@ def run_end_to_end(
         """
         target_n = math.ceil(TOTAL_TARGET / len(plan.queries))
         for query_text, ranked_papers in produce():
+            candidate_papers.update({item.paper.paper_id: item.paper for item in ranked_papers})
+            paper_queries.update({item.paper.paper_id: query_text for item in ranked_papers})
             result = download_and_backfill(
                 ranked_papers,
                 dest_dir,
@@ -439,6 +562,7 @@ def run_end_to_end(
                 already_downloaded=already_downloaded,
                 on_attempt=record_download_attempt,
                 already_attempted=attempted_download_keys,
+                on_progress=record_progress, source_context=source_context,
             )
             stats_per_query.append(result.stats.to_dict())
             for paper_id in result.downloaded_paper_ids:
@@ -473,14 +597,16 @@ def run_end_to_end(
                 year_from=year_from,
                 year_to=year_to,
                 venues=venues,
+                source_context=source_context, diagnostics=candidate_diagnostics, allow_source_lookup=True,
             )
-            query_candidates[planned.query] = sample_candidates(ranked_candidates)
+            query_candidates[planned.query] = sample_record(ranked_candidates, planned.query)
             print(
                 f"[screening] query={json.dumps(planned.query, ensure_ascii=False)} "
                 f"ranked={len(ranked_candidates)} sampled={len(query_candidates[planned.query].papers)}",
                 file=sys.stderr,
             )
         try:
+            candidate_diagnostics.stage = 'screening'
             screening_result = screen_candidates(
                 query_candidates, client_screen, main_query=query,
                 task_interpretation=plan.task_interpretation,
@@ -493,6 +619,7 @@ def run_end_to_end(
             )
             raise
         else:
+            record_screening(screening_result, 'initial')
             follow_up_queries = {
                 fu.query for fu in screening_result.gap.follow_up_queries
             }
@@ -518,14 +645,16 @@ def run_end_to_end(
                         year_from=year_from,
                         year_to=year_to,
                         venues=venues,
+                        source_context=source_context, diagnostics=candidate_diagnostics, allow_source_lookup=True, round='follow_up',
                     )
-                    follow_up_candidates[fu.query] = sample_candidates(ranked_candidates)
+                    follow_up_candidates[fu.query] = sample_record(ranked_candidates, fu.query)
                     print(
                         f"[screening] query={json.dumps(fu.query, ensure_ascii=False)} "
                         f"ranked={len(ranked_candidates)} sampled={len(follow_up_candidates[fu.query].papers)}",
                         file=sys.stderr,
                     )
                 try:
+                    candidate_diagnostics.stage = 'screening'
                     follow_up_screening = screen_candidates(
                         follow_up_candidates, client_screen, main_query=query,
                         task_interpretation=plan.task_interpretation,
@@ -538,6 +667,7 @@ def run_end_to_end(
                     )
                     raise
                 else:
+                    record_screening(follow_up_screening, 'follow_up')
                     for follow_up_query, decisions in follow_up_screening.decisions.items():
                         screening_result.decisions.setdefault(follow_up_query, []).extend(decisions)
 
@@ -575,6 +705,13 @@ def run_end_to_end(
             paper_priority = {
                 item.paper.paper_id: "keep" for item in keep_ranked
             } | {item.paper.paper_id: "maybe" for item in maybe_ranked}
+            for summary in candidate_diagnostics.output.stage_summaries:
+                candidate_diagnostics.current = summary
+                selected = [pid for pid in paper_priority if any(e.paper_id == pid and e.query_id == summary.query_id and e.stage == 'screening' and e.action == 'retained' for e in candidate_diagnostics.output.candidate_events)]
+                for pid in selected:
+                    candidate_diagnostics.event(pid, 'download_selection', 'retained', priority=paper_priority[pid])
+                candidate_diagnostics.counts(download_selected=len(selected))
+            candidate_diagnostics.stage = 'download'
 
             result = download_and_backfill(
                 [],
@@ -588,6 +725,7 @@ def run_end_to_end(
                 doi_cache=doi_cache,
                 on_attempt=record_download_attempt,
                 already_attempted=attempted_download_keys,
+                source_context=source_context, on_progress=record_progress,
             )
             stats_per_query.append(result.stats.to_dict())
             downloaded_ids = set(result.downloaded_paper_ids)
@@ -621,6 +759,7 @@ def run_end_to_end(
                     year_from=year_from,
                     year_to=year_to,
                     venues=venues,
+                    source_context=source_context, diagnostics=candidate_diagnostics,
                 )
 
         _download_per_query(_search_then_download)
@@ -646,6 +785,7 @@ def run_end_to_end(
             "papers": papers_output,
             "dry_run": True,
         }
+        candidate_diagnostics.adopt(papers_output)
         if screening_result is not None:
             output["screening"] = screening_result.model_dump(mode="json")
             output["follow_ups"] = follow_ups
@@ -663,6 +803,11 @@ def run_end_to_end(
             output, output_dir=diagnostics_output_dir, timestamp=snapshot_timestamp
         )) if diagnostics_output_dir is not None else None,
     )
+    candidate_diagnostics.stage = 'extraction'
+    candidate_diagnostics.adopt(papers_output)
+    diagnostics.run.run_id = papers_output.run['run_id']
+    for entry in papers_output.papers:
+        entry.fulltext = fulltext_sources.get(entry.paper.paper_id)
     diagnostics.flush()
     diagnostics.enter("extraction")
     try:
@@ -703,6 +848,7 @@ def run_end_to_end(
             notes_checkpoint_dir=notes_checkpoint_dir,
             diagnostics=diagnostics,
             task_interpretation=plan.task_interpretation,
+            fulltext_sources=fulltext_sources,
         )
     except Exception as error:
         diagnostics.fail(error)
@@ -758,18 +904,11 @@ def _make_papers_output(
             continue
         entries.append(
             DownloadedPaperEntry(
-                paper=Paper.model_validate({
-                    **paper.model_dump(mode="json"),
-                    "url": sanitize_url(str(paper.url)),
-                    "open_access_pdf_url": sanitize_url(str(paper.open_access_pdf_url)) if paper.open_access_pdf_url else None,
-                    "publication_venues": [
-                        {**venue.model_dump(), "source_url": sanitize_url(venue.source_url)}
-                        for venue in paper.publication_venues
-                    ],
-                }),
+                paper=Paper.model_validate(safe_paper(paper)),
                 query=query_text,
                 local_path=entry["path"],
                 priority=paper_priority.get(paper_id),
+                fulltext=next((a.fulltext for a in reversed(download_attempts or []) if a.paper_id == paper_id and a.fulltext), None),
             )
         )
     return PapersOutput(
